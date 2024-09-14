@@ -187,6 +187,50 @@ int ipe_kernel_load_data(enum kernel_load_data_id id, bool contents)
 }
 
 /**
+ * ipe_file_open: LSM hook called on file_open.
+ * @f: file struct created during open
+ *
+ * For more information, see the LSM hook, security_file_open.
+ *
+ * Return:
+ * 0 - OK
+ */
+int ipe_file_open(struct file *f)
+{
+	struct ipe_eval_ctx ctx = IPE_EVAL_CTX_INIT;
+
+	/* The goal for this hook is to implement integrity checks for config
+	 * reads. We allow writing files atomically (O_TMPFILE) in place, so
+	 * that they can be created and immediately protected with fsverity.
+	 * We allow reading directories and resolving symlinks. We allow O_PATH
+	 * FDs too, as they are not used to read content. This way config files
+	 * can be reasonably deployed and protected, but we intervene when they
+	 * are actually consumed and ensure integrity proections are in place.
+	 */
+
+	if (!f->f_mode & FMODE_READ)
+		return 0;
+
+	if (f->f_mode & FMODE_EXEC)
+		return 0;
+
+	if (f->f_flags & __O_TMPFILE)
+		return 0;
+
+	if (f->f_flags & O_DIRECTORY)
+		return 0;
+
+	if (f->f_flags & O_PATH)
+		return 0;
+
+	if (S_ISLNK(f->f_inode->i_mode))
+		return 0;
+
+	ipe_build_eval_ctx(&ctx, f, IPE_OP_READ, IPE_HOOK_OPEN);
+	return ipe_evaluate_event(&ctx);
+}
+
+/**
  * ipe_unpack_initramfs() - Mark the current rootfs as initramfs.
  */
 void ipe_unpack_initramfs(void)
@@ -312,3 +356,38 @@ int ipe_inode_setintegrity(const struct inode *inode,
 	return -EINVAL;
 }
 #endif /* CONFIG_CONFIG_IPE_PROP_FS_VERITY_BUILTIN_SIG */
+
+#ifdef CONFIG_IPE_PROP_INTENDED_PATHNAME
+/**
+ * ipe_file_free_security: LSM hook called on deallocation of a file.
+ * @f: file struct to free internal data from.
+ */
+void ipe_file_free_security(struct file *f)
+{
+	struct ipe_file *fp = ipe_file(f);
+
+	kfree(fp->open_path);
+}
+
+/**
+ * ipe_file_set_userspace_pathname: Allocates a copy of the application provided
+ *                                 file path into the file security blob.
+ * @f: The file structure to source the security blob from.
+ * @path: the filename structure to obtain the application path from.
+ *
+ * The deallocation of the copy is performed in ipe_file_free_security.
+ *
+ * Return:
+ * 0 - OK
+ * -ENOMEM - Out of Memory
+ */
+int ipe_file_set_userspace_pathname(struct file *f, const struct filename *path)
+{
+	struct ipe_file *fp = ipe_file(f);
+
+	fp->open_path = kstrdup_const(path->name, GFP_KERNEL);
+	if (!fp->open_path)
+		return -ENOMEM;
+	return 0;
+}
+#endif /* CONFIG_IPE_PROP_INTENDED_PATHNAME */

@@ -12,6 +12,7 @@ menuconfig SECURITY_IPE
 	select IPE_PROP_DM_VERITY_SIGNATURE if DM_VERITY && DM_VERITY_VERIFY_ROOTHASH_SIG
 	select IPE_PROP_FS_VERITY if FS_VERITY
 	select IPE_PROP_FS_VERITY_BUILTIN_SIG if FS_VERITY && FS_VERITY_BUILTIN_SIGNATURES
+	select IPE_PROP_INTENDED_PATHNAME
 	help
 	  This option enables the Integrity Policy Enforcement LSM
 	  allowing users to define a policy to enforce a trust-based access
@@ -93,6 +94,19 @@ config IPE_PROP_FS_VERITY_BUILTIN_SIG
 	  is in the .fs-verity keyring.
 
 	  if unsure, answer Y.
+
+config IPE_PROP_INTENDED_PATHNAME
+	bool "Enable property for targeting applications based on application provided-path"
+	help
+	  This option enables IPE's "intended_pathname" property. This is the
+	  original userland, application-provided pathname passed to any open
+	  system call. This can be used by the userland application to signal
+	  its purpose to enforce integrity requirements on paths, such as
+	  verifying all config files in /etc.
+	  WARNING: intended_pathname is not a security property and should
+	  only be used for targeting an application via its intent to open
+	  a file.
+	  if unsure, answer N.
 
 endmenu
 

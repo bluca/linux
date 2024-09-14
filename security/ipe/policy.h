@@ -9,6 +9,7 @@
 #include <linux/types.h>
 #include <linux/fs.h>
 
+/*kernel read is an alias op which cannot be saved in a rule*/
 enum ipe_op_type {
 	IPE_OP_EXEC = 0,
 	IPE_OP_FIRMWARE,
@@ -17,10 +18,16 @@ enum ipe_op_type {
 	IPE_OP_KEXEC_INITRAMFS,
 	IPE_OP_POLICY,
 	IPE_OP_X509,
+	IPE_OP_READ,
 	__IPE_OP_MAX,
+	IPE_OP_KERNEL_READ,
 };
 
 #define IPE_OP_INVALID __IPE_OP_MAX
+
+#define KERNEL_READ_OPS_NUM 6
+
+extern enum ipe_op_type kernel_read_ops[KERNEL_READ_OPS_NUM];
 
 enum ipe_action_type {
 	IPE_ACTION_ALLOW = 0,
@@ -39,6 +46,7 @@ enum ipe_prop_type {
 	IPE_PROP_FSV_DIGEST,
 	IPE_PROP_FSV_SIG_FALSE,
 	IPE_PROP_FSV_SIG_TRUE,
+	IPE_PROP_INTENDED_PATHNAME,
 	__IPE_PROP_MAX
 };
 
