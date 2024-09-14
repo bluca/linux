@@ -437,6 +437,7 @@ int security_file_receive(struct file *file);
 int security_file_open(struct file *file);
 int security_file_post_open(struct file *file, int mask);
 int security_file_truncate(struct file *file);
+int security_file_set_userspace_pathname(struct file *file, const struct filename *name);
 int security_task_alloc(struct task_struct *task, unsigned long clone_flags);
 void security_task_free(struct task_struct *task);
 int security_cred_alloc_blank(struct cred *cred, gfp_t gfp);
@@ -1134,6 +1135,11 @@ static inline int security_file_post_open(struct file *file, int mask)
 }
 
 static inline int security_file_truncate(struct file *file)
+{
+	return 0;
+}
+
+static inline int security_file_set_userspace_pathname(struct file *file, const struct filename *name)
 {
 	return 0;
 }
