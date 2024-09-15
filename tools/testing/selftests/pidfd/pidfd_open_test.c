@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syscall.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
@@ -20,6 +21,14 @@
 
 #include "pidfd.h"
 #include "../kselftest.h"
+
+#ifndef PIDFS_IOCTL_MAGIC
+#define PIDFS_IOCTL_MAGIC 0xFF
+#endif
+
+#ifndef PIDFD_GET_PID
+#define PIDFD_GET_PID _IOR(PIDFS_IOCTL_MAGIC, 11, int)
+#endif
 
 static int safe_int(const char *numstr, int *converted)
 {
@@ -121,9 +130,9 @@ out:
 int main(int argc, char **argv)
 {
 	int pidfd = -1, ret = 1;
-	pid_t pid;
+	pid_t pid, pid_from_ioctl;
 
-	ksft_set_plan(3);
+	ksft_set_plan(4);
 
 	pidfd = sys_pidfd_open(-1, 0);
 	if (pidfd >= 0) {
@@ -152,6 +161,17 @@ int main(int argc, char **argv)
 
 	pid = get_pid_from_fdinfo_file(pidfd, "Pid:", sizeof("Pid:") - 1);
 	ksft_print_msg("pidfd %d refers to process with pid %d\n", pidfd, pid);
+
+	if (ioctl(pidfd, PIDFD_GET_PID, &pid_from_ioctl) < 0) {
+		ksft_print_msg("%s - failed to get pid from pidfd\n", strerror(errno));
+		goto on_error;
+	}
+	if (pid != pid_from_ioctl) {
+		ksft_print_msg("pid from fdinfo file %d does not match pid from ioctl %d\n",
+			       pid, pid_from_ioctl);
+		goto on_error;
+	}
+	ksft_test_result_pass("get pid from pidfd test: passed\n");
 
 	ret = 0;
 

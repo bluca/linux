@@ -121,12 +121,20 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct pid *pid = pidfd_pid(file);
 	struct ns_common *ns_common = NULL;
 
-	if (arg)
+	if (!!arg != (cmd == PIDFD_GET_PID))
 		return -EINVAL;
 
 	task = get_pid_task(pid, PIDTYPE_PID);
 	if (!task)
 		return -ESRCH;
+
+	/* These do not require fiddling with namespaces, so take a shortcut */
+	if (cmd == PIDFD_GET_PID) {
+		pid_t pid_nr = pid_nr_ns(pid, task_active_pid_ns(task));
+		if (copy_to_user((void __user *)arg, &pid_nr, sizeof(pid_t)))
+			return -EFAULT;
+		return 0;
+	}
 
 	scoped_guard(task_lock, task) {
 		nsp = task->nsproxy;
