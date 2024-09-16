@@ -121,7 +121,7 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct pid *pid = pidfd_pid(file);
 	struct ns_common *ns_common = NULL;
 
-	if (!!arg != (cmd == PIDFD_GET_PID))
+	if (!!arg != (cmd == PIDFD_GET_PID || cmd == PIDFD_GET_CREDS))
 		return -EINVAL;
 
 	task = get_pid_task(pid, PIDTYPE_PID);
@@ -132,6 +132,20 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (cmd == PIDFD_GET_PID) {
 		pid_t pid_nr = pid_nr_ns(pid, task_active_pid_ns(task));
 		if (copy_to_user((void __user *)arg, &pid_nr, sizeof(pid_t)))
+			return -EFAULT;
+		return 0;
+	} else if (cmd == PIDFD_GET_CREDS) {
+		const struct cred *c = get_task_cred(task);
+		if (!c)
+			return -ESRCH;
+
+		struct ucred u = {
+			.pid = pid_nr_ns(pid, task_active_pid_ns(task)),
+			.uid = from_kuid_munged(current_user_ns(), c->uid),
+			.gid = from_kgid_munged(current_user_ns(), c->gid),
+		};
+
+		if (copy_to_user((void __user *)arg, &u, sizeof(struct ucred)))
 			return -EFAULT;
 		return 0;
 	}

@@ -16,6 +16,7 @@
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -28,6 +29,10 @@
 
 #ifndef PIDFD_GET_PID
 #define PIDFD_GET_PID _IOR(PIDFS_IOCTL_MAGIC, 11, int)
+#endif
+
+#ifndef PIDFD_GET_CREDS
+#define PIDFD_GET_CREDS _IOR(PIDFS_IOCTL_MAGIC, 12, struct ucred)
 #endif
 
 static int safe_int(const char *numstr, int *converted)
@@ -131,8 +136,9 @@ int main(int argc, char **argv)
 {
 	int pidfd = -1, ret = 1;
 	pid_t pid, pid_from_ioctl;
+	struct ucred ucred;
 
-	ksft_set_plan(4);
+	ksft_set_plan(5);
 
 	pidfd = sys_pidfd_open(-1, 0);
 	if (pidfd >= 0) {
@@ -172,6 +178,27 @@ int main(int argc, char **argv)
 		goto on_error;
 	}
 	ksft_test_result_pass("get pid from pidfd test: passed\n");
+
+	if (ioctl(pidfd, PIDFD_GET_CREDS, &ucred) < 0) {
+		ksft_print_msg("%s - failed to get creds from pidfd\n", strerror(errno));
+		goto on_error;
+	}
+	if (ucred.pid != pid) {
+		ksft_print_msg("pid %d does not match pid from creds %d\n",
+			       pid, ucred.pid);
+		goto on_error;
+	}
+	if (ucred.uid != getuid()) {
+		ksft_print_msg("uid %d does not match uid from creds %d\n",
+			       getuid(), ucred.uid);
+		goto on_error;
+	}
+	if (ucred.gid != getgid()) {
+		ksft_print_msg("gid %d does not match gid from creds %d\n",
+			       getgid(), ucred.gid);
+		goto on_error;
+	}
+	ksft_test_result_pass("get creds from pidfd test: passed\n");
 
 	ret = 0;
 

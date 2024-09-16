@@ -6,6 +6,7 @@
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/ioctl.h>
+#include <linux/socket.h>
 
 /* Flags for pidfd_open().  */
 #define PIDFD_NONBLOCK	O_NONBLOCK
@@ -29,5 +30,6 @@
 #define PIDFD_GET_USER_NAMESPACE              _IO(PIDFS_IOCTL_MAGIC, 9)
 #define PIDFD_GET_UTS_NAMESPACE               _IO(PIDFS_IOCTL_MAGIC, 10)
 #define PIDFD_GET_PID                         _IOR(PIDFS_IOCTL_MAGIC, 11, int)
+#define PIDFD_GET_CREDS                       _IOR(PIDFS_IOCTL_MAGIC, 12, struct ucred)
 
 #endif /* _UAPI_LINUX_PIDFD_H */
