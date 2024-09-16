@@ -35,6 +35,10 @@
 #define PIDFD_GET_CREDS _IOR(PIDFS_IOCTL_MAGIC, 12, struct ucred)
 #endif
 
+#ifndef PIDFD_GET_CGROUPID
+#define PIDFD_GET_CGROUPID _IOR(PIDFS_IOCTL_MAGIC, 13, u64)
+#endif
+
 static int safe_int(const char *numstr, int *converted)
 {
 	char *err = NULL;
@@ -137,6 +141,7 @@ int main(int argc, char **argv)
 	int pidfd = -1, ret = 1;
 	pid_t pid, pid_from_ioctl;
 	struct ucred ucred;
+	uint64_t cgroupid;
 
 	ksft_set_plan(5);
 
@@ -199,6 +204,12 @@ int main(int argc, char **argv)
 		goto on_error;
 	}
 	ksft_test_result_pass("get creds from pidfd test: passed\n");
+
+	if (ioctl(pidfd, PIDFD_GET_CGROUPID, &cgroupid) < 0) {
+		ksft_print_msg("%s - failed to get cgroupid from pidfd\n", strerror(errno));
+		goto on_error;
+	}
+	ksft_test_result_pass("cgroupid from pidfd: %" PRIu64 "\n", cgroupid);
 
 	ret = 0;
 

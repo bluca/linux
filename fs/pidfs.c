@@ -121,7 +121,7 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct pid *pid = pidfd_pid(file);
 	struct ns_common *ns_common = NULL;
 
-	if (!!arg != (cmd == PIDFD_GET_PID || cmd == PIDFD_GET_CREDS))
+	if (!!arg != (cmd == PIDFD_GET_PID || cmd == PIDFD_GET_CREDS || cmd == PIDFD_GET_CGROUPID))
 		return -EINVAL;
 
 	task = get_pid_task(pid, PIDTYPE_PID);
@@ -146,6 +146,18 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		};
 
 		if (copy_to_user((void __user *)arg, &u, sizeof(struct ucred)))
+			return -EFAULT;
+		return 0;
+	} else if (cmd == PIDFD_GET_CGROUPID) {
+		struct cgroup *cgrp;
+		u64 cgid;
+
+		cgrp = task_css_check(task, pids_cgrp_id, 1)->cgroup;
+		if (!cgrp)
+			return -ENODEV;
+
+		cgid = cgroup_id(cgrp);
+		if (copy_to_user((void __user *)arg, &cgid, sizeof(u64)))
 			return -EFAULT;
 		return 0;
 	}
