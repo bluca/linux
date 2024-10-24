@@ -65,6 +65,14 @@ struct pidfd_info {
 	__u32 spare0[1];
 };
 
+#define PIDFD_SECURITY_SIZE_VER0		8 /* sizeof first published struct */
+
+struct pidfd_security {
+	/* This mask follows the same rules as pidfd_info.mask. */
+	__u64 mask;
+	// TODO: add data fields and flags and increase size defined above
+};
+
 #define PIDFS_IOCTL_MAGIC 0xFF
 
 #define PIDFD_GET_CGROUP_NAMESPACE            _IO(PIDFS_IOCTL_MAGIC, 1)
@@ -78,5 +86,6 @@ struct pidfd_info {
 #define PIDFD_GET_USER_NAMESPACE              _IO(PIDFS_IOCTL_MAGIC, 9)
 #define PIDFD_GET_UTS_NAMESPACE               _IO(PIDFS_IOCTL_MAGIC, 10)
 #define PIDFD_GET_INFO                        _IOWR(PIDFS_IOCTL_MAGIC, 11, struct pidfd_info)
+#define PIDFD_GET_SECURITY                    _IOWR(PIDFS_IOCTL_MAGIC, 12, struct pidfd_security)
 
 #endif /* _UAPI_LINUX_PIDFD_H */

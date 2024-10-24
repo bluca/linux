@@ -115,6 +115,35 @@ static __poll_t pidfd_poll(struct file *file, struct poll_table_struct *pts)
 	return poll_flags;
 }
 
+static long pidfd_security(struct task_struct *task, unsigned int cmd, unsigned long arg)
+{
+	struct pidfd_security __user *usecurity = (struct pidfd_security __user *)arg;
+	size_t usize = _IOC_SIZE(cmd);
+	struct pidfd_security ksecurity = {};
+	__u64 mask;
+
+	if (!usecurity)
+		return -EINVAL;
+	if (usize < PIDFD_SECURITY_SIZE_VER0)
+		return -EINVAL; /* First version, no smaller struct possible */
+
+	if (copy_from_user(&mask, &usecurity->mask, sizeof(mask)))
+		return -EFAULT;
+
+	// TODO: fill in ksecurity
+
+	/*
+	 * If userspace and the kernel have the same struct size it can just
+	 * be copied. If userspace provides an older struct, only the bits that
+	 * userspace knows about will be copied. If userspace provides a new
+	 * struct, only the bits that the kernel knows about will be copied.
+	 */
+	if (copy_to_user(usecurity, &ksecurity, min(usize, sizeof(ksecurity))))
+		return -EFAULT;
+
+	return 0;
+}
+
 static long pidfd_info(struct task_struct *task, unsigned int cmd, unsigned long arg)
 {
 	struct pidfd_info __user *uinfo = (struct pidfd_info __user *)arg;
@@ -209,9 +238,11 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!task)
 		return -ESRCH;
 
-	/* Extensible IOCTL that does not open namespace FDs, take a shortcut */
+	/* Extensible IOCTLs that do not open namespace FDs, take a shortcut */
 	if (_IOC_NR(cmd) == _IOC_NR(PIDFD_GET_INFO))
 		return pidfd_info(task, cmd, arg);
+	if (_IOC_NR(cmd) == _IOC_NR(PIDFD_GET_SECURITY))
+		return pidfd_security(task, cmd, arg);
 
 	if (arg)
 		return -EINVAL;
