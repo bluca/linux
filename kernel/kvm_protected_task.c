@@ -191,5 +191,5 @@ bool kvm_protected_task_run(struct pt_regs *regs)
 
 void kvm_protected_task_exit(struct task_struct *task)
 {
-	kvm_protected_task_cleanup_active(task);
+	kvm_protected_task_cleanup(task);
 }
