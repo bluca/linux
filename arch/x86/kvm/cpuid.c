@@ -1974,14 +1974,42 @@ static bool sanity_check_entries(struct kvm_cpuid_entry2 __user *entries,
 	return false;
 }
 
+static const u32 kvm_supported_cpuid_funcs[] = {
+	0, 0x80000000, CENTAUR_CPUID_SIGNATURE, KVM_CPUID_SIGNATURE,
+};
+
+int kvm_vcpu_set_supported_cpuid(struct kvm_vcpu *vcpu)
+{
+	struct kvm_cpuid_array array = {
+		.entries = kvzalloc_objs(struct kvm_cpuid_entry2,
+					 KVM_MAX_CPUID_ENTRIES),
+		.maxnent = KVM_MAX_CPUID_ENTRIES,
+	};
+	int i, ret;
+
+	if (!array.entries)
+		return -ENOMEM;
+
+	for (i = 0; i < ARRAY_SIZE(kvm_supported_cpuid_funcs); i++) {
+		ret = get_cpuid_func(&array, kvm_supported_cpuid_funcs[i],
+				     KVM_GET_SUPPORTED_CPUID);
+		if (ret)
+			goto free_entries;
+	}
+
+	ret = kvm_set_cpuid(vcpu, array.entries, array.nent);
+	if (!ret)
+		return 0;
+
+free_entries:
+	kvfree(array.entries);
+	return ret;
+}
+
 int kvm_dev_ioctl_get_cpuid(struct kvm_cpuid2 *cpuid,
 			    struct kvm_cpuid_entry2 __user *entries,
 			    unsigned int type)
 {
-	static const u32 funcs[] = {
-		0, 0x80000000, CENTAUR_CPUID_SIGNATURE, KVM_CPUID_SIGNATURE,
-	};
-
 	struct kvm_cpuid_array array = {
 		.nent = 0,
 	};
@@ -2001,8 +2029,8 @@ int kvm_dev_ioctl_get_cpuid(struct kvm_cpuid2 *cpuid,
 
 	array.maxnent = cpuid->nent;
 
-	for (i = 0; i < ARRAY_SIZE(funcs); i++) {
-		r = get_cpuid_func(&array, funcs[i], type);
+	for (i = 0; i < ARRAY_SIZE(kvm_supported_cpuid_funcs); i++) {
+		r = get_cpuid_func(&array, kvm_supported_cpuid_funcs[i], type);
 		if (r)
 			goto out_free;
 	}
