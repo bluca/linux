@@ -776,12 +776,14 @@ static int FNAME(fetch)(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault,
 	if (WARN_ON_ONCE(it.level != fault->goal_level))
 		return -EFAULT;
 
-	ret = mmu_set_spte(vcpu, fault->slot, it.sptep, gw->pte_access,
+	ret = mmu_set_spte(vcpu, fault->slot, it.sptep,
+			   gw->pte_access & fault->max_access,
 			   base_gfn, fault->pfn, fault);
 	if (ret == RET_PF_SPURIOUS)
 		return ret;
 
-	FNAME(pte_prefetch)(vcpu, gw, it.sptep);
+	if (!vcpu->kvm->protected_task)
+		FNAME(pte_prefetch)(vcpu, gw, it.sptep);
 	return ret;
 }
 

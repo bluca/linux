@@ -3275,6 +3275,20 @@ int expand_downwards(struct vm_area_struct *vma, unsigned long address)
 	return error;
 }
 
+bool vma_range_needs_protected_task_update(struct mm_struct *mm,
+					   unsigned long start,
+					   unsigned long end)
+{
+	struct vm_area_struct *vma;
+	VMA_ITERATOR(vmi, mm, start);
+
+	mmap_assert_write_locked(mm);
+	for_each_vma_range(vmi, vma, end)
+		if (vma_pkey(vma) || (vma->vm_flags & VM_SHADOW_STACK))
+			return true;
+	return false;
+}
+
 int __vm_munmap(unsigned long start, size_t len, bool unlock)
 {
 	int ret;

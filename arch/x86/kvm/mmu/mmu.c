@@ -3234,6 +3234,9 @@ static void direct_pte_prefetch(struct kvm_vcpu *vcpu, u64 *sptep)
 {
 	struct kvm_mmu_page *sp;
 
+	if (unlikely(vcpu->kvm->protected_task))
+		return;
+
 	sp = sptep_to_sp(sptep);
 
 	/*
@@ -3496,7 +3499,7 @@ static int direct_map(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault)
 
 	kvm_mmu_hugepage_adjust(vcpu, fault);
 
-	access = vcpu->arch.mmu->root_role.access;
+	access = vcpu->arch.mmu->root_role.access & fault->max_access;
 	trace_kvm_mmu_spte_requested(fault, access);
 	for_each_shadow_entry(vcpu, fault->addr, it) {
 		/*
@@ -3719,6 +3722,9 @@ static int fast_page_fault(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault)
 	u64 spte;
 	u64 *sptep;
 	uint retry_count = 0;
+
+	if (unlikely(vcpu->kvm->protected_task))
+		return ret;
 
 	if (!page_fault_can_be_fast(vcpu->kvm, fault))
 		return ret;
@@ -4706,6 +4712,7 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 {
 	unsigned long address = fault->gfn << PAGE_SHIFT;
 	struct vm_area_struct *vma;
+	u8 access = ACC_USER_MASK;
 	bool allowed;
 
 	if (fault->slot &&
@@ -4716,12 +4723,28 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 	vma = vma_lookup(vcpu->kvm->mm, address);
 	if (!vma)
 		allowed = false;
-	else if (fault->exec)
-		allowed = vma->vm_flags & VM_EXEC;
-	else if (fault->write)
-		allowed = vma->vm_flags & VM_WRITE;
-	else
-		allowed = vma->vm_flags & VM_READ;
+	else {
+		if (vma->vm_flags & VM_READ)
+			access |= ACC_READ_MASK;
+		if (vma->vm_flags & VM_WRITE)
+			access |= ACC_WRITE_MASK;
+		if (vma->vm_flags & VM_EXEC)
+			access |= ACC_EXEC_MASK;
+
+		/* NPT cannot encode execute-only leaves without making them readable. */
+		if (fault->exec && shadow_nx_mask &&
+		    !(vma->vm_flags & VM_READ))
+			allowed = false;
+		else if (fault->exec)
+			allowed = vma->vm_flags & VM_EXEC;
+		else if (fault->write)
+			allowed = vma->vm_flags & VM_WRITE;
+		else
+			allowed = vma->vm_flags & VM_READ;
+
+		fault->max_access = access;
+		fault->max_level = PG_LEVEL_4K;
+	}
 	mmap_read_unlock(vcpu->kvm->mm);
 
 	return allowed;

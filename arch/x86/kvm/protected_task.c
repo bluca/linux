@@ -4,7 +4,6 @@
 #include <linux/kvm_host.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
-#include <linux/overflow.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
@@ -24,12 +23,10 @@
 #define KVM_PT_VA_LIMIT		BIT_ULL(47)
 #define KVM_PT_NONLEAF_FLAGS	(_PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_ACCESSED)
 #define KVM_PT_SYSCALL_PORT	0xec
-
-struct kvm_protected_task_range {
-	unsigned long start;
-	unsigned long end;
-	vm_flags_t flags;
-};
+/* Each edge of the hidden range can require one PMD and one PTE page. */
+#define KVM_PT_HOLE_TABLE_PAGES	4
+#define KVM_PT_IMAGE_PAGES	(2 + (KVM_PT_VA_LIMIT >> PGDIR_SHIFT) + \
+				 KVM_PT_HOLE_TABLE_PAGES)
 
 struct kvm_protected_task_x86 {
 	unsigned long pgtable_addr;
@@ -45,76 +42,23 @@ struct kvm_protected_task_builder {
 	unsigned long used;
 };
 
-static unsigned long kvm_protected_task_range_chunks(unsigned long start,
-						     unsigned long end,
-						     unsigned int shift)
+static int kvm_protected_task_validate_mm(struct mm_struct *mm)
 {
-	return ((end - 1) >> shift) - (start >> shift) + 1;
-}
-
-static int kvm_protected_task_snapshot_mm(struct mm_struct *mm,
-					  struct kvm_protected_task_range **rangesp,
-					  int *nrp, unsigned long *pagesp)
-{
-	struct kvm_protected_task_range *ranges;
 	struct vm_area_struct *vma;
 	VMA_ITERATOR(vmi, mm, 0);
-	unsigned long pages = 5;
-	int i = 0, nr, ret = 0;
+	int ret = 0;
 
 	mmap_read_lock(mm);
-	nr = mm->map_count;
-	ranges = kcalloc(nr, sizeof(*ranges), GFP_KERNEL_ACCOUNT);
-	if (!ranges) {
-		ret = -ENOMEM;
-		goto unlock;
-	}
-
-	for_each_vma(vmi, vma) {
-		unsigned long extra;
-
-		if (vma->vm_end > KVM_PT_VA_LIMIT) {
+	for_each_vma(vmi, vma)
+		if (vma->vm_end > KVM_PT_VA_LIMIT ||
+		    ((vma->vm_flags & (VM_WRITE | VM_EXEC)) &&
+		     !(vma->vm_flags & VM_READ))) {
 			ret = -EOPNOTSUPP;
-			goto unlock;
+			break;
 		}
-		if ((vma->vm_flags & (VM_WRITE | VM_EXEC)) &&
-		    !(vma->vm_flags & VM_READ)) {
-			ret = -EOPNOTSUPP;
-			goto unlock;
-		}
-		if (WARN_ON_ONCE(i >= nr)) {
-			ret = -EAGAIN;
-			goto unlock;
-		}
-
-		if (vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC)) {
-			extra = kvm_protected_task_range_chunks(vma->vm_start,
-								vma->vm_end,
-								PGDIR_SHIFT) + 6;
-			if (check_add_overflow(pages, extra, &pages)) {
-				ret = -EOVERFLOW;
-				goto unlock;
-			}
-		}
-
-		ranges[i].start = vma->vm_start;
-		ranges[i].end = vma->vm_end;
-		ranges[i].flags = vma->vm_flags;
-		i++;
-	}
-	nr = i;
-
-unlock:
 	mmap_read_unlock(mm);
-	if (ret) {
-		kfree(ranges);
-		return ret;
-	}
 
-	*rangesp = ranges;
-	*nrp = nr;
-	*pagesp = pages;
-	return 0;
+	return ret;
 }
 
 static u64 *kvm_protected_task_alloc_table(struct kvm_protected_task_builder *builder,
@@ -196,51 +140,32 @@ set_leaf:
 }
 
 static int kvm_protected_task_map_range(struct kvm_protected_task_builder *builder,
-					const struct kvm_protected_task_range *range)
+					unsigned long start, unsigned long end,
+					vm_flags_t vm_flags)
 {
-	unsigned long address = range->start;
+	unsigned long address = start;
 
-	if (!(range->flags & (VM_READ | VM_WRITE | VM_EXEC)))
-		return 0;
-
-	while (address < range->end) {
+	while (address < end) {
 		unsigned int shift;
 		int ret;
 
 		if (IS_ALIGNED(address, PUD_SIZE) &&
-		    range->end - address >= PUD_SIZE)
+		    end - address >= PUD_SIZE)
 			shift = PUD_SHIFT;
 		else if (IS_ALIGNED(address, PMD_SIZE) &&
-			 range->end - address >= PMD_SIZE)
+			 end - address >= PMD_SIZE)
 			shift = PMD_SHIFT;
 		else
 			shift = PAGE_SHIFT;
 
 		ret = kvm_protected_task_map_page(builder, address, address, shift,
-						  range->flags);
+						  vm_flags);
 		if (ret)
 			return ret;
 		address += 1UL << shift;
 	}
 
 	return 0;
-}
-
-static unsigned long
-kvm_protected_task_find_stub(const struct kvm_protected_task_range *ranges,
-			     int nr)
-{
-	unsigned long address = KVM_PT_VA_LIMIT - PAGE_SIZE;
-	int i;
-
-	for (i = nr - 1; i >= 0; i--) {
-		if (address >= ranges[i].end)
-			return address;
-		if (ranges[i].start < PAGE_SIZE)
-			return 0;
-		address = ranges[i].start - PAGE_SIZE;
-	}
-	return address;
 }
 
 static void kvm_protected_task_set_code_segment(struct kvm_segment *segment)
@@ -430,45 +355,34 @@ static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 		0xe6, KVM_PT_SYSCALL_PORT, /* out KVM_PT_SYSCALL_PORT, %al */
 		0x0f, 0x0b,              /* ud2 */
 	};
-	struct kvm_protected_task_range *ranges;
 	struct kvm_protected_task_builder builder;
 	struct kvm_userspace_memory_region2 region = {
 		.slot = slot,
 		.flags = KVM_MEM_READONLY,
 	};
-	unsigned long address, pages, size, pgd, stub_gpa, stub_va;
+	unsigned long address, pgd, stub_gpa;
+	const unsigned long size = KVM_PT_IMAGE_PAGES * PAGE_SIZE;
 	u64 *stub_page;
-	int i, nr, ret;
+	int ret;
 
-	ret = kvm_protected_task_snapshot_mm(current->mm, &ranges, &nr, &pages);
+	ret = kvm_protected_task_validate_mm(current->mm);
 	if (ret)
 		return ret;
-	stub_va = kvm_protected_task_find_stub(ranges, nr);
-	if (!stub_va) {
-		ret = -ENOSPC;
-		goto free_ranges;
-	}
-	if (check_mul_overflow(pages, PAGE_SIZE, &size)) {
-		ret = -EOVERFLOW;
-		goto free_ranges;
-	}
 
 	address = vm_mmap(NULL, 0, size, PROT_READ | PROT_WRITE,
 			  MAP_PRIVATE | MAP_ANONYMOUS, 0);
-	if (IS_ERR_VALUE(address)) {
-		ret = address;
-		goto free_ranges;
-	}
+	if (IS_ERR_VALUE(address))
+		return address;
 	state->pgtable_addr = address;
 	if (state->pgtable_addr > KVM_PT_VA_LIMIT - size) {
 		ret = -EOPNOTSUPP;
-		goto free_ranges;
+		goto out;
 	}
 
 	builder.image = vzalloc(size);
 	if (!builder.image) {
 		ret = -ENOMEM;
-		goto free_ranges;
+		goto out;
 	}
 	builder.base = state->pgtable_addr;
 	builder.size = size;
@@ -478,18 +392,24 @@ static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 		goto free_image;
 	}
 
-	for (i = 0; i < nr; i++) {
-		ret = kvm_protected_task_map_range(&builder, &ranges[i]);
-		if (ret)
-			goto free_image;
-	}
+	ret = kvm_protected_task_map_range(&builder, 0,
+					       state->pgtable_addr,
+					       VM_READ | VM_WRITE | VM_EXEC);
+	if (ret)
+		goto free_image;
+	ret = kvm_protected_task_map_range(&builder,
+					       state->pgtable_addr + size,
+					       KVM_PT_VA_LIMIT,
+					       VM_READ | VM_WRITE | VM_EXEC);
+	if (ret)
+		goto free_image;
 	stub_page = kvm_protected_task_alloc_table(&builder, &stub_gpa);
 	if (!stub_page) {
 		ret = -ENOSPC;
 		goto free_image;
 	}
 	memcpy(stub_page, syscall_stub, sizeof(syscall_stub));
-	ret = kvm_protected_task_map_page(&builder, stub_va, stub_gpa,
+	ret = kvm_protected_task_map_page(&builder, stub_gpa, stub_gpa,
 					  PAGE_SHIFT, VM_READ | VM_EXEC);
 	if (ret)
 		goto free_image;
@@ -500,7 +420,7 @@ static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 	}
 	state->pgtable_used = builder.used;
 	state->pgd = pgd;
-	state->syscall_stub = stub_va;
+	state->syscall_stub = stub_gpa;
 
 	ret = vm_mprotect(state->pgtable_addr, size, PROT_READ | PROT_EXEC);
 	if (ret)
@@ -516,8 +436,7 @@ static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 
 free_image:
 	vfree(builder.image);
-free_ranges:
-	kfree(ranges);
+out:
 	return ret;
 }
 
