@@ -1796,6 +1796,9 @@ struct kvm *kvm_create_vm(unsigned long type, const char *fdname,
 struct kvm_vcpu *kvm_create_vcpu(struct kvm *kvm, unsigned long id,
 				 int *vcpu_fd);
 
+/* Run @vcpu on current; the caller must hold a reference to @vcpu->kvm. */
+int kvm_vcpu_run(struct kvm_vcpu *vcpu);
+
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type);
 void kvm_arch_destroy_vm(struct kvm *kvm);
 

@@ -4418,6 +4418,58 @@ static int kvm_wait_for_vcpu_online(struct kvm_vcpu *vcpu)
 	return 0;
 }
 
+int kvm_vcpu_run(struct kvm_vcpu *vcpu)
+{
+	struct pid *oldpid;
+	int r;
+
+	if (vcpu->kvm->mm != current->mm || vcpu->kvm->vm_dead)
+		return -EIO;
+
+	r = kvm_wait_for_vcpu_online(vcpu);
+	if (r)
+		return r;
+
+	if (mutex_lock_killable(&vcpu->mutex))
+		return -EINTR;
+
+	/*
+	 * Note, vcpu->pid is primarily protected by vcpu->mutex. The
+	 * dedicated r/w lock allows other tasks, e.g. other vCPUs, to read
+	 * vcpu->pid while this vCPU is running, e.g. to yield directly to
+	 * this vCPU.
+	 */
+	oldpid = vcpu->pid;
+	if (unlikely(oldpid != task_pid(current))) {
+		struct pid *newpid;
+
+		r = kvm_arch_vcpu_run_pid_change(vcpu);
+		if (r)
+			goto out;
+
+		newpid = get_task_pid(current, PIDTYPE_PID);
+		write_lock(&vcpu->pid_lock);
+		vcpu->pid = newpid;
+		write_unlock(&vcpu->pid_lock);
+
+		put_pid(oldpid);
+	}
+	vcpu->wants_to_run = !READ_ONCE(vcpu->run->immediate_exit__unsafe);
+	r = kvm_arch_vcpu_ioctl_run(vcpu);
+	vcpu->wants_to_run = false;
+
+	/*
+	 * FIXME: Remove this hack once all KVM architectures support the
+	 * generic TIF bits, i.e. a dedicated TIF_RSEQ.
+	 */
+	rseq_virt_userspace_exit();
+
+	trace_kvm_userspace_exit(vcpu->run->exit_reason, r);
+out:
+	mutex_unlock(&vcpu->mutex);
+	return r;
+}
+
 static long kvm_vcpu_ioctl(struct file *filp,
 			   unsigned int ioctl, unsigned long arg)
 {
@@ -4450,50 +4502,15 @@ static long kvm_vcpu_ioctl(struct file *filp,
 	if (r != -ENOIOCTLCMD)
 		return r;
 
+	if (ioctl == KVM_RUN) {
+		if (arg)
+			return -EINVAL;
+		return kvm_vcpu_run(vcpu);
+	}
+
 	if (mutex_lock_killable(&vcpu->mutex))
 		return -EINTR;
 	switch (ioctl) {
-	case KVM_RUN: {
-		struct pid *oldpid;
-		r = -EINVAL;
-		if (arg)
-			goto out;
-
-		/*
-		 * Note, vcpu->pid is primarily protected by vcpu->mutex. The
-		 * dedicated r/w lock allows other tasks, e.g. other vCPUs, to
-		 * read vcpu->pid while this vCPU is in KVM_RUN, e.g. to yield
-		 * directly to this vCPU
-		 */
-		oldpid = vcpu->pid;
-		if (unlikely(oldpid != task_pid(current))) {
-			/* The thread running this VCPU changed. */
-			struct pid *newpid;
-
-			r = kvm_arch_vcpu_run_pid_change(vcpu);
-			if (r)
-				break;
-
-			newpid = get_task_pid(current, PIDTYPE_PID);
-			write_lock(&vcpu->pid_lock);
-			vcpu->pid = newpid;
-			write_unlock(&vcpu->pid_lock);
-
-			put_pid(oldpid);
-		}
-		vcpu->wants_to_run = !READ_ONCE(vcpu->run->immediate_exit__unsafe);
-		r = kvm_arch_vcpu_ioctl_run(vcpu);
-		vcpu->wants_to_run = false;
-
-		/*
-		 * FIXME: Remove this hack once all KVM architectures
-		 * support the generic TIF bits, i.e. a dedicated TIF_RSEQ.
-		 */
-		rseq_virt_userspace_exit();
-
-		trace_kvm_userspace_exit(vcpu->run->exit_reason, r);
-		break;
-	}
 	case KVM_GET_REGS: {
 		struct kvm_regs *kvm_regs;
 
