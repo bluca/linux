@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/anon_inodes.h>
+#include <linux/binfmts.h>
 #include <linux/compat.h>
 #include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/kvm.h>
+#include <linux/kvm_host.h>
 #include <linux/kvm_protected_task.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -17,16 +20,148 @@ struct kvm_protected_task {
 	u64 context_id;
 };
 
+struct kvm_protected_task_exec {
+	struct kvm *kvm;
+	struct kvm_vcpu *vcpu;
+	void *arch_state;
+	u32 next_slot;
+};
+
+struct kvm_protected_task_range {
+	unsigned long start;
+	unsigned long end;
+};
+
 static atomic64_t kvm_protected_task_id = ATOMIC64_INIT(0);
+
+static int kvm_protected_task_map_range(struct kvm_protected_task_exec *exec,
+					unsigned long start, unsigned long end)
+{
+	const u64 max_size = (u64)KVM_MEM_MAX_NR_PAGES << PAGE_SHIFT;
+
+	while (start < end) {
+		struct kvm_userspace_memory_region2 region = {
+			.slot = exec->next_slot++,
+			.guest_phys_addr = start,
+			.userspace_addr = start,
+			.memory_size = min_t(u64, end - start, max_size),
+		};
+		int ret;
+
+		if (region.slot >= KVM_USER_MEM_SLOTS)
+			return -ENOSPC;
+
+		ret = kvm_set_user_memory_region(exec->kvm, &region);
+		if (ret)
+			return ret;
+
+		start += region.memory_size;
+	}
+
+	return 0;
+}
+
+static int kvm_protected_task_map_mm(struct kvm_protected_task_exec *exec,
+				     struct mm_struct *mm)
+{
+	struct kvm_protected_task_range *ranges;
+	struct vm_area_struct *vma;
+	VMA_ITERATOR(vmi, mm, 0);
+	int i = 0, nr, ret = 0;
+
+	mmap_read_lock(mm);
+	nr = mm->map_count;
+	ranges = kcalloc(nr, sizeof(*ranges), GFP_KERNEL_ACCOUNT);
+	if (!ranges) {
+		ret = -ENOMEM;
+		goto unlock;
+	}
+
+	for_each_vma(vmi, vma) {
+		if (WARN_ON_ONCE(i >= nr)) {
+			ret = -EAGAIN;
+			goto unlock;
+		}
+		ranges[i].start = vma->vm_start;
+		ranges[i].end = vma->vm_end;
+		i++;
+	}
+	nr = i;
+
+unlock:
+	mmap_read_unlock(mm);
+	if (ret)
+		goto free_ranges;
+
+	for (i = 0; i < nr; i++) {
+		ret = kvm_protected_task_map_range(exec, ranges[i].start,
+						   ranges[i].end);
+		if (ret)
+			break;
+	}
+
+free_ranges:
+	kfree(ranges);
+	return ret;
+}
 
 static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *context,
 					 struct linux_binprm *bprm, void **state)
 {
+	struct kvm_protected_task *protected_task =
+		container_of(context, struct kvm_protected_task, context);
+	struct kvm_protected_task_exec *exec;
+	char fdname[32];
+	int ret;
+
+	exec = kzalloc_obj(*exec);
+	if (!exec)
+		return -ENOMEM;
+
+	snprintf(fdname, sizeof(fdname), "pt-%llu",
+		 protected_task->context_id);
+	exec->kvm = kvm_create_vm(0, fdname, bprm->mm);
+	if (IS_ERR(exec->kvm)) {
+		ret = PTR_ERR(exec->kvm);
+		goto free_exec;
+	}
+
+	ret = kvm_protected_task_map_mm(exec, bprm->mm);
+	if (ret)
+		goto put_kvm;
+
+	exec->vcpu = kvm_create_vcpu(exec->kvm, 0, NULL);
+	if (IS_ERR(exec->vcpu)) {
+		ret = PTR_ERR(exec->vcpu);
+		goto put_kvm;
+	}
+
+	ret = kvm_arch_protected_task_prepare(exec->vcpu, &exec->arch_state);
+	if (ret)
+		goto put_kvm;
+
+	*state = exec;
 	return -EOPNOTSUPP;
+
+put_kvm:
+	kvm_put_kvm(exec->kvm);
+free_exec:
+	kfree(exec);
+	return ret;
+}
+
+static void kvm_protected_task_release_exec(void *state)
+{
+	struct kvm_protected_task_exec *exec = state;
+
+	kvm_arch_protected_task_cleanup(exec->vcpu, exec->arch_state);
+	kvm_put_kvm(exec->kvm);
+	kfree(exec);
 }
 
 static const struct kvm_protected_task_ops kvm_protected_task_ops = {
 	.stage_exec = kvm_protected_task_stage_exec,
+	.cleanup_exec = kvm_protected_task_release_exec,
 };
 
 static int kvm_protected_task_copy_arg(void *dst, size_t size,

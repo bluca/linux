@@ -6634,10 +6634,11 @@ is not inherited by forked children.  Once the exec transaction reaches binary
 format loading, the state is consumed whether exec succeeds or fails.  Failure
 leaves the old image running without an armed context.
 
-The current implementation provides the context and lifecycle API, but no
-protected execution backend.  An armed exec therefore fails with
-``EOPNOTSUPP`` before the exec point of no return.  It never executes the new
-image without protection.
+The current implementation provides the context and lifecycle API and stages a
+kernel-owned VM and vCPU against the nascent exec address space, but does not
+yet provide the protected execution backend.  An armed exec therefore tears
+down the staged state and fails with ``EOPNOTSUPP`` before the exec point of no
+return.  It never executes the new image without protection.
 
 KVM_PT_CANCEL_ARM
 ~~~~~~~~~~~~~~~~~

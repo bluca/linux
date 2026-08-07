@@ -1085,6 +1085,15 @@ void __weak kvm_arch_create_vm_debugfs(struct kvm *kvm)
 {
 }
 
+int __weak kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state)
+{
+	return -EOPNOTSUPP;
+}
+
+void __weak kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *state)
+{
+}
+
 /* Called only on cleanup and destruction paths when there are no users. */
 static inline struct kvm_io_bus *kvm_get_bus_for_destruction(struct kvm *kvm,
 							     enum kvm_bus idx)

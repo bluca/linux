@@ -1803,6 +1803,8 @@ int kvm_vcpu_run(struct kvm_vcpu *vcpu);
 
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type);
 void kvm_arch_destroy_vm(struct kvm *kvm);
+int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state);
+void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *state);
 
 int kvm_cpu_has_pending_timer(struct kvm_vcpu *vcpu);
 
