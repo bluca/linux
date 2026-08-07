@@ -18,6 +18,7 @@
 struct kvm_protected_task {
 	struct kvm_protected_task_context context;
 	u64 context_id;
+	u64 features;
 };
 
 struct kvm_protected_task_exec {
@@ -142,7 +143,8 @@ static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *cont
 		goto put_kvm;
 
 	*state = exec;
-	return -EOPNOTSUPP;
+	return protected_task->features & KVM_PROTECTED_TASK_FEATURE_EXEC ?
+		0 : -EOPNOTSUPP;
 
 put_kvm:
 	kvm_put_kvm(exec->kvm);
@@ -249,6 +251,7 @@ static int kvm_protected_task_get_info(struct file *file, void __user *argp)
 
 	if (READ_ONCE(current->protected_task_pending) == file)
 		info.flags = KVM_PROTECTED_TASK_INFO_ARMED;
+	info.features = protected_task->features;
 	info.context_id = protected_task->context_id;
 
 	if (copy_to_user(argp, &info, min_t(size_t, user_size, sizeof(info))))
@@ -309,17 +312,18 @@ int kvm_protected_task_create_fd(void __user *argp)
 	    memchr_inv(create.reserved, 0, sizeof(create.reserved)))
 		return -EINVAL;
 
-	create.supported_features = 0;
+	create.supported_features = kvm_arch_protected_task_features();
 	if (copy_to_user(argp, &create,
 			 min_t(size_t, user_size, sizeof(create))))
 		return -EFAULT;
-	if (create.required_features)
+	if (create.required_features & ~create.supported_features)
 		return -EOPNOTSUPP;
 
 	protected_task = kzalloc_obj(*protected_task);
 	if (!protected_task)
 		return -ENOMEM;
 	protected_task->context.ops = &kvm_protected_task_ops;
+	protected_task->features = create.required_features;
 	protected_task->context_id = atomic64_inc_return(&kvm_protected_task_id);
 
 	fd = get_unused_fd_flags(O_CLOEXEC);

@@ -1023,6 +1023,7 @@ struct kvm_protected_task_info {
 	__u64 reserved[5];
 };
 
+#define KVM_PROTECTED_TASK_FEATURE_EXEC	(1ULL << 0)
 #define KVM_PROTECTED_TASK_INFO_ARMED	(1U << 0)
 
 /* ioctls for fds returned by KVM_CREATE_PROTECTED_TASK */

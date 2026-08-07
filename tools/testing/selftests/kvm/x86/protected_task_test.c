@@ -48,7 +48,8 @@ static int create_context(int kvm_fd)
 
 	fd = ioctl(kvm_fd, KVM_CREATE_PROTECTED_TASK, &create);
 	TEST_ASSERT(fd >= 0, KVM_IOCTL_ERROR(KVM_CREATE_PROTECTED_TASK, fd));
-	TEST_ASSERT_EQ(create.supported_features, 0);
+	TEST_ASSERT_EQ(create.supported_features,
+		       KVM_PROTECTED_TASK_FEATURE_EXEC);
 	TEST_ASSERT(fcntl(fd, F_GETFD) & FD_CLOEXEC,
 		    "Protected-task context fd must be close-on-exec");
 	return fd;
@@ -95,10 +96,19 @@ static void test_create_validation(int kvm_fd)
 	assert_ioctl_errno(kvm_fd, KVM_CREATE_PROTECTED_TASK, &create, EINVAL);
 
 	create.supported_features = 0;
-	create.required_features = 1;
+	create.required_features = KVM_PROTECTED_TASK_FEATURE_EXEC;
+	fd = ioctl(kvm_fd, KVM_CREATE_PROTECTED_TASK, &create);
+	TEST_ASSERT(fd >= 0, KVM_IOCTL_ERROR(KVM_CREATE_PROTECTED_TASK, fd));
+	TEST_ASSERT_EQ(create.supported_features,
+		       KVM_PROTECTED_TASK_FEATURE_EXEC);
+	close(fd);
+
+	create.supported_features = 0;
+	create.required_features = 1ULL << 63;
 	assert_ioctl_errno(kvm_fd, KVM_CREATE_PROTECTED_TASK, &create,
 			   EOPNOTSUPP);
-	TEST_ASSERT_EQ(create.supported_features, 0);
+	TEST_ASSERT_EQ(create.supported_features,
+		       KVM_PROTECTED_TASK_FEATURE_EXEC);
 
 	extended.extra = 1;
 	assert_ioctl_errno(kvm_fd, KVM_CREATE_PROTECTED_TASK, &extended, E2BIG);

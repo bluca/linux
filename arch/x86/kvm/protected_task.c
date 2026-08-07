@@ -540,6 +540,11 @@ int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **statep)
 	return 0;
 }
 
+u64 kvm_arch_protected_task_features(void)
+{
+	return KVM_PROTECTED_TASK_FEATURE_EXEC;
+}
+
 int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *arch_state,
 				     struct pt_regs *regs, u32 slot)
 {
@@ -613,6 +618,11 @@ void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *arch_state)
 int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state)
 {
 	return -EOPNOTSUPP;
+}
+
+u64 kvm_arch_protected_task_features(void)
+{
+	return 0;
 }
 
 int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *state,

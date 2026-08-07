@@ -1090,6 +1090,11 @@ int __weak kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state)
 	return -EOPNOTSUPP;
 }
 
+u64 __weak kvm_arch_protected_task_features(void)
+{
+	return 0;
+}
+
 int __weak kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu,
 					    void *state, struct pt_regs *regs,
 					    u32 slot)

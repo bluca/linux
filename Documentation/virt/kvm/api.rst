@@ -6598,7 +6598,11 @@ input.
 ``required_features`` is a mask of features without which userspace cannot use
 the context.  On return, ``supported_features`` contains the supported mask.
 The ioctl fails with ``EOPNOTSUPP`` if any required bit is unsupported.  No
-feature bits are currently defined or supported.
+unknown feature bits may be set.
+
+``KVM_PROTECTED_TASK_FEATURE_EXEC`` enables the protected execution backend.
+Without this feature, arming retains the reversible lifecycle-only behavior
+described below.
 
 The returned descriptor has ``FD_CLOEXEC`` set.  It may be inherited or passed
 to another process; operations that arm or query arm state always apply to the
@@ -6634,11 +6638,10 @@ is not inherited by forked children.  Once the exec transaction reaches binary
 format loading, the state is consumed whether exec succeeds or fails.  Failure
 leaves the old image running without an armed context.
 
-The current implementation provides the context and lifecycle API and stages a
-kernel-owned VM and vCPU against the nascent exec address space, but does not
-yet provide the protected execution backend.  An armed exec therefore tears
-down the staged state and fails with ``EOPNOTSUPP`` before the exec point of no
-return.  It never executes the new image without protection.
+Without ``KVM_PROTECTED_TASK_FEATURE_EXEC``, an armed exec tears down the staged
+state and fails with ``EOPNOTSUPP`` before the exec point of no return.  With
+the feature enabled, KVM commits the staged VM and runs the new image as a
+protected task.  It never executes the new image without protection.
 
 KVM_PT_CANCEL_ARM
 ~~~~~~~~~~~~~~~~~
