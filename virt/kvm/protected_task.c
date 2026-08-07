@@ -125,6 +125,7 @@ static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *cont
 		ret = PTR_ERR(exec->kvm);
 		goto free_exec;
 	}
+	exec->kvm->protected_task = true;
 
 	ret = kvm_protected_task_map_mm(exec, bprm->mm);
 	if (ret)
@@ -159,8 +160,26 @@ static void kvm_protected_task_release_exec(void *state)
 	kfree(exec);
 }
 
+static int kvm_protected_task_finalize_vcpu(void *state, struct pt_regs *regs)
+{
+	struct kvm_protected_task_exec *exec = state;
+
+	return kvm_arch_protected_task_finalize(exec->vcpu, exec->arch_state,
+						  regs, exec->next_slot++);
+}
+
+static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
+{
+	struct kvm_protected_task_exec *exec = state;
+
+	return kvm_arch_protected_task_run(exec->vcpu, exec->arch_state, regs,
+						   &exec->next_slot);
+}
+
 static const struct kvm_protected_task_ops kvm_protected_task_ops = {
 	.stage_exec = kvm_protected_task_stage_exec,
+	.finalize_exec = kvm_protected_task_finalize_vcpu,
+	.run = kvm_protected_task_run_vcpu,
 	.cleanup_exec = kvm_protected_task_release_exec,
 };
 

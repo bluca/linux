@@ -125,8 +125,9 @@ int kvm_protected_task_prepare_exec(struct linux_binprm *bprm)
 	context = bprm->protected_task->private_data;
 	return context->ops->stage_exec(context, bprm,
 					&bprm->protected_task_state);
-#endif
+#else
 	return 0;
+#endif
 }
 
 void kvm_protected_task_deactivate_exec(void)

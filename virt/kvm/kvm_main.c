@@ -1090,6 +1090,19 @@ int __weak kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state)
 	return -EOPNOTSUPP;
 }
 
+int __weak kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu,
+					    void *state, struct pt_regs *regs,
+					    u32 slot)
+{
+	return -EOPNOTSUPP;
+}
+
+int __weak kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,
+				       struct pt_regs *regs, u32 *next_slot)
+{
+	return -EOPNOTSUPP;
+}
+
 void __weak kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *state)
 {
 }
@@ -2157,6 +2170,42 @@ int kvm_set_user_memory_region(struct kvm *kvm,
 
 	guard(mutex)(&kvm->slots_lock);
 	return kvm_set_memory_region(kvm, mem);
+}
+
+int kvm_map_user_memory_region(struct kvm *kvm, u32 id,
+			       gpa_t gpa, unsigned long end)
+{
+	struct kvm_userspace_memory_region2 region = {
+		.slot = id,
+	};
+	struct kvm_memory_slot *memslot;
+	struct kvm_memslots *slots;
+	gfn_t end_gfn, gfn;
+	int bkt;
+
+	if (id >= KVM_USER_MEM_SLOTS || !PAGE_ALIGNED(gpa) ||
+	    !PAGE_ALIGNED(end) || gpa >= end)
+		return -EINVAL;
+
+	guard(mutex)(&kvm->slots_lock);
+	slots = kvm_memslots(kvm);
+	gfn = gpa_to_gfn(gpa);
+	if (__gfn_to_memslot(slots, gfn))
+		return 0;
+
+	end_gfn = min_t(gfn_t, end >> PAGE_SHIFT,
+			gfn + KVM_MEM_MAX_NR_PAGES);
+	kvm_for_each_memslot(memslot, bkt, slots) {
+		if (memslot->base_gfn > gfn)
+			end_gfn = min(end_gfn, memslot->base_gfn);
+	}
+	if (gfn >= end_gfn)
+		return -EEXIST;
+
+	region.guest_phys_addr = gpa;
+	region.userspace_addr = gpa;
+	region.memory_size = (end_gfn - gfn) << PAGE_SHIFT;
+	return kvm_set_memory_region(kvm, &region);
 }
 
 static int kvm_vm_ioctl_set_memory_region(struct kvm *kvm,

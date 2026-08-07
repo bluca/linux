@@ -785,6 +785,7 @@ struct kvm {
 	 */
 	struct mutex slots_arch_lock;
 	struct mm_struct *mm; /* userspace tied to this vm */
+	bool protected_task;
 	unsigned long nr_memslot_pages;
 	/* The two memslot sets - active and inactive (per address space) */
 	struct kvm_memslots __memslots[KVM_MAX_NR_ADDRESS_SPACES][2];
@@ -1242,6 +1243,8 @@ int kvm_set_internal_memslot(struct kvm *kvm,
 			     const struct kvm_userspace_memory_region2 *mem);
 int kvm_set_user_memory_region(struct kvm *kvm,
 			       const struct kvm_userspace_memory_region2 *mem);
+int kvm_map_user_memory_region(struct kvm *kvm, u32 slot,
+			       gpa_t gpa, unsigned long end);
 void kvm_arch_free_memslot(struct kvm *kvm, struct kvm_memory_slot *slot);
 void kvm_arch_memslots_updated(struct kvm *kvm, u64 gen);
 int kvm_arch_prepare_memory_region(struct kvm *kvm,
@@ -1804,6 +1807,10 @@ int kvm_vcpu_run(struct kvm_vcpu *vcpu);
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type);
 void kvm_arch_destroy_vm(struct kvm *kvm);
 int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state);
+int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu,
+				     void *state, struct pt_regs *regs, u32 slot);
+int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,
+				struct pt_regs *regs, u32 *next_slot);
 void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *state);
 
 int kvm_cpu_has_pending_timer(struct kvm_vcpu *vcpu);
