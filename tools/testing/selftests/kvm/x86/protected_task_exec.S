@@ -17,6 +17,11 @@ _start:
 	cmp $message_length, %rax
 	jne 1f
 
+	mov $57, %eax
+	syscall
+	cmp $-95, %rax
+	jne 1f
+
 	mov $9, %eax
 	xor %edi, %edi
 	mov $4096, %esi
