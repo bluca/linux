@@ -56,6 +56,7 @@
  */
 #define KVM_MEMSLOT_INVALID			(1UL << 16)
 #define KVM_MEMSLOT_GMEM_ONLY			(1UL << 17)
+#define KVM_MEMSLOT_PROTECTED_TASK		(1UL << 18)
 
 /*
  * Bit 63 of the memslot generation number is an "update in-progress flag",
@@ -1243,6 +1244,8 @@ int kvm_set_internal_memslot(struct kvm *kvm,
 			     const struct kvm_userspace_memory_region2 *mem);
 int kvm_set_user_memory_region(struct kvm *kvm,
 			       const struct kvm_userspace_memory_region2 *mem);
+int kvm_set_protected_task_memory_region(
+	struct kvm *kvm, const struct kvm_userspace_memory_region2 *mem);
 int kvm_map_user_memory_region(struct kvm *kvm, u32 slot,
 			       gpa_t gpa, unsigned long end);
 void kvm_arch_free_memslot(struct kvm *kvm, struct kvm_memory_slot *slot);

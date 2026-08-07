@@ -2022,7 +2022,8 @@ static bool kvm_check_memslot_overlap(struct kvm_memslots *slots, int id,
 }
 
 static int kvm_set_memory_region(struct kvm *kvm,
-				 const struct kvm_userspace_memory_region2 *mem)
+				 const struct kvm_userspace_memory_region2 *mem,
+				 u32 internal_flags)
 {
 	struct kvm_memory_slot *old, *new;
 	struct kvm_memslots *slots;
@@ -2132,7 +2133,7 @@ static int kvm_set_memory_region(struct kvm *kvm,
 	new->id = id;
 	new->base_gfn = base_gfn;
 	new->npages = npages;
-	new->flags = mem->flags;
+	new->flags = mem->flags | internal_flags;
 	new->userspace_addr = mem->userspace_addr;
 	if (mem->flags & KVM_MEM_GUEST_MEMFD) {
 		r = kvm_gmem_bind(kvm, new, mem->guest_memfd, mem->guest_memfd_offset);
@@ -2163,7 +2164,7 @@ int kvm_set_internal_memslot(struct kvm *kvm,
 	if (WARN_ON_ONCE(mem->flags))
 		return -EINVAL;
 
-	return kvm_set_memory_region(kvm, mem);
+	return kvm_set_memory_region(kvm, mem, 0);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_set_internal_memslot);
 
@@ -2174,7 +2175,17 @@ int kvm_set_user_memory_region(struct kvm *kvm,
 		return -EINVAL;
 
 	guard(mutex)(&kvm->slots_lock);
-	return kvm_set_memory_region(kvm, mem);
+	return kvm_set_memory_region(kvm, mem, 0);
+}
+
+int kvm_set_protected_task_memory_region(
+	struct kvm *kvm, const struct kvm_userspace_memory_region2 *mem)
+{
+	if ((u16)mem->slot >= KVM_USER_MEM_SLOTS)
+		return -EINVAL;
+
+	guard(mutex)(&kvm->slots_lock);
+	return kvm_set_memory_region(kvm, mem, KVM_MEMSLOT_PROTECTED_TASK);
 }
 
 int kvm_map_user_memory_region(struct kvm *kvm, u32 id,
@@ -2210,7 +2221,7 @@ int kvm_map_user_memory_region(struct kvm *kvm, u32 id,
 	region.guest_phys_addr = gpa;
 	region.userspace_addr = gpa;
 	region.memory_size = (end_gfn - gfn) << PAGE_SHIFT;
-	return kvm_set_memory_region(kvm, &region);
+	return kvm_set_memory_region(kvm, &region, 0);
 }
 
 static int kvm_vm_ioctl_set_memory_region(struct kvm *kvm,
@@ -3101,14 +3112,31 @@ retry:
 
 static kvm_pfn_t kvm_follow_pfn(struct kvm_follow_pfn *kfp)
 {
+	bool protected_task = kfp->slot->flags & KVM_MEMSLOT_PROTECTED_TASK;
+	bool *map_writable;
+	unsigned int flags;
+	kvm_pfn_t pfn;
+
 	kfp->hva = __gfn_to_hva_many(kfp->slot, kfp->gfn, NULL,
-				     kfp->flags & FOLL_WRITE);
+				     kfp->flags & FOLL_WRITE && !protected_task);
 
 	if (kfp->hva == KVM_HVA_ERR_RO_BAD)
 		return KVM_PFN_ERR_RO_FAULT;
 
 	if (kvm_is_error_hva(kfp->hva))
 		return KVM_PFN_NOSLOT;
+	if (protected_task) {
+		map_writable = kfp->map_writable;
+		flags = kfp->flags;
+		kfp->map_writable = NULL;
+		kfp->flags &= ~FOLL_WRITE;
+		pfn = hva_to_pfn(kfp);
+		kfp->flags = flags;
+		kfp->map_writable = map_writable;
+		if (!is_error_pfn(pfn) && map_writable)
+			*map_writable = true;
+		return pfn;
+	}
 
 	if (memslot_is_readonly(kfp->slot) && kfp->map_writable) {
 		*kfp->map_writable = false;

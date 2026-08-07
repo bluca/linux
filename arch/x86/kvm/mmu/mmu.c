@@ -4708,6 +4708,10 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 	struct vm_area_struct *vma;
 	bool allowed;
 
+	if (fault->slot &&
+	    fault->slot->flags & KVM_MEMSLOT_PROTECTED_TASK)
+		return true;
+
 	mmap_read_lock(vcpu->kvm->mm);
 	vma = vma_lookup(vcpu->kvm->mm, address);
 	if (!vma)

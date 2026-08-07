@@ -512,7 +512,7 @@ static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 	region.guest_phys_addr = state->pgtable_addr;
 	region.userspace_addr = state->pgtable_addr;
 	region.memory_size = size;
-	ret = kvm_set_user_memory_region(vcpu->kvm, &region);
+	ret = kvm_set_protected_task_memory_region(vcpu->kvm, &region);
 
 free_image:
 	vfree(builder.image);
@@ -582,7 +582,8 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 	ret = kvm_vcpu_run(vcpu);
 	if (ret == -EINTR)
 		return kvm_protected_task_sync_regs(vcpu, regs, false);
-	if (ret)
+	if (ret && (ret != -EFAULT ||
+		    vcpu->run->exit_reason != KVM_EXIT_MEMORY_FAULT))
 		return ret;
 
 	switch (vcpu->run->exit_reason) {
