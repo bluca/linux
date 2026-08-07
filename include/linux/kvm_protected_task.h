@@ -28,6 +28,7 @@ struct kvm_protected_task_context {
 };
 
 bool kvm_protected_task_can_arm(void);
+bool kvm_protected_task_can_fork(void);
 void kvm_protected_task_init(struct task_struct *task);
 void kvm_protected_task_cleanup(struct task_struct *task);
 void kvm_protected_task_take_exec(struct linux_binprm *bprm);

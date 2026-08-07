@@ -8073,6 +8073,10 @@ static int kvm_mmu_start_lpage_recovery(struct once *once)
 
 int kvm_mmu_post_init_vm(struct kvm *kvm)
 {
+	/* Protected-task faults are restricted to 4 KiB mappings. */
+	if (kvm->protected_task)
+		return 0;
+
 	if (nx_hugepage_mitigation_hard_disabled)
 		return 0;
 

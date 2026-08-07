@@ -18,6 +18,16 @@ bool kvm_protected_task_can_arm(void)
 }
 EXPORT_SYMBOL_GPL(kvm_protected_task_can_arm);
 
+bool kvm_protected_task_can_fork(void)
+{
+#if IS_ENABLED(CONFIG_KVM)
+	return !current->protected_task_active &&
+	       !current->protected_task_retired;
+#else
+	return true;
+#endif
+}
+
 void kvm_protected_task_init(struct task_struct *task)
 {
 #if IS_ENABLED(CONFIG_KVM)
