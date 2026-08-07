@@ -1784,6 +1784,10 @@ static inline void kvm_register_perf_callbacks(void) {}
 static inline void kvm_unregister_perf_callbacks(void) {}
 #endif /* CONFIG_GUEST_PERF_EVENTS */
 
+/* The caller owns the initial reference returned by kvm_create_vm(). */
+struct kvm *kvm_create_vm(unsigned long type, const char *fdname,
+			  struct mm_struct *mm);
+
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type);
 void kvm_arch_destroy_vm(struct kvm *kvm);
 

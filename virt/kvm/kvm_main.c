@@ -887,7 +887,7 @@ static const struct mmu_notifier_ops kvm_mmu_notifier_ops = {
 static int kvm_init_mmu_notifier(struct kvm *kvm)
 {
 	kvm->mmu_notifier.ops = &kvm_mmu_notifier_ops;
-	return mmu_notifier_register(&kvm->mmu_notifier, current->mm);
+	return mmu_notifier_register(&kvm->mmu_notifier, kvm->mm);
 }
 
 #ifdef CONFIG_HAVE_KVM_PM_NOTIFIER
@@ -1095,7 +1095,8 @@ static inline struct kvm_io_bus *kvm_get_bus_for_destruction(struct kvm *kvm,
 static int kvm_enable_virtualization(void);
 static void kvm_disable_virtualization(void);
 
-static struct kvm *kvm_create_vm(unsigned long type, const char *fdname)
+struct kvm *kvm_create_vm(unsigned long type, const char *fdname,
+			  struct mm_struct *mm)
 {
 	struct kvm *kvm = kvm_arch_alloc_vm();
 	struct kvm_memslots *slots;
@@ -1105,8 +1106,8 @@ static struct kvm *kvm_create_vm(unsigned long type, const char *fdname)
 		return ERR_PTR(-ENOMEM);
 
 	KVM_MMU_LOCK_INIT(kvm);
-	mmgrab(current->mm);
-	kvm->mm = current->mm;
+	mmgrab(mm);
+	kvm->mm = mm;
 	kvm_eventfd_init(kvm);
 	mutex_init(&kvm->lock);
 	mutex_init(&kvm->irq_lock);
@@ -1203,6 +1204,7 @@ static struct kvm *kvm_create_vm(unsigned long type, const char *fdname)
 
 	preempt_notifier_inc();
 	kvm_init_pm_notifier(kvm);
+	kvm_uevent_notify_change(KVM_EVENT_CREATE_VM, kvm);
 
 	return kvm;
 
@@ -1210,7 +1212,7 @@ out_err_no_debugfs:
 	kvm_coalesced_mmio_free(kvm);
 out_no_coalesced_mmio:
 	if (kvm->mmu_notifier.ops)
-		mmu_notifier_unregister(&kvm->mmu_notifier, current->mm);
+		mmu_notifier_unregister(&kvm->mmu_notifier, kvm->mm);
 out_err_no_mmu_notifier:
 	kvm_disable_virtualization();
 out_err_no_disable:
@@ -1226,7 +1228,7 @@ out_err_no_irq_srcu:
 	cleanup_srcu_struct(&kvm->srcu);
 out_err_no_srcu:
 	kvm_arch_free_vm(kvm);
-	mmdrop(current->mm);
+	mmdrop(mm);
 	return ERR_PTR(r);
 }
 
@@ -5490,7 +5492,7 @@ static int kvm_dev_ioctl_create_vm(unsigned long type)
 
 	snprintf(fdname, sizeof(fdname), "%d", fd);
 
-	kvm = kvm_create_vm(type, fdname);
+	kvm = kvm_create_vm(type, fdname, current->mm);
 	if (IS_ERR(kvm)) {
 		r = PTR_ERR(kvm);
 		goto put_fd;
@@ -5508,8 +5510,6 @@ static int kvm_dev_ioctl_create_vm(unsigned long type)
 	 * cases it will be called by the final fput(file) and will take
 	 * care of doing kvm_put_kvm(kvm).
 	 */
-	kvm_uevent_notify_change(KVM_EVENT_CREATE_VM, kvm);
-
 	fd_install(fd, file);
 	return fd;
 
