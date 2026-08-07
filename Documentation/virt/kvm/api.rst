@@ -6566,6 +6566,111 @@ KVM_S390_KEYOP_SSKE
   Sets the storage key for the guest address ``guest_addr`` to the key
   specified in ``key``, returning the previous value in ``key``.
 
+4.145 KVM_CREATE_PROTECTED_TASK
+--------------------------------
+
+:Capability: KVM_CAP_PROTECTED_TASK
+:Architectures: all
+:Type: system ioctl
+:Parameters: struct kvm_protected_task_create (in/out)
+:Returns: A protected-task context file descriptor on success, < 0 on error
+
+KVM_CREATE_PROTECTED_TASK creates a configuration and observation context for
+protected task execution.  Unlike KVM_CREATE_VM, the returned file descriptor
+does not expose a VM, vCPU, memory slot, or KVM_RUN interface.  The kernel owns
+those objects after a protected exec is committed.
+
+::
+
+  struct kvm_protected_task_create {
+  __u32 size;
+  __u32 flags;
+  __u64 required_features;
+  __u64 supported_features;
+  __u64 reserved[6];
+  };
+
+``size`` contains the userspace structure size.  It must include
+``supported_features``.  A larger structure is accepted if all unknown bytes
+are zero.  ``flags``, ``supported_features``, and ``reserved`` must be zero on
+input.
+
+``required_features`` is a mask of features without which userspace cannot use
+the context.  On return, ``supported_features`` contains the supported mask.
+The ioctl fails with ``EOPNOTSUPP`` if any required bit is unsupported.  No
+feature bits are currently defined or supported.
+
+The returned descriptor has ``FD_CLOEXEC`` set.  It may be inherited or passed
+to another process; operations that arm or query arm state always apply to the
+calling task.  Closing the descriptor does not cancel an existing arm because
+the task holds its own context reference.
+
+Protected-task context ioctls
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following ioctls operate on a file descriptor returned by
+KVM_CREATE_PROTECTED_TASK.
+
+KVM_PT_ARM_EXEC
+~~~~~~~~~~~~~~~
+
+:Parameters: struct kvm_protected_task_arm (in)
+:Returns: 0 on success, < 0 on error
+
+::
+
+  struct kvm_protected_task_arm {
+  __u32 size;
+  __u32 flags;
+  __u64 reserved[7];
+  };
+
+``size`` must include ``flags``.  ``flags``, ``reserved``, and unknown bytes
+must be zero.  The caller must be the only task using its address space and
+must not already have an armed protected-task context.
+
+Arming installs task-local, one-shot state for the next exec transaction.  It
+is not inherited by forked children.  Once the exec transaction reaches binary
+format loading, the state is consumed whether exec succeeds or fails.  Failure
+leaves the old image running without an armed context.
+
+The current implementation provides the context and lifecycle API, but no
+protected execution backend.  An armed exec therefore fails with
+``EOPNOTSUPP`` before the exec point of no return.  It never executes the new
+image without protection.
+
+KVM_PT_CANCEL_ARM
+~~~~~~~~~~~~~~~~~
+
+:Parameters: none
+:Returns: 0 on success, < 0 on error
+
+KVM_PT_CANCEL_ARM removes an arm installed on the calling task through the
+same context.  It returns ``ENOENT`` if the task is not armed or is armed by a
+different context.
+
+KVM_PT_GET_INFO
+~~~~~~~~~~~~~~~
+
+:Parameters: struct kvm_protected_task_info (in/out)
+:Returns: 0 on success, < 0 on error
+
+::
+
+  struct kvm_protected_task_info {
+  __u32 size;
+  __u32 flags;
+  __u64 features;
+  __u64 context_id;
+  __u64 reserved[5];
+  };
+
+``size`` must include ``context_id``.  On input, all other fields and unknown
+bytes must be zero.  On return, ``features`` contains the context feature mask
+and ``context_id`` contains a nonzero identifier unique among contexts created
+since boot.  ``KVM_PROTECTED_TASK_INFO_ARMED`` is set in ``flags`` when this
+context is armed on the calling task.
+
 .. _kvm_run:
 
 5. The kvm_run structure

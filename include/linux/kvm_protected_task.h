@@ -38,5 +38,6 @@ void kvm_protected_task_commit_exec(struct linux_binprm *bprm);
 int kvm_protected_task_finalize_exec(struct pt_regs *regs);
 bool kvm_protected_task_run(struct pt_regs *regs);
 void kvm_protected_task_exit(struct task_struct *task);
+int kvm_protected_task_create_fd(void __user *argp);
 
 #endif /* _LINUX_KVM_PROTECTED_TASK_H */

@@ -47,6 +47,7 @@
 #include <linux/io.h>
 #include <linux/lockdep.h>
 #include <linux/kthread.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/suspend.h>
 #include <linux/rseq.h>
 
@@ -4902,6 +4903,8 @@ static int kvm_ioctl_create_device(struct kvm *kvm,
 static int kvm_vm_ioctl_check_extension_generic(struct kvm *kvm, long arg)
 {
 	switch (arg) {
+	case KVM_CAP_PROTECTED_TASK:
+		return 1;
 	case KVM_CAP_SYNC_MMU:
 	case KVM_CAP_USER_MEMORY:
 	case KVM_CAP_USER_MEMORY2:
@@ -5569,6 +5572,9 @@ static long kvm_dev_ioctl(struct file *filp,
 		break;
 	case KVM_CREATE_VM:
 		r = kvm_dev_ioctl_create_vm(arg);
+		break;
+	case KVM_CREATE_PROTECTED_TASK:
+		r = kvm_protected_task_create_fd((void __user *)arg);
 		break;
 	case KVM_CHECK_EXTENSION:
 		r = kvm_vm_ioctl_check_extension_generic(NULL, arg);

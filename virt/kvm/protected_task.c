@@ -1,0 +1,192 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+#include <linux/anon_inodes.h>
+#include <linux/compat.h>
+#include <linux/fdtable.h>
+#include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/kvm.h>
+#include <linux/kvm_protected_task.h>
+#include <linux/module.h>
+#include <linux/sched.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+
+struct kvm_protected_task {
+	struct kvm_protected_task_context context;
+	u64 context_id;
+};
+
+static atomic64_t kvm_protected_task_id = ATOMIC64_INIT(0);
+
+static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *context,
+					 struct linux_binprm *bprm, void **state)
+{
+	return -EOPNOTSUPP;
+}
+
+static const struct kvm_protected_task_ops kvm_protected_task_ops = {
+	.stage_exec = kvm_protected_task_stage_exec,
+};
+
+static int kvm_protected_task_copy_arg(void *dst, size_t size,
+				       size_t min_size, void __user *argp)
+{
+	u32 user_size;
+
+	if (get_user(user_size, (u32 __user *)argp))
+		return -EFAULT;
+	if (user_size < min_size)
+		return -EINVAL;
+
+	return copy_struct_from_user(dst, size, argp, user_size);
+}
+
+static int kvm_protected_task_arm(struct file *file, void __user *argp)
+{
+	struct kvm_protected_task_arm arm = {};
+	struct file *old;
+	size_t min_size = offsetofend(struct kvm_protected_task_arm, flags);
+	int ret;
+
+	ret = kvm_protected_task_copy_arg(&arm, sizeof(arm), min_size, argp);
+	if (ret)
+		return ret;
+	if (arm.flags || memchr_inv(arm.reserved, 0, sizeof(arm.reserved)))
+		return -EINVAL;
+	if (!kvm_protected_task_can_arm())
+		return -EBUSY;
+
+	get_file(file);
+	old = cmpxchg(&current->protected_task_pending, NULL, file);
+	if (old) {
+		fput(file);
+		return -EBUSY;
+	}
+
+	return 0;
+}
+
+static int kvm_protected_task_cancel(struct file *file)
+{
+	if (cmpxchg(&current->protected_task_pending, file, NULL) != file)
+		return -ENOENT;
+
+	fput(file);
+	return 0;
+}
+
+static int kvm_protected_task_get_info(struct file *file, void __user *argp)
+{
+	struct kvm_protected_task *protected_task = file->private_data;
+	struct kvm_protected_task_info info = {};
+	size_t min_size = offsetofend(struct kvm_protected_task_info, context_id);
+	u32 user_size;
+	int ret;
+
+	if (get_user(user_size, (u32 __user *)argp))
+		return -EFAULT;
+	ret = kvm_protected_task_copy_arg(&info, sizeof(info), min_size, argp);
+	if (ret)
+		return ret;
+	if (info.flags || info.features || info.context_id ||
+	    memchr_inv(info.reserved, 0, sizeof(info.reserved)))
+		return -EINVAL;
+
+	if (READ_ONCE(current->protected_task_pending) == file)
+		info.flags = KVM_PROTECTED_TASK_INFO_ARMED;
+	info.context_id = protected_task->context_id;
+
+	if (copy_to_user(argp, &info, min_t(size_t, user_size, sizeof(info))))
+		return -EFAULT;
+	return 0;
+}
+
+static long kvm_protected_task_ioctl(struct file *file, unsigned int ioctl,
+				     unsigned long arg)
+{
+	void __user *argp = (void __user *)arg;
+
+	if (unlikely(_IOC_TYPE(ioctl) != KVMIO))
+		return -EINVAL;
+
+	switch (ioctl) {
+	case KVM_PT_ARM_EXEC:
+		return kvm_protected_task_arm(file, argp);
+	case KVM_PT_CANCEL_ARM:
+		return arg ? -EINVAL : kvm_protected_task_cancel(file);
+	case KVM_PT_GET_INFO:
+		return kvm_protected_task_get_info(file, argp);
+	default:
+		return -ENOIOCTLCMD;
+	}
+}
+
+static int kvm_protected_task_release(struct inode *inode, struct file *file)
+{
+	kfree(file->private_data);
+	return 0;
+}
+
+static const struct file_operations kvm_protected_task_fops = {
+	.owner = THIS_MODULE,
+	.release = kvm_protected_task_release,
+	.unlocked_ioctl = kvm_protected_task_ioctl,
+	.compat_ioctl = compat_ptr_ioctl,
+	.llseek = noop_llseek,
+};
+
+int kvm_protected_task_create_fd(void __user *argp)
+{
+	struct kvm_protected_task_create create = {};
+	struct kvm_protected_task *protected_task;
+	struct file *file;
+	size_t min_size = offsetofend(struct kvm_protected_task_create,
+				      supported_features);
+	u32 user_size;
+	int fd, ret;
+
+	if (get_user(user_size, (u32 __user *)argp))
+		return -EFAULT;
+	ret = kvm_protected_task_copy_arg(&create, sizeof(create), min_size, argp);
+	if (ret)
+		return ret;
+	if (create.flags || create.supported_features ||
+	    memchr_inv(create.reserved, 0, sizeof(create.reserved)))
+		return -EINVAL;
+
+	create.supported_features = 0;
+	if (copy_to_user(argp, &create,
+			 min_t(size_t, user_size, sizeof(create))))
+		return -EFAULT;
+	if (create.required_features)
+		return -EOPNOTSUPP;
+
+	protected_task = kzalloc_obj(*protected_task);
+	if (!protected_task)
+		return -ENOMEM;
+	protected_task->context.ops = &kvm_protected_task_ops;
+	protected_task->context_id = atomic64_inc_return(&kvm_protected_task_id);
+
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		ret = fd;
+		goto put_protected_task;
+	}
+
+	file = anon_inode_getfile("[kvm-protected-task]",
+				  &kvm_protected_task_fops, protected_task, O_RDWR);
+	if (IS_ERR(file)) {
+		ret = PTR_ERR(file);
+		goto put_fd;
+	}
+
+	fd_install(fd, file);
+	return fd;
+
+put_fd:
+	put_unused_fd(fd);
+put_protected_task:
+	kfree(protected_task);
+	return ret;
+}

@@ -727,6 +727,8 @@ struct kvm_enable_cap {
  */
 #define KVM_GET_VCPU_MMAP_SIZE    _IO(KVMIO,   0x04) /* in bytes */
 #define KVM_GET_SUPPORTED_CPUID   _IOWR(KVMIO, 0x05, struct kvm_cpuid2)
+#define KVM_CREATE_PROTECTED_TASK _IOWR(KVMIO, 0x07, \
+					struct kvm_protected_task_create)
 #define KVM_GET_EMULATED_CPUID	  _IOWR(KVMIO, 0x09, struct kvm_cpuid2)
 #define KVM_GET_MSR_FEATURE_INDEX_LIST    _IOWR(KVMIO, 0x0a, struct kvm_msr_list)
 
@@ -997,6 +999,36 @@ struct kvm_enable_cap {
 #define KVM_CAP_S390_KEYOP 247
 #define KVM_CAP_S390_VSIE_ESAMODE 248
 #define KVM_CAP_S390_HPAGE_2G 249
+#define KVM_CAP_PROTECTED_TASK 250
+
+struct kvm_protected_task_create {
+	__u32 size;
+	__u32 flags;
+	__u64 required_features;
+	__u64 supported_features;
+	__u64 reserved[6];
+};
+
+struct kvm_protected_task_arm {
+	__u32 size;
+	__u32 flags;
+	__u64 reserved[7];
+};
+
+struct kvm_protected_task_info {
+	__u32 size;
+	__u32 flags;
+	__u64 features;
+	__u64 context_id;
+	__u64 reserved[5];
+};
+
+#define KVM_PROTECTED_TASK_INFO_ARMED	(1U << 0)
+
+/* ioctls for fds returned by KVM_CREATE_PROTECTED_TASK */
+#define KVM_PT_ARM_EXEC		_IOW(KVMIO, 0x00, struct kvm_protected_task_arm)
+#define KVM_PT_CANCEL_ARM	_IO(KVMIO, 0x01)
+#define KVM_PT_GET_INFO		_IOWR(KVMIO, 0x02, struct kvm_protected_task_info)
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;
