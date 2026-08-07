@@ -4148,10 +4148,8 @@ static void kvm_create_vcpu_debugfs(struct kvm_vcpu *vcpu)
 }
 #endif
 
-/*
- * Creates some virtual cpus.  Good luck creating more than one.
- */
-static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
+struct kvm_vcpu *kvm_create_vcpu(struct kvm *kvm, unsigned long id,
+				 int *vcpu_fd)
 {
 	int r;
 	struct kvm_vcpu *vcpu;
@@ -4167,18 +4165,18 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
 	 */
 	BUILD_BUG_ON(KVM_MAX_VCPU_IDS > INT_MAX);
 	if (id >= KVM_MAX_VCPU_IDS)
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 
 	mutex_lock(&kvm->lock);
 	if (kvm->created_vcpus >= kvm->max_vcpus) {
 		mutex_unlock(&kvm->lock);
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 	}
 
 	r = kvm_arch_vcpu_precreate(kvm, id);
 	if (r) {
 		mutex_unlock(&kvm->lock);
-		return r;
+		return ERR_PTR(r);
 	}
 
 	kvm->created_vcpus++;
@@ -4233,10 +4231,13 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
 	 * knows it's taken *inside* kvm->lock.
 	 */
 	mutex_lock(&vcpu->mutex);
-	kvm_get_kvm(kvm);
-	r = create_vcpu_fd(vcpu);
-	if (r < 0)
-		goto kvm_put_xa_erase;
+	if (vcpu_fd) {
+		kvm_get_kvm(kvm);
+		r = create_vcpu_fd(vcpu);
+		if (r < 0)
+			goto kvm_put_xa_erase;
+		*vcpu_fd = r;
+	}
 
 	/*
 	 * Pairs with smp_rmb() in kvm_get_vcpu.  Store the vcpu
@@ -4249,7 +4250,7 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
 	mutex_unlock(&kvm->lock);
 	kvm_arch_vcpu_postcreate(vcpu);
 	kvm_create_vcpu_debugfs(vcpu);
-	return r;
+	return vcpu;
 
 kvm_put_xa_erase:
 	mutex_unlock(&vcpu->mutex);
@@ -4268,7 +4269,19 @@ vcpu_decrement:
 	mutex_lock(&kvm->lock);
 	kvm->created_vcpus--;
 	mutex_unlock(&kvm->lock);
-	return r;
+	return ERR_PTR(r);
+}
+
+/*
+ * Creates some virtual cpus.  Good luck creating more than one.
+ */
+static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
+{
+	struct kvm_vcpu *vcpu;
+	int fd;
+
+	vcpu = kvm_create_vcpu(kvm, id, &fd);
+	return IS_ERR(vcpu) ? PTR_ERR(vcpu) : fd;
 }
 
 static int kvm_vcpu_ioctl_set_sigmask(struct kvm_vcpu *vcpu, sigset_t *sigset)

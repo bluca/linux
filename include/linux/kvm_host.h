@@ -1788,6 +1788,14 @@ static inline void kvm_unregister_perf_callbacks(void) {}
 struct kvm *kvm_create_vm(unsigned long type, const char *fdname,
 			  struct mm_struct *mm);
 
+/*
+ * A vCPU is owned by @kvm and remains valid while the caller holds a reference
+ * to @kvm. If @vcpu_fd is non-NULL, an additional VM reference is transferred
+ * to the returned file descriptor.
+ */
+struct kvm_vcpu *kvm_create_vcpu(struct kvm *kvm, unsigned long id,
+				 int *vcpu_fd);
+
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type);
 void kvm_arch_destroy_vm(struct kvm *kvm);
 
