@@ -931,7 +931,7 @@ static int load_flat_binary(struct linux_binprm *bprm)
 		 regs, start_addr, current->mm->start_stack);
 	start_thread(regs, start_addr, current->mm->start_stack);
 
-	return 0;
+	return finalize_exec_regs(regs);
 }
 
 /****************************************************************************/

@@ -4,6 +4,7 @@
 
 #include <linux/context_tracking.h>
 #include <linux/hrtimer_rearm.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/kmsan.h>
 #include <linux/rseq_entry.h>
 #include <linux/static_call_types.h>
@@ -197,14 +198,18 @@ static __always_inline void __exit_to_user_mode_prepare(struct pt_regs *regs,
 	unsigned long ti_work;
 
 	lockdep_assert_irqs_disabled();
+	for (;;) {
+		/* Flush pending rcuog wakeup before the last need_resched() check */
+		tick_nohz_user_enter_prepare();
 
-	/* Flush pending rcuog wakeup before the last need_resched() check */
-	tick_nohz_user_enter_prepare();
+		ti_work = read_thread_flags();
+		if (unlikely(ti_work & work_mask)) {
+			if (!hrtimer_rearm_deferred_user_irq(&ti_work, work_mask))
+				ti_work = exit_to_user_mode_loop(regs, ti_work);
+		}
 
-	ti_work = read_thread_flags();
-	if (unlikely(ti_work & work_mask)) {
-		if (!hrtimer_rearm_deferred_user_irq(&ti_work, work_mask))
-			ti_work = exit_to_user_mode_loop(regs, ti_work);
+		if (!kvm_protected_task_run(regs))
+			break;
 	}
 
 	arch_exit_to_user_mode_prepare(regs, ti_work);

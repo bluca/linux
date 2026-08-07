@@ -64,6 +64,7 @@
 #include <linux/rcuwait.h>
 #include <linux/compat.h>
 #include <linux/io_uring.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/kprobes.h>
 #include <linux/rethook.h>
 #include <linux/sysfs.h>
@@ -994,6 +995,7 @@ void __noreturn do_exit(long code)
 	 */
 	unwind_deferred_task_exit(tsk);
 
+	kvm_protected_task_exit(tsk);
 	exit_mm();
 
 	if (group_dead)

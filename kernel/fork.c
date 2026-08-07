@@ -38,6 +38,7 @@
 #include <linux/fdtable.h>
 #include <linux/iocontext.h>
 #include <linux/key.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/kmsan.h>
 #include <linux/binfmts.h>
 #include <linux/mman.h>
@@ -557,6 +558,7 @@ void free_task(struct task_struct *tsk)
 	if (tsk->flags & PF_KTHREAD)
 		free_kthread_struct(tsk);
 	bpf_task_storage_free(tsk);
+	kvm_protected_task_cleanup(tsk);
 	put_task_exec_state(rcu_access_pointer(tsk->exec_state));
 	free_task_struct(tsk);
 }
@@ -950,6 +952,7 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 #endif
 
 	RCU_INIT_POINTER(tsk->exec_state, NULL);
+	kvm_protected_task_init(tsk);
 
 	setup_thread_stack(tsk, orig);
 	clear_user_return_notifier(tsk);

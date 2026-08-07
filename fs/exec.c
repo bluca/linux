@@ -44,6 +44,7 @@
 #include <linux/highmem.h>
 #include <linux/spinlock.h>
 #include <linux/key.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/personality.h>
 #include <linux/binfmts.h>
 #include <linux/utsname.h>
@@ -1117,6 +1118,10 @@ int begin_new_exec(struct linux_binprm * bprm)
 	if (retval)
 		return retval;
 
+	retval = kvm_protected_task_prepare_exec(bprm);
+	if (retval)
+		return retval;
+
 	/*
 	 * This tracepoint marks the point before flushing the old exec where
 	 * the current task is still unchanged, but errors are fatal (point of
@@ -1160,6 +1165,9 @@ int begin_new_exec(struct linux_binprm * bprm)
 	if (bprm->have_execfd)
 		would_dump(bprm, bprm->executable);
 
+	/* Errors are fatal from here, so the old protected VM is no longer needed. */
+	kvm_protected_task_deactivate_exec();
+
 	/*
 	 * Release all of the old mmap stuff
 	 */
@@ -1168,6 +1176,7 @@ int begin_new_exec(struct linux_binprm * bprm)
 	if (retval)
 		goto out;
 
+	kvm_protected_task_commit_exec(bprm);
 	bprm->mm = NULL;
 
 	retval = exec_task_namespaces();
@@ -1366,6 +1375,12 @@ void finalize_exec(struct linux_binprm *bprm)
 }
 EXPORT_SYMBOL(finalize_exec);
 
+int finalize_exec_regs(struct pt_regs *regs)
+{
+	return kvm_protected_task_finalize_exec(regs);
+}
+EXPORT_SYMBOL(finalize_exec_regs);
+
 /*
  * Prepare credentials and lock ->cred_guard_mutex.
  * setup_new_exec() commits the new creds and drops the lock.
@@ -1396,6 +1411,7 @@ static void do_close_execat(struct file *file)
 
 static void free_bprm(struct linux_binprm *bprm)
 {
+	kvm_protected_task_cleanup_exec(bprm);
 	if (bprm->mm) {
 		acct_arg_size(bprm, 0);
 		mmput(bprm->mm);
@@ -1774,6 +1790,8 @@ static int bprm_execve(struct linux_binprm *bprm)
 	retval = security_bprm_creds_for_exec(bprm);
 	if (retval || bprm->is_check)
 		goto out;
+
+	kvm_protected_task_take_exec(bprm);
 
 	retval = exec_binprm(bprm);
 	if (retval < 0)

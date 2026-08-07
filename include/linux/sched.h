@@ -972,6 +972,14 @@ struct task_struct {
 	struct mm_struct		*active_mm;
 
 	struct task_exec_state __rcu	*exec_state;
+#if IS_ENABLED(CONFIG_KVM)
+	struct file			*protected_task_pending;
+	struct file			*protected_task_active;
+	void				*protected_task_state;
+	struct file			*protected_task_retired;
+	void				*protected_task_retired_state;
+	bool				protected_task_running;
+#endif
 
 	int				exit_state;
 	int				exit_code;

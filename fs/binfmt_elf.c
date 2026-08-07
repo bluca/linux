@@ -1377,7 +1377,7 @@ out_free_interp:
 
 	finalize_exec(bprm);
 	START_THREAD(elf_ex, regs, elf_entry, bprm->p);
-	retval = 0;
+	retval = finalize_exec_regs(regs);
 out:
 	return retval;
 

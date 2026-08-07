@@ -28,6 +28,10 @@ struct linux_binprm {
 	struct mm_struct *old_mm;	/* replaced address space, freed by setup_new_exec() */
 	/* user_ns published to task->exec_state at execve, narrowed by would_dump(). */
 	struct user_namespace *user_ns;
+#if IS_ENABLED(CONFIG_KVM)
+	struct file *protected_task;
+	void *protected_task_state;
+#endif
 	unsigned long p; /* current top of mem */
 	unsigned int
 		/* Should an execfd be passed to userspace? */
@@ -128,6 +132,7 @@ extern int __must_check remove_arg_zero(struct linux_binprm *);
 extern int begin_new_exec(struct linux_binprm * bprm);
 extern void setup_new_exec(struct linux_binprm * bprm);
 extern void finalize_exec(struct linux_binprm *bprm);
+int finalize_exec_regs(struct pt_regs *regs);
 extern void would_dump(struct linux_binprm *, struct file *);
 
 extern int suid_dumpable;
