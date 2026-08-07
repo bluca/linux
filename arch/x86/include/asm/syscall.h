@@ -173,6 +173,7 @@ static inline int syscall_get_arch(struct task_struct *task)
 }
 
 bool do_syscall_64(struct pt_regs *regs, int nr);
+void do_protected_syscall_64(struct pt_regs *regs);
 void do_int80_emulation(struct pt_regs *regs);
 
 #endif	/* CONFIG_X86_32 */

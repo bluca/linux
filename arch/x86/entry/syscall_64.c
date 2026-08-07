@@ -83,6 +83,19 @@ static __always_inline bool do_syscall_x32(struct pt_regs *regs, int nr)
 	return false;
 }
 
+void do_protected_syscall_64(struct pt_regs *regs)
+{
+	int nr;
+
+	regs->ax = __x64_sys_ni_syscall(regs);
+	nr = syscall_enter_from_user_mode_work(regs, regs->orig_ax);
+	add_random_kstack_offset();
+	if (!do_syscall_x64(regs, nr) && !do_syscall_x32(regs, nr) && nr != -1)
+		regs->ax = __x64_sys_ni_syscall(regs);
+	syscall_exit_to_user_mode_work(regs);
+}
+EXPORT_SYMBOL_GPL(do_protected_syscall_64);
+
 /* Returns true to return using SYSRET, or false to use IRET */
 __visible noinstr bool do_syscall_64(struct pt_regs *regs, int nr)
 {

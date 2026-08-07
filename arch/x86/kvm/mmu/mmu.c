@@ -4701,6 +4701,28 @@ static int __kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 	return RET_PF_CONTINUE;
 }
 
+static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
+					     struct kvm_page_fault *fault)
+{
+	unsigned long address = fault->gfn << PAGE_SHIFT;
+	struct vm_area_struct *vma;
+	bool allowed;
+
+	mmap_read_lock(vcpu->kvm->mm);
+	vma = vma_lookup(vcpu->kvm->mm, address);
+	if (!vma)
+		allowed = false;
+	else if (fault->exec)
+		allowed = vma->vm_flags & VM_EXEC;
+	else if (fault->write)
+		allowed = vma->vm_flags & VM_WRITE;
+	else
+		allowed = vma->vm_flags & VM_READ;
+	mmap_read_unlock(vcpu->kvm->mm);
+
+	return allowed;
+}
+
 static int kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 			       struct kvm_page_fault *fault, unsigned int access)
 {
@@ -4719,6 +4741,11 @@ static int kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 	 */
 	fault->mmu_seq = vcpu->kvm->mmu_invalidate_seq;
 	smp_rmb();
+	if (unlikely(kvm->protected_task) &&
+	    !kvm_protected_task_fault_allowed(vcpu, fault)) {
+		kvm_mmu_prepare_memory_fault_exit(vcpu, fault);
+		return -EFAULT;
+	}
 
 	/*
 	 * Now that we have a snapshot of mmu_invalidate_seq we can check for a
@@ -4729,8 +4756,13 @@ static int kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 		return -EFAULT;
 	}
 
-	if (unlikely(!slot))
+	if (unlikely(!slot)) {
+		if (kvm->protected_task) {
+			kvm_mmu_prepare_memory_fault_exit(vcpu, fault);
+			return -EFAULT;
+		}
 		return kvm_handle_noslot_fault(vcpu, fault, access);
+	}
 
 	/*
 	 * Retry the page fault if the gfn hit a memslot that is being deleted
