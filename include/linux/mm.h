@@ -4177,6 +4177,7 @@ static inline void mm_populate(unsigned long addr, unsigned long len) {}
 /* This takes the mm semaphore itself */
 int __must_check vm_brk_flags(unsigned long addr, unsigned long request, bool is_exec);
 int vm_munmap(unsigned long start, size_t len);
+int vm_mprotect(unsigned long start, size_t len, unsigned long prot);
 unsigned long __must_check vm_mmap(struct file *file, unsigned long addr,
 		unsigned long len, unsigned long prot,
 		unsigned long flag, unsigned long offset);

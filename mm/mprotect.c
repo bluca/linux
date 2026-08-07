@@ -982,6 +982,12 @@ out:
 	return error;
 }
 
+int vm_mprotect(unsigned long start, size_t len, unsigned long prot)
+{
+	return do_mprotect_pkey(start, len, prot, -1);
+}
+EXPORT_SYMBOL_GPL(vm_mprotect);
+
 SYSCALL_DEFINE3(mprotect, unsigned long, start, size_t, len,
 		unsigned long, prot)
 {
