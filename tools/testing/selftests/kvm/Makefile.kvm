@@ -165,6 +165,7 @@ TEST_GEN_PROGS_x86 += pre_fault_memory_test
 
 # Compiled outputs used by test targets
 TEST_GEN_PROGS_EXTENDED_x86 += x86/nx_huge_pages_test
+TEST_GEN_FILES_x86 += x86/protected_task_exec
 
 TEST_GEN_PROGS_arm64 = $(TEST_GEN_PROGS_COMMON)
 TEST_GEN_PROGS_arm64 += arm64/aarch32_id_regs
@@ -251,6 +252,7 @@ SPLIT_TESTS += get-reg-list
 TEST_PROGS += $(TEST_PROGS_$(ARCH))
 TEST_GEN_PROGS += $(TEST_GEN_PROGS_$(ARCH))
 TEST_GEN_PROGS_EXTENDED += $(TEST_GEN_PROGS_EXTENDED_$(ARCH))
+TEST_GEN_FILES += $(TEST_GEN_FILES_$(ARCH))
 LIBKVM += $(LIBKVM_$(ARCH))
 
 OVERRIDE_TARGETS = 1
@@ -362,6 +364,9 @@ $(SPLIT_TEST_GEN_OBJ): $(GEN_HDRS)
 $(TEST_GEN_PROGS): $(LIBKVM_OBJS)
 $(TEST_GEN_PROGS_EXTENDED): $(LIBKVM_OBJS)
 $(TEST_GEN_OBJ): $(GEN_HDRS)
+
+$(OUTPUT)/x86/protected_task_exec: x86/protected_task_exec.S
+	$(CC) $(TARGET_ARCH) -nostdlib -static -no-pie -Wl,--build-id=none $< -o $@
 
 cscope: include_paths = $(LINUX_TOOL_INCLUDE) $(LINUX_HDR_PATH) include lib ..
 cscope:

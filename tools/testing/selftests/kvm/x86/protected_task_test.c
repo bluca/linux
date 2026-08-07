@@ -2,9 +2,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stddef.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -39,10 +41,11 @@ static void assert_ioctl_noarg_errno(int fd, unsigned long request,
 		    request, ret, errno, expected_errno);
 }
 
-static int create_context(int kvm_fd)
+static int create_context_with_features(int kvm_fd, __u64 required_features)
 {
 	struct kvm_protected_task_create create = {
 		.size = sizeof(create),
+		.required_features = required_features,
 	};
 	int fd;
 
@@ -53,6 +56,11 @@ static int create_context(int kvm_fd)
 	TEST_ASSERT(fcntl(fd, F_GETFD) & FD_CLOEXEC,
 		    "Protected-task context fd must be close-on-exec");
 	return fd;
+}
+
+static int create_context(int kvm_fd)
+{
+	return create_context_with_features(kvm_fd, 0);
 }
 
 static struct kvm_protected_task_info get_info(int fd)
@@ -326,6 +334,76 @@ static void test_close_while_armed(int fd)
 		    ret, errno, EOPNOTSUPP);
 }
 
+static void get_exec_helper_path(char path[PATH_MAX])
+{
+	static const char helper[] = "protected_task_exec";
+	char *name;
+	ssize_t length;
+
+	length = readlink("/proc/self/exe", path, PATH_MAX - 1);
+	TEST_ASSERT(length > 0, "readlink(/proc/self/exe) failed: %d", errno);
+	path[length] = '\0';
+	name = strrchr(path, '/');
+	TEST_ASSERT(name, "Selftest executable path has no directory");
+	name++;
+	TEST_ASSERT(sizeof(helper) <= PATH_MAX - (name - path),
+		    "Protected exec helper path is too long");
+	memcpy(name, helper, sizeof(helper));
+}
+
+static void test_protected_exec(int kvm_fd)
+{
+	static const char expected[] = "protected task exec\n";
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	char helper[PATH_MAX], output[sizeof(expected)] = {};
+	size_t nread = 0;
+	int pipefd[2];
+	int status;
+	pid_t child;
+
+	get_exec_helper_path(helper);
+	TEST_ASSERT(pipe(pipefd) == 0, "pipe() failed: %d", errno);
+	child = fork();
+	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
+	if (!child) {
+		int fd, ret;
+
+		close(pipefd[0]);
+		TEST_ASSERT(dup2(pipefd[1], STDOUT_FILENO) == STDOUT_FILENO,
+			    "dup2() failed: %d", errno);
+		close(pipefd[1]);
+		fd = create_context_with_features(kvm_fd, KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		execl(helper, helper, NULL);
+		_exit(127);
+	}
+
+	close(pipefd[1]);
+	while (nread < sizeof(output)) {
+		ssize_t n;
+
+		n = read(pipefd[0], output + nread, sizeof(output) - nread);
+		if (n < 0 && errno == EINTR)
+			continue;
+		TEST_ASSERT(n >= 0, "read() failed: %d", errno);
+		if (!n)
+			break;
+		nread += n;
+	}
+	close(pipefd[0]);
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() failed: %d", errno);
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "Protected exec helper failed: %#x", status);
+	TEST_ASSERT(nread == sizeof(expected) - 1 &&
+		    !memcmp(output, expected, sizeof(expected) - 1),
+		    "Unexpected protected exec output");
+}
+
 int main(int argc, char *argv[])
 {
 	struct kvm_protected_task_info first_info, second_info;
@@ -353,6 +431,7 @@ int main(int argc, char *argv[])
 
 	close(first_fd);
 	test_close_while_armed(second_fd);
+	test_protected_exec(kvm_fd);
 	close(kvm_fd);
 	return 0;
 }
