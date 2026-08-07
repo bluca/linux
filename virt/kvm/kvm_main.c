@@ -2139,14 +2139,20 @@ int kvm_set_internal_memslot(struct kvm *kvm,
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_set_internal_memslot);
 
-static int kvm_vm_ioctl_set_memory_region(struct kvm *kvm,
-					  struct kvm_userspace_memory_region2 *mem)
+int kvm_set_user_memory_region(struct kvm *kvm,
+			       const struct kvm_userspace_memory_region2 *mem)
 {
 	if ((u16)mem->slot >= KVM_USER_MEM_SLOTS)
 		return -EINVAL;
 
 	guard(mutex)(&kvm->slots_lock);
 	return kvm_set_memory_region(kvm, mem);
+}
+
+static int kvm_vm_ioctl_set_memory_region(struct kvm *kvm,
+					  struct kvm_userspace_memory_region2 *mem)
+{
+	return kvm_set_user_memory_region(kvm, mem);
 }
 
 #ifndef CONFIG_KVM_GENERIC_DIRTYLOG_READ_PROTECT
