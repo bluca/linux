@@ -29,4 +29,10 @@ enum x86_pf_error_code {
 	X86_PF_RMP	=		BIT(31),
 };
 
+struct pt_regs;
+
+void x86_force_sig_user_page_fault(struct pt_regs *regs,
+				   unsigned long error_code,
+				   unsigned long address, int si_code);
+
 #endif /* _ASM_X86_TRAP_PF_H */

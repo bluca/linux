@@ -16,6 +16,7 @@
 #include <asm/processor-flags.h>
 #include <asm/segment.h>
 #include <asm/syscall.h>
+#include <asm/traps.h>
 
 #include "cpuid.h"
 
@@ -214,7 +215,7 @@ static int kvm_protected_task_setup_sregs(struct kvm_vcpu *vcpu,
 	kvm_protected_task_set_data_segment(&sregs.ss);
 	sregs.fs.base = x86_fsbase_read_task(current);
 	sregs.gs.base = x86_gsbase_read_task(current);
-	sregs.cr0 = X86_CR0_PE | X86_CR0_NE | X86_CR0_PG;
+	sregs.cr0 = X86_CR0_PE | X86_CR0_NE | X86_CR0_AM | X86_CR0_PG;
 	sregs.cr3 = pgd;
 	sregs.cr4 = X86_CR4_PAE | X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT;
 	sregs.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NX;
@@ -374,14 +375,64 @@ static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 	mmap_read_unlock(current->mm);
 
 	if (!mapped || visible) {
-		force_sig_fault(SIGSEGV, mapped ? SEGV_ACCERR : SEGV_MAPERR,
-				(void __user *)address);
+		u32 error_code = X86_PF_USER | (mapped ? X86_PF_PROT : 0);
+
+		x86_force_sig_user_page_fault(regs, error_code, address,
+					      mapped ? SEGV_ACCERR : SEGV_MAPERR);
 		return 0;
 	}
 
 	ret = kvm_map_user_memory_region(vcpu->kvm, (*next_slot)++,
 					 address, end);
 	return ret == -EEXIST ? 0 : ret;
+}
+
+static int kvm_protected_task_handle_exception(struct kvm_vcpu *vcpu,
+					       struct kvm_protected_task_x86 *state,
+					       struct pt_regs *regs)
+{
+	unsigned long error_code = 0, dr6 = 0;
+	unsigned int trapnr;
+	int ret;
+
+	if (vcpu->run->exit_reason == KVM_EXIT_DEBUG) {
+		trapnr = vcpu->run->debug.arch.exception;
+		if (trapnr == X86_TRAP_DB)
+			dr6 = vcpu->run->debug.arch.dr6 ^ DR6_ACTIVE_LOW;
+	} else {
+		trapnr = vcpu->run->ex.exception;
+		error_code = vcpu->run->ex.error_code;
+	}
+
+	ret = kvm_protected_task_sync_regs(vcpu, regs, false);
+	if (ret)
+		return ret;
+	ret = kvm_protected_task_activate_fpu(vcpu, state);
+	if (ret)
+		return ret;
+
+	if (trapnr == X86_TRAP_PF) {
+		unsigned long address = vcpu->arch.cr2;
+		struct vm_area_struct *vma;
+		bool mapped;
+
+		mmap_read_lock(current->mm);
+		vma = vma_lookup(current->mm, address);
+		mapped = !!vma;
+		mmap_read_unlock(current->mm);
+
+		error_code |= X86_PF_USER;
+		if (mapped)
+			error_code |= X86_PF_PROT;
+		else
+			error_code &= ~X86_PF_PROT;
+		x86_force_sig_user_page_fault(regs, error_code, address,
+					      mapped ? SEGV_ACCERR : SEGV_MAPERR);
+		return 0;
+	}
+
+	return x86_handle_user_exception(regs, trapnr, error_code, dr6) ?
+		0 : -EIO;
 }
 
 static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
@@ -576,6 +627,10 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 	case KVM_EXIT_MEMORY_FAULT:
 		ret = kvm_protected_task_handle_memory_fault(vcpu, regs,
 						     next_slot);
+		break;
+	case KVM_EXIT_EXCEPTION:
+	case KVM_EXIT_DEBUG:
+		ret = kvm_protected_task_handle_exception(vcpu, state, regs);
 		break;
 	default:
 		ret = -EIO;

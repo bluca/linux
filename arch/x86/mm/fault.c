@@ -20,6 +20,7 @@
 #include <linux/mm_types.h>
 #include <linux/mm.h>			/* find_and_lock_vma() */
 #include <linux/vmalloc.h>
+#include <linux/export.h>
 
 #include <asm/cpufeature.h>		/* boot_cpu_has, ...		*/
 #include <asm/traps.h>			/* dotraplinkage, ...		*/
@@ -641,6 +642,18 @@ static void set_signal_archinfo(unsigned long address,
 	tsk->thread.cr2 = address;
 }
 
+void x86_force_sig_user_page_fault(struct pt_regs *regs,
+				   unsigned long error_code,
+				   unsigned long address, int si_code)
+{
+	if (WARN_ON_ONCE(!user_mode(regs)))
+		return;
+	sanitize_error_code(address, &error_code);
+	set_signal_archinfo(address, error_code);
+	force_sig_fault(SIGSEGV, si_code, (void __user *)address);
+}
+EXPORT_SYMBOL_GPL(x86_force_sig_user_page_fault);
+
 static noinline void
 page_fault_oops(struct pt_regs *regs, unsigned long error_code,
 		unsigned long address)
@@ -824,12 +837,11 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 	if (likely(show_unhandled_signals))
 		show_signal_msg(regs, error_code, address, tsk);
 
-	set_signal_archinfo(address, error_code);
-
-	if (si_code == SEGV_PKUERR)
+	if (si_code == SEGV_PKUERR) {
+		set_signal_archinfo(address, error_code);
 		force_sig_pkuerr((void __user *)address, pkey);
-	else
-		force_sig_fault(SIGSEGV, si_code, (void __user *)address);
+	} else
+		x86_force_sig_user_page_fault(regs, error_code, address, si_code);
 }
 
 static noinline void

@@ -1145,6 +1145,8 @@ static void init_vmcb(struct kvm_vcpu *vcpu, bool init_event)
 	set_exception_intercept(svm, MC_VECTOR);
 	set_exception_intercept(svm, AC_VECTOR);
 	set_exception_intercept(svm, DB_VECTOR);
+	if (vcpu->kvm->protected_task)
+		svm_set_intercept(svm, INTERCEPT_ICEBP);
 	/*
 	 * Guest access to VMware backdoor ports could legitimately
 	 * trigger #GP because of TSS I/O permission bitmap.
@@ -1892,6 +1894,13 @@ static void svm_set_segment(struct kvm_vcpu *vcpu,
 static void svm_update_exception_bitmap(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_svm *svm = to_svm(vcpu);
+	unsigned int vector;
+
+	if (vcpu->kvm->protected_task) {
+		for (vector = 0; vector < 32; vector++)
+			set_exception_intercept(svm, vector);
+		return;
+	}
 
 	clr_exception_intercept(svm, BP_VECTOR);
 
@@ -2037,12 +2046,26 @@ static int npf_interception(struct kvm_vcpu *vcpu)
 	return rc;
 }
 
+static int svm_prepare_debug_exit(struct kvm_vcpu *vcpu,
+				  unsigned int exception, unsigned long dr6)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+	struct kvm_run *kvm_run = vcpu->run;
+
+	kvm_run->exit_reason = KVM_EXIT_DEBUG;
+	kvm_run->debug.arch.dr6 = dr6;
+	kvm_run->debug.arch.dr7 = svm->vmcb->save.dr7;
+	kvm_run->debug.arch.pc = svm->vmcb->save.cs.base + svm->vmcb->save.rip;
+	kvm_run->debug.arch.exception = exception;
+	return 0;
+}
+
 static int db_interception(struct kvm_vcpu *vcpu)
 {
-	struct kvm_run *kvm_run = vcpu->run;
 	struct vcpu_svm *svm = to_svm(vcpu);
 
-	if (!(vcpu->guest_debug &
+	if (!vcpu->kvm->protected_task &&
+	    !(vcpu->guest_debug &
 	      (KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_USE_HW_BP)) &&
 		!svm->nmi_singlestep) {
 		u32 payload = svm->vmcb->save.dr6 ^ DR6_ACTIVE_LOW;
@@ -2056,29 +2079,26 @@ static int db_interception(struct kvm_vcpu *vcpu)
 		kvm_make_request(KVM_REQ_EVENT, vcpu);
 	}
 
-	if (vcpu->guest_debug &
-	    (KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_USE_HW_BP)) {
-		kvm_run->exit_reason = KVM_EXIT_DEBUG;
-		kvm_run->debug.arch.dr6 = svm->vmcb->save.dr6;
-		kvm_run->debug.arch.dr7 = svm->vmcb->save.dr7;
-		kvm_run->debug.arch.pc =
-			svm->vmcb->save.cs.base + svm->vmcb->save.rip;
-		kvm_run->debug.arch.exception = DB_VECTOR;
-		return 0;
-	}
+	if (vcpu->kvm->protected_task ||
+	    (vcpu->guest_debug &
+	     (KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_USE_HW_BP)))
+		return svm_prepare_debug_exit(vcpu, DB_VECTOR,
+					      svm->vmcb->save.dr6);
 
 	return 1;
 }
 
 static int bp_interception(struct kvm_vcpu *vcpu)
 {
-	struct vcpu_svm *svm = to_svm(vcpu);
-	struct kvm_run *kvm_run = vcpu->run;
+	return svm_prepare_debug_exit(vcpu, BP_VECTOR, DR6_ACTIVE_LOW);
+}
 
-	kvm_run->exit_reason = KVM_EXIT_DEBUG;
-	kvm_run->debug.arch.pc = svm->vmcb->save.cs.base + svm->vmcb->save.rip;
-	kvm_run->debug.arch.exception = BP_VECTOR;
-	return 0;
+static int icebp_interception(struct kvm_vcpu *vcpu)
+{
+	if (!kvm_skip_emulated_instruction(vcpu))
+		return 1;
+
+	return svm_prepare_debug_exit(vcpu, DB_VECTOR, DR6_ACTIVE_LOW);
 }
 
 static int ud_interception(struct kvm_vcpu *vcpu)
@@ -3334,6 +3354,18 @@ static int vmmcall_interception(struct kvm_vcpu *vcpu)
 	return kvm_emulate_hypercall(vcpu);
 }
 
+static int protected_task_exception_interception(struct kvm_vcpu *vcpu,
+						 unsigned int vector)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+
+	vcpu->run->exit_reason = KVM_EXIT_EXCEPTION;
+	vcpu->run->ex.exception = vector;
+	vcpu->run->ex.error_code = x86_exception_has_error_code(vector) ?
+					 svm->vmcb->control.exit_info_1 : 0;
+	return 0;
+}
+
 static int (*const svm_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[SVM_EXIT_READ_CR0]			= cr_interception,
 	[SVM_EXIT_READ_CR3]			= cr_interception,
@@ -3367,6 +3399,7 @@ static int (*const svm_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[SVM_EXIT_EXCP_BASE + MC_VECTOR]	= mc_interception,
 	[SVM_EXIT_EXCP_BASE + AC_VECTOR]	= ac_interception,
 	[SVM_EXIT_EXCP_BASE + GP_VECTOR]	= gp_interception,
+	[SVM_EXIT_ICEBP]			= icebp_interception,
 	[SVM_EXIT_INTR]				= intr_interception,
 	[SVM_EXIT_NMI]				= nmi_interception,
 	[SVM_EXIT_SMI]				= smi_interception,
@@ -3625,6 +3658,7 @@ no_vmsa:
 int svm_invoke_exit_handler(struct kvm_vcpu *vcpu, u64 __exit_code)
 {
 	u32 exit_code = __exit_code;
+	unsigned int vector;
 
 	/*
 	 * SVM uses negative values, i.e. 64-bit values, to indicate that VMRUN
@@ -3637,6 +3671,14 @@ int svm_invoke_exit_handler(struct kvm_vcpu *vcpu, u64 __exit_code)
 	if (!cpu_feature_enabled(X86_FEATURE_HYPERVISOR) &&
 	    (u64)exit_code != __exit_code)
 		goto unexpected_vmexit;
+
+	if (vcpu->kvm->protected_task &&
+	    exit_code >= SVM_EXIT_EXCP_BASE &&
+	    exit_code < SVM_EXIT_EXCP_BASE + 32) {
+		vector = exit_code - SVM_EXIT_EXCP_BASE;
+		if (vector != DB_VECTOR && vector != BP_VECTOR)
+			return protected_task_exception_interception(vcpu, vector);
+	}
 
 #ifdef CONFIG_MITIGATION_RETPOLINE
 	if (exit_code == SVM_EXIT_MSR)

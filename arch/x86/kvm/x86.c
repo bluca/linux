@@ -8977,7 +8977,9 @@ static int kvm_inject_emulated_db(struct kvm_vcpu *vcpu, unsigned long dr6)
 {
 	struct kvm_run *kvm_run = vcpu->run;
 
-	if (vcpu->guest_debug & (KVM_GUESTDBG_USE_HW_BP | KVM_GUESTDBG_SINGLESTEP)) {
+	if (vcpu->kvm->protected_task ||
+	    (vcpu->guest_debug &
+	     (KVM_GUESTDBG_USE_HW_BP | KVM_GUESTDBG_SINGLESTEP))) {
 		kvm_run->debug.arch.dr6 = dr6 | DR6_ACTIVE_LOW;
 		kvm_run->debug.arch.pc = kvm_get_linear_rip(vcpu);
 		kvm_run->debug.arch.exception = DB_VECTOR;

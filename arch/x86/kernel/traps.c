@@ -1422,28 +1422,11 @@ DEFINE_IDTENTRY_RAW(exc_debug)
  * the correct behaviour even in the presence of the asynchronous
  * IRQ13 behaviour
  */
-static void math_error(struct pt_regs *regs, int trapnr)
+static void math_error_user(struct pt_regs *regs, int trapnr)
 {
 	struct task_struct *task = current;
 	struct fpu *fpu = x86_task_fpu(task);
 	int si_code;
-	char *str = (trapnr == X86_TRAP_MF) ? "fpu exception" :
-						"simd exception";
-
-	cond_local_irq_enable(regs);
-
-	if (!user_mode(regs)) {
-		if (fixup_exception(regs, trapnr, 0, 0))
-			goto exit;
-
-		task->thread.error_code = 0;
-		task->thread.trap_nr = trapnr;
-
-		if (notify_die(DIE_TRAP, str, regs, 0, trapnr,
-			       SIGFPE) != NOTIFY_STOP)
-			die(str, regs, 0);
-		goto exit;
-	}
 
 	/*
 	 * Synchronize the FPU register state to the memory register state
@@ -1457,13 +1440,37 @@ static void math_error(struct pt_regs *regs, int trapnr)
 	si_code = fpu__exception_code(fpu, trapnr);
 	/* Retry when we get spurious exceptions: */
 	if (!si_code)
-		goto exit;
+		return;
 
 	if (fixup_vdso_exception(regs, trapnr, 0, 0))
-		goto exit;
+		return;
 
 	force_sig_fault(SIGFPE, si_code,
 			(void __user *)uprobe_get_trap_addr(regs));
+}
+
+static void math_error(struct pt_regs *regs, int trapnr)
+{
+	struct task_struct *task = current;
+	char *str = (trapnr == X86_TRAP_MF) ? "fpu exception" :
+						"simd exception";
+
+	cond_local_irq_enable(regs);
+
+	if (user_mode(regs)) {
+		math_error_user(regs, trapnr);
+		goto exit;
+	}
+
+	if (fixup_exception(regs, trapnr, 0, 0))
+		goto exit;
+
+	task->thread.error_code = 0;
+	task->thread.trap_nr = trapnr;
+
+	if (notify_die(DIE_TRAP, str, regs, 0, trapnr,
+		       SIGFPE) != NOTIFY_STOP)
+		die(str, regs, 0);
 exit:
 	cond_local_irq_disable(regs);
 }
@@ -1477,6 +1484,73 @@ DEFINE_IDTENTRY(exc_simd_coprocessor_error)
 {
 	math_error(regs, X86_TRAP_XF);
 }
+
+bool x86_handle_user_exception(struct pt_regs *regs, unsigned int trapnr,
+			       unsigned long error_code, unsigned long dr6)
+{
+	void __user *addr = error_get_trap_addr(regs);
+
+	if (WARN_ON_ONCE(!user_mode(regs)))
+		return false;
+
+	switch (trapnr) {
+	case X86_TRAP_DE:
+		do_trap(trapnr, SIGFPE, "divide error", regs, error_code,
+			FPE_INTDIV, addr);
+		break;
+	case X86_TRAP_DB:
+		current->thread.virtual_dr6 = dr6 & DR_STEP;
+		clear_thread_flag(TIF_BLOCKSTEP);
+		send_sigtrap(regs, error_code, get_si_code(dr6));
+		break;
+	case X86_TRAP_BP:
+		do_trap(trapnr, SIGTRAP, "int3", regs, error_code, 0, NULL);
+		break;
+	case X86_TRAP_OF:
+		do_trap(trapnr, SIGSEGV, "overflow", regs, error_code, 0, NULL);
+		break;
+	case X86_TRAP_BR:
+		do_trap(trapnr, SIGSEGV, "bounds", regs, error_code, 0, NULL);
+		break;
+	case X86_TRAP_UD:
+		do_trap(trapnr, SIGILL, "invalid opcode", regs, error_code,
+			ILL_ILLOPN, addr);
+		break;
+	case X86_TRAP_OLD_MF:
+		do_trap(trapnr, SIGFPE, "coprocessor segment overrun", regs,
+			error_code, 0, NULL);
+		break;
+	case X86_TRAP_TS:
+		do_trap(trapnr, SIGSEGV, "invalid TSS", regs, error_code, 0,
+			NULL);
+		break;
+	case X86_TRAP_NP:
+		do_trap(trapnr, SIGBUS, "segment not present", regs, error_code,
+			0, NULL);
+		break;
+	case X86_TRAP_SS:
+		do_trap(trapnr, SIGBUS, "stack segment", regs, error_code, 0,
+			NULL);
+		break;
+	case X86_TRAP_GP:
+		gp_user_force_sig_segv(regs, trapnr, error_code,
+				       "general protection fault");
+		break;
+	case X86_TRAP_MF:
+	case X86_TRAP_XF:
+		math_error_user(regs, trapnr);
+		break;
+	case X86_TRAP_AC:
+		do_trap(trapnr, SIGBUS, "alignment check", regs, error_code,
+			BUS_ADRALN, NULL);
+		break;
+	default:
+		return false;
+	}
+
+	return true;
+}
+EXPORT_SYMBOL_GPL(x86_handle_user_exception);
 
 DEFINE_IDTENTRY(exc_spurious_interrupt_bug)
 {

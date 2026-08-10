@@ -899,6 +899,13 @@ void vmx_update_exception_bitmap(struct kvm_vcpu *vcpu)
 {
 	u32 eb;
 
+	if (vcpu->kvm->protected_task) {
+		vmcs_write32(PAGE_FAULT_ERROR_CODE_MASK, 0);
+		vmcs_write32(PAGE_FAULT_ERROR_CODE_MATCH, 0);
+		vmcs_write32(EXCEPTION_BITMAP, ~0U);
+		return;
+	}
+
 	eb = (1u << PF_VECTOR) | (1u << UD_VECTOR) | (1u << MC_VECTOR) |
 	     (1u << DB_VECTOR) | (1u << AC_VECTOR);
 	/*
@@ -5425,6 +5432,20 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
 	if (is_machine_check(intr_info) || is_nmi(intr_info))
 		return 1;
 
+	ex_no = intr_info & INTR_INFO_VECTOR_MASK;
+	error_code = 0;
+	if (intr_info & INTR_INFO_DELIVER_CODE_MASK)
+		error_code = vmcs_read32(VM_EXIT_INTR_ERROR_CODE);
+	if (vcpu->kvm->protected_task &&
+	    ex_no != DB_VECTOR && ex_no != BP_VECTOR) {
+		if (ex_no == PF_VECTOR)
+			vcpu->arch.cr2 = vmx_get_exit_qual(vcpu);
+		kvm_run->exit_reason = KVM_EXIT_EXCEPTION;
+		kvm_run->ex.exception = ex_no;
+		kvm_run->ex.error_code = error_code;
+		return 0;
+	}
+
 	/*
 	 * Queue the exception here instead of in handle_nm_fault_irqoff().
 	 * This ensures the nested_vmx check is not skipped so vmexit can
@@ -5449,10 +5470,6 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
 		kvm_mmu_print_sptes(vcpu, ve_info->guest_physical_address, "#VE");
 		return 1;
 	}
-
-	error_code = 0;
-	if (intr_info & INTR_INFO_DELIVER_CODE_MASK)
-		error_code = vmcs_read32(VM_EXIT_INTR_ERROR_CODE);
 
 	if (!vmx->rmode.vm86_active && is_gp_fault(intr_info)) {
 		WARN_ON_ONCE(!enable_vmware_backdoor);
@@ -5489,15 +5506,14 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
 	if (is_page_fault(intr_info))
 		return vmx_handle_page_fault(vcpu, error_code);
 
-	ex_no = intr_info & INTR_INFO_VECTOR_MASK;
-
 	if (vmx->rmode.vm86_active && rmode_exception(vcpu, ex_no))
 		return handle_rmode_exception(vcpu, ex_no, error_code);
 
 	switch (ex_no) {
 	case DB_VECTOR:
 		dr6 = vmx_get_exit_qual(vcpu);
-		if (!(vcpu->guest_debug &
+		if (!vcpu->kvm->protected_task &&
+		    !(vcpu->guest_debug &
 		      (KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_USE_HW_BP))) {
 			/*
 			 * If the #DB was due to ICEBP, a.k.a. INT1, skip the
@@ -5515,6 +5531,8 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
 			kvm_queue_exception_p(vcpu, DB_VECTOR, dr6);
 			return 1;
 		}
+		if (vcpu->kvm->protected_task && is_icebp(intr_info))
+			WARN_ON(!skip_emulated_instruction(vcpu));
 		kvm_run->debug.arch.dr6 = dr6 | DR6_ACTIVE_LOW;
 		kvm_run->debug.arch.dr7 = vmcs_readl(GUEST_DR7);
 		fallthrough;

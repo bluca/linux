@@ -26,6 +26,8 @@ void handle_invalid_op(struct pt_regs *regs);
 #endif
 
 noinstr bool handle_bug(struct pt_regs *regs);
+bool x86_handle_user_exception(struct pt_regs *regs, unsigned int trapnr,
+			       unsigned long error_code, unsigned long dr6);
 
 static inline int get_si_code(unsigned long condition)
 {
