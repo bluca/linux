@@ -32,11 +32,20 @@ signal_action:
 	.balign 4
 signal_seen:
 	.long 0
+	.balign 8
+reexec_argv:
+	.quad 0
+	.quad reexec_marker
+	.quad 0
+reexec_marker:
+	.asciz "reexec"
 
 	.text
 	.globl _start
 	.type _start, @function
 _start:
+	cmpl $1, (%rsp)
+	jne 4f
 	mov $1, %eax
 	mov $1, %edi
 	lea message(%rip), %rsi
@@ -44,6 +53,7 @@ _start:
 	syscall
 	cmp $message_length, %rax
 	jne 1f
+4:
 
 	mov $13, %eax
 	mov $10, %edi
@@ -114,6 +124,16 @@ _start:
 	test %rax, %rax
 	jne 1f
 
+	cmpl $1, (%rsp)
+	jne 4f
+	mov 8(%rsp), %rdi
+	mov %rdi, reexec_argv(%rip)
+	lea reexec_argv(%rip), %rsi
+	xor %edx, %edx
+	mov $59, %eax
+	syscall
+	jmp 1f
+4:
 	xor %edi, %edi
 	jmp 2f
 1:
