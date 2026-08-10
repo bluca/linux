@@ -5,6 +5,8 @@
 .set FPSTATE_MXCSR, 24
 .set FPSTATE_XMM15, 400
 .set SA_RESTORER_SIGINFO, 0x04000004
+.set ADDRESS_FD, 100
+.set READY_FD, 101
 
 	.section .rodata
 message:
@@ -44,6 +46,31 @@ reexec_marker:
 	.globl _start
 	.type _start, @function
 _start:
+	sub $8, %rsp
+	movb $0, (%rsp)
+	mov $1, %eax
+	mov $READY_FD, %edi
+	mov %rsp, %rsi
+	mov $1, %edx
+	syscall
+	cmp $1, %rax
+	jne 1f
+	xor %eax, %eax
+	mov $ADDRESS_FD, %edi
+	mov %rsp, %rsi
+	mov $8, %edx
+	syscall
+	cmp $8, %rax
+	jne 1f
+	mov (%rsp), %rsi
+	add $8, %rsp
+	mov $1, %eax
+	mov $1, %edi
+	mov $1, %edx
+	syscall
+	cmp $-14, %rax
+	jne 1f
+
 	cmpl $1, (%rsp)
 	jne 4f
 	mov $1, %eax

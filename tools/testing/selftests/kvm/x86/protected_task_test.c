@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -351,29 +352,67 @@ static void get_exec_helper_path(char path[PATH_MAX])
 	memcpy(name, helper, sizeof(helper));
 }
 
+static unsigned long get_hidden_mapping(pid_t pid)
+{
+	char path[64], line[256], permissions[5], extra;
+	unsigned long address = 0, end, inode;
+	FILE *maps;
+
+	snprintf(path, sizeof(path), "/proc/%d/maps", pid);
+	maps = fopen(path, "re");
+	TEST_ASSERT(maps, "fopen(%s) failed: %d", path, errno);
+	while (fgets(line, sizeof(line), maps)) {
+		int fields;
+
+		fields = sscanf(line, "%lx-%lx %4s %*s %*s %lu %c",
+				&address, &end, permissions, &inode, &extra);
+		if (fields == 4 && !strcmp(permissions, "---p") && !inode &&
+		    end - address > 1UL << 20)
+			break;
+		address = 0;
+	}
+	TEST_ASSERT(fclose(maps) == 0, "fclose(%s) failed: %d", path, errno);
+	TEST_ASSERT(address, "Protected helper has no hidden mapping");
+	return address;
+}
+
 static void test_protected_exec(int kvm_fd)
 {
+	enum {
+		ADDRESS_FD = 100,
+		READY_FD = 101,
+	};
 	static const char expected[] = "protected task exec\n";
 	struct kvm_protected_task_arm arm = {
 		.size = sizeof(arm),
 	};
 	char helper[PATH_MAX], output[sizeof(expected)] = {};
 	size_t nread = 0;
-	int pipefd[2];
+	int address_pipe[2], pipefd[2], ready_pipe[2];
 	int status;
 	pid_t child;
 
 	get_exec_helper_path(helper);
 	TEST_ASSERT(pipe(pipefd) == 0, "pipe() failed: %d", errno);
+	TEST_ASSERT(pipe(address_pipe) == 0, "pipe() failed: %d", errno);
+	TEST_ASSERT(pipe(ready_pipe) == 0, "pipe() failed: %d", errno);
 	child = fork();
 	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
 	if (!child) {
 		int fd, ret;
 
 		close(pipefd[0]);
+		close(address_pipe[1]);
+		close(ready_pipe[0]);
 		TEST_ASSERT(dup2(pipefd[1], STDOUT_FILENO) == STDOUT_FILENO,
 			    "dup2() failed: %d", errno);
+		TEST_ASSERT(dup2(address_pipe[0], ADDRESS_FD) == ADDRESS_FD,
+			    "dup2() failed: %d", errno);
+		TEST_ASSERT(dup2(ready_pipe[1], READY_FD) == READY_FD,
+			    "dup2() failed: %d", errno);
 		close(pipefd[1]);
+		close(address_pipe[0]);
+		close(ready_pipe[1]);
 		fd = create_context_with_features(kvm_fd, KVM_PROTECTED_TASK_FEATURE_EXEC);
 		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
 		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
@@ -382,6 +421,20 @@ static void test_protected_exec(int kvm_fd)
 	}
 
 	close(pipefd[1]);
+	close(address_pipe[0]);
+	close(ready_pipe[1]);
+	for (int i = 0; i < 2; i++) {
+		unsigned long address;
+		char ready;
+
+		TEST_ASSERT(read(ready_pipe[0], &ready, sizeof(ready)) == sizeof(ready),
+			    "Failed to wait for protected helper: %d", errno);
+		address = get_hidden_mapping(child);
+		TEST_ASSERT(write(address_pipe[1], &address, sizeof(address)) == sizeof(address),
+			    "Failed to send hidden mapping address: %d", errno);
+	}
+	close(address_pipe[1]);
+	close(ready_pipe[0]);
 	while (nread < sizeof(output)) {
 		ssize_t n;
 
