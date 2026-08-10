@@ -353,10 +353,12 @@ static void get_exec_helper_path(char path[PATH_MAX])
 	memcpy(name, helper, sizeof(helper));
 }
 
-static unsigned long get_hidden_mapping(pid_t pid)
+static size_t get_hidden_mappings(pid_t pid, unsigned long *addresses,
+				  size_t max_addresses)
 {
 	char path[64], line[256], permissions[5], extra;
-	unsigned long address = 0, end, inode;
+	unsigned long address, end, inode;
+	size_t n = 0;
 	FILE *maps;
 
 	snprintf(path, sizeof(path), "/proc/%d/maps", pid);
@@ -367,14 +369,15 @@ static unsigned long get_hidden_mapping(pid_t pid)
 
 		fields = sscanf(line, "%lx-%lx %4s %*s %*s %lu %c",
 				&address, &end, permissions, &inode, &extra);
-		if (fields == 4 && !strcmp(permissions, "---p") && !inode &&
-		    end - address > 1UL << 20)
-			break;
-		address = 0;
+		if (fields != 4 || strcmp(permissions, "---p") || inode ||
+		    end - address <= 1UL << 20)
+			continue;
+		TEST_ASSERT(n < max_addresses,
+			    "Too many hidden mappings in task %d", pid);
+		addresses[n++] = address;
 	}
 	TEST_ASSERT(fclose(maps) == 0, "fclose(%s) failed: %d", path, errno);
-	TEST_ASSERT(address, "Protected helper has no hidden mapping");
-	return address;
+	return n;
 }
 
 static void test_hidden_mapping_ptrace(pid_t child, unsigned long address)
@@ -408,6 +411,7 @@ static void test_protected_exec(int kvm_fd)
 		.size = sizeof(arm),
 	};
 	char helper[PATH_MAX], output[sizeof(expected)] = {};
+	unsigned long main_address = 0;
 	size_t nread = 0;
 	int address_pipe[2], pipefd[2], ready_pipe[2];
 	int status;
@@ -444,14 +448,43 @@ static void test_protected_exec(int kvm_fd)
 	close(pipefd[1]);
 	close(address_pipe[0]);
 	close(ready_pipe[1]);
-	for (int i = 0; i < 2; i++) {
-		unsigned long address;
-		char ready;
+	for (int i = 0; i < 12; i++) {
+		unsigned long address, addresses[2];
+		size_t n;
+		pid_t target;
+		int stage = i % 6;
 
-		TEST_ASSERT(read(ready_pipe[0], &ready, sizeof(ready)) == sizeof(ready),
+		TEST_ASSERT(read(ready_pipe[0], &target, sizeof(target)) == sizeof(target),
 			    "Failed to wait for protected helper: %d", errno);
-		address = get_hidden_mapping(child);
-		test_hidden_mapping_ptrace(child, address);
+		n = get_hidden_mappings(target, addresses,
+					sizeof(addresses) / sizeof(addresses[0]));
+		if (stage == 0) {
+			TEST_ASSERT(target == child && n == 1,
+				    "Initial helper has unexpected mappings");
+			main_address = address = addresses[0];
+		} else if (stage == 1 || stage == 3) {
+			TEST_ASSERT(target != child && n == 1,
+				    "Process child has unexpected mappings");
+			address = addresses[0];
+		} else if (stage == 2) {
+			TEST_ASSERT(target != child && n == 2,
+				    "vfork child has unexpected mappings");
+			address = addresses[addresses[0] == main_address];
+			TEST_ASSERT(address != main_address,
+				    "vfork hidden mapping is not distinct");
+		} else if (stage == 4) {
+			TEST_ASSERT(target == child && n == 2,
+				    "Thread did not create a second hidden mapping");
+			address = addresses[addresses[0] == main_address];
+			TEST_ASSERT(address != main_address,
+				    "Thread hidden mapping is not distinct");
+		} else {
+			TEST_ASSERT(target == child && n == 1,
+				    "Post-thread helper %d has %zu hidden mappings, expected task %d with one",
+				    target, n, child);
+			address = addresses[0];
+		}
+		test_hidden_mapping_ptrace(target, address);
 		TEST_ASSERT(write(address_pipe[1], &address, sizeof(address)) == sizeof(address),
 			    "Failed to send hidden mapping address: %d", errno);
 	}
