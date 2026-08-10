@@ -4,6 +4,13 @@
 .set FPSTATE_FCW, 0
 .set FPSTATE_MXCSR, 24
 .set FPSTATE_XMM15, 400
+.set SIGINFO_CODE, 8
+.set SIGINFO_ADDR, 16
+.set UCONTEXT_RIP, 168
+.set UCONTEXT_EFL, 176
+.set UCONTEXT_ERR, 192
+.set UCONTEXT_TRAPNO, 200
+.set UCONTEXT_CR2, 216
 .set SA_RESTORER_SIGINFO, 0x04000004
 .set ADDRESS_FD, 100
 .set READY_FD, 101
@@ -22,6 +29,18 @@ initial_mxcsr:
 	.long 0x3f80
 initial_fcw:
 	.word 0x077f
+replacement_mxcsr:
+	.long 0x5f80
+replacement_fcw:
+	.word 0x037f
+simd_exception_mxcsr:
+	.long 0x1d80
+x87_exception_fcw:
+	.word 0x037b
+one_float:
+	.long 0x3f800000
+zero_float:
+	.long 0
 
 	.balign 8
 clone3_args:
@@ -37,10 +56,43 @@ signal_action:
 	.quad signal_restorer
 	.quad 0
 
+	.balign 8
+exception_action:
+	.quad exception_handler
+	.quad SA_RESTORER_SIGINFO
+	.quad signal_restorer
+	.quad 0
+
+	.balign 8
+default_action:
+	.zero 32
+
 	.data
 	.balign 4
 signal_seen:
 	.long 0
+	.balign 4
+exception_seen:
+	.long 0
+	.balign 4
+expected_signal:
+	.long 0
+	.balign 4
+expected_code:
+	.long 0
+	.balign 8
+expected_trap:
+	.quad 0
+expected_error_mask:
+	.quad 0
+expected_error:
+	.quad 0
+expected_address:
+	.quad 0
+expected_cr2:
+	.quad 0
+exception_resume:
+	.quad 0
 	.balign 4
 failure_code:
 	.long 1
@@ -119,6 +171,312 @@ _start:
 	fnstcw -2(%rsp)
 	cmpw $0x037f, -2(%rsp)
 	jne 1f
+
+	movl $15, failure_code(%rip)
+	mov $4, %edi
+	call install_exception_handler
+	test %eax, %eax
+	jne 1f
+	mov $5, %edi
+	call install_exception_handler
+	test %eax, %eax
+	jne 1f
+	mov $7, %edi
+	call install_exception_handler
+	test %eax, %eax
+	jne 1f
+	mov $8, %edi
+	call install_exception_handler
+	test %eax, %eax
+	jne 1f
+	mov $11, %edi
+	call install_exception_handler
+	test %eax, %eax
+	jne 1f
+
+	mov $8, %edi
+	mov $1, %esi
+	xor %edx, %edx
+	lea .Ldivide(%rip), %rcx
+	lea .Ldivide_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	mov $1, %eax
+	xor %edx, %edx
+	xor %ecx, %ecx
+.Ldivide:
+	div %ecx
+.Ldivide_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+
+	mov $4, %edi
+	mov $2, %esi
+	mov $6, %edx
+	lea .Linvalid_opcode(%rip), %rcx
+	lea .Linvalid_opcode_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+.Linvalid_opcode:
+	ud2
+.Linvalid_opcode_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+
+	mov $5, %edi
+	mov $128, %esi
+	mov $3, %edx
+	xor %ecx, %ecx
+	lea .Lbreakpoint_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	int3
+.Lbreakpoint_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+
+	mov $5, %edi
+	mov $1, %esi
+	mov $1, %edx
+	lea .Ldebug_resume(%rip), %rcx
+	lea .Ldebug_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	.byte 0xf1
+.Ldebug_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+
+	mov $11, %edi
+	mov $128, %esi
+	mov $13, %edx
+	xor %ecx, %ecx
+	lea .Lgeneral_protection_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	cli
+.Lgeneral_protection_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+
+	mov $7, %edi
+	mov $1, %esi
+	mov $17, %edx
+	xor %ecx, %ecx
+	lea .Lalignment_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	sub $16, %rsp
+	lea 1(%rsp), %rax
+	pushfq
+	orq $0x40000, (%rsp)
+	popfq
+	mov (%rax), %eax
+.Lalignment_resume:
+	add $16, %rsp
+	call check_exception
+	test %eax, %eax
+	jne 1f
+
+	mov $8, %edi
+	mov $3, %esi
+	mov $19, %edx
+	lea .Lsimd_exception(%rip), %rcx
+	lea .Lsimd_exception_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	ldmxcsr simd_exception_mxcsr(%rip)
+	xorps %xmm0, %xmm0
+	movss one_float(%rip), %xmm1
+.Lsimd_exception:
+	divss %xmm0, %xmm1
+.Lsimd_exception_resume:
+	ldmxcsr replacement_mxcsr(%rip)
+	call check_exception
+	test %eax, %eax
+	jne 1f
+
+	mov $8, %edi
+	mov $3, %esi
+	mov $16, %edx
+	lea .Lx87_exception(%rip), %rcx
+	lea .Lx87_exception_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	fldcw x87_exception_fcw(%rip)
+	fld1
+	fdivs zero_float(%rip)
+.Lx87_exception:
+	fwait
+.Lx87_exception_resume:
+	fninit
+	fldcw replacement_fcw(%rip)
+	call check_exception
+	test %eax, %eax
+	jne 1f
+
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $0x22, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae 1f
+	mov %rax, %r14
+	mov %rax, %rdi
+	mov $4096, %esi
+	mov $11, %eax
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $11, %edi
+	mov $1, %esi
+	mov $14, %edx
+	mov %r14, %rcx
+	lea .Lmaperr_resume(%rip), %r8
+	mov %r14, %r9
+	call prepare_exception
+	movq $7, expected_error_mask(%rip)
+	movq $4, expected_error(%rip)
+	mov (%r14), %rax
+.Lmaperr_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	xor %edx, %edx
+	mov $0x22, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae 1f
+	mov %rax, %r14
+	mov $11, %edi
+	mov $2, %esi
+	mov $14, %edx
+	mov %r14, %rcx
+	lea .Laccerr_resume(%rip), %r8
+	mov %r14, %r9
+	call prepare_exception
+	movq $7, expected_error_mask(%rip)
+	movq $5, expected_error(%rip)
+	mov (%r14), %rax
+.Laccerr_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+	mov %r14, %rdi
+	mov $4096, %esi
+	mov $11, %eax
+	syscall
+	test %rax, %rax
+	jne 1f
+
+	movl $16, failure_code(%rip)
+	mov $57, %eax
+	syscall
+	test %rax, %rax
+	jz .Ldefault_signal_child
+	js 1f
+	sub $16, %rsp
+	mov %rax, %r14
+	mov %rax, %rdi
+	mov %rsp, %rsi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	mov $61, %eax
+	syscall
+	cmp %r14, %rax
+	jne .Ldefault_signal_fail
+	cmpl $0x137f, (%rsp)
+	jne .Ldefault_signal_fail
+	mov $101, %eax
+	mov $7, %edi
+	mov %r14, %rsi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	syscall
+	test %rax, %rax
+	jne .Ldefault_signal_fail
+	mov %r14, %rdi
+	mov %rsp, %rsi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	mov $61, %eax
+	syscall
+	cmp %r14, %rax
+	jne .Ldefault_signal_fail
+	cmpl $0x047f, (%rsp)
+	jne .Ldefault_signal_fail
+	mov $101, %eax
+	mov $7, %edi
+	mov %r14, %rsi
+	xor %edx, %edx
+	mov $4, %r10d
+	syscall
+	test %rax, %rax
+	jne .Ldefault_signal_fail
+	mov %r14, %rdi
+	mov %rsp, %rsi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	mov $61, %eax
+	syscall
+	cmp %r14, %rax
+	jne .Ldefault_signal_fail
+	movl (%rsp), %eax
+	and $0x7f, %eax
+	cmp $4, %eax
+	jne .Ldefault_signal_fail
+	add $16, %rsp
+	jmp .Ldefault_signal_done
+.Ldefault_signal_fail:
+	add $16, %rsp
+	jmp 1f
+.Ldefault_signal_child:
+	mov $13, %eax
+	mov $4, %edi
+	lea default_action(%rip), %rsi
+	xor %edx, %edx
+	mov $8, %r10d
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $101, %eax
+	xor %edi, %edi
+	xor %esi, %esi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $39, %eax
+	syscall
+	mov %eax, %r12d
+	mov $186, %eax
+	syscall
+	mov %eax, %r13d
+	mov $234, %eax
+	mov %r12d, %edi
+	mov %r13d, %esi
+	mov $19, %edx
+	syscall
+	test %rax, %rax
+	jne 1f
+	ud2
+.Ldefault_signal_done:
 
 	movl $20, failure_code(%rip)
 	mov $57, %eax
@@ -255,6 +613,39 @@ _start:
 	ud2
 	.size _start, . - _start
 
+	.type install_exception_handler, @function
+install_exception_handler:
+	mov $13, %eax
+	lea exception_action(%rip), %rsi
+	xor %edx, %edx
+	mov $8, %r10d
+	syscall
+	ret
+	.size install_exception_handler, . - install_exception_handler
+
+	.type prepare_exception, @function
+prepare_exception:
+	movl %edi, expected_signal(%rip)
+	movl %esi, expected_code(%rip)
+	movq %rdx, expected_trap(%rip)
+	movq $0, expected_error_mask(%rip)
+	movq $0, expected_error(%rip)
+	movq %rcx, expected_address(%rip)
+	movq %r9, expected_cr2(%rip)
+	movq %r8, exception_resume(%rip)
+	movl $0, exception_seen(%rip)
+	ret
+	.size prepare_exception, . - prepare_exception
+
+	.type check_exception, @function
+check_exception:
+	xor %eax, %eax
+	cmpl $1, exception_seen(%rip)
+	sete %al
+	xor $1, %eax
+	ret
+	.size check_exception, . - check_exception
+
 	.type check_process_clone, @function
 check_process_clone:
 	test %rax, %rax
@@ -376,6 +767,47 @@ signal_handler:
 3:
 	ret
 	.size signal_handler, . - signal_handler
+
+	.type exception_handler, @function
+exception_handler:
+	andq $~0x40000, UCONTEXT_EFL(%rdx)
+	cmpl expected_signal(%rip), %edi
+	jne .Lexception_fail
+	movl SIGINFO_CODE(%rsi), %eax
+	cmpl expected_code(%rip), %eax
+	jne .Lexception_fail
+	movq UCONTEXT_TRAPNO(%rdx), %rax
+	cmpq expected_trap(%rip), %rax
+	jne .Lexception_fail
+	movq expected_error_mask(%rip), %rcx
+	test %rcx, %rcx
+	jz .Lexception_address
+	movq UCONTEXT_ERR(%rdx), %rax
+	and %rcx, %rax
+	cmpq expected_error(%rip), %rax
+	jne .Lexception_fail
+.Lexception_address:
+	movq expected_address(%rip), %rax
+	test %rax, %rax
+	jz .Lexception_cr2
+	cmpq SIGINFO_ADDR(%rsi), %rax
+	jne .Lexception_fail
+.Lexception_cr2:
+	movq expected_cr2(%rip), %rax
+	test %rax, %rax
+	jz .Lexception_pass
+	cmpq UCONTEXT_CR2(%rdx), %rax
+	jne .Lexception_fail
+.Lexception_pass:
+	movl $1, exception_seen(%rip)
+	jmp .Lexception_resume
+.Lexception_fail:
+	movl $-1, exception_seen(%rip)
+.Lexception_resume:
+	movq exception_resume(%rip), %rax
+	movq %rax, UCONTEXT_RIP(%rdx)
+	ret
+	.size exception_handler, . - exception_handler
 
 	.type signal_restorer, @function
 signal_restorer:
