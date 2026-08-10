@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -376,6 +377,26 @@ static unsigned long get_hidden_mapping(pid_t pid)
 	return address;
 }
 
+static void test_hidden_mapping_ptrace(pid_t child, unsigned long address)
+{
+	long value;
+	int status;
+
+	TEST_ASSERT(ptrace(PTRACE_ATTACH, child, NULL, NULL) == 0,
+		    "PTRACE_ATTACH failed: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() after PTRACE_ATTACH failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status), "Ptraced child did not stop: %#x", status);
+
+	errno = 0;
+	value = ptrace(PTRACE_PEEKDATA, child, (void *)address, NULL);
+	TEST_ASSERT(value == -1 && errno == EIO,
+		    "PTRACE_PEEKDATA returned %ld/%d, expected -1/%d",
+		    value, errno, EIO);
+	TEST_ASSERT(ptrace(PTRACE_DETACH, child, NULL, NULL) == 0,
+		    "PTRACE_DETACH failed: %d", errno);
+}
+
 static void test_protected_exec(int kvm_fd)
 {
 	enum {
@@ -430,6 +451,7 @@ static void test_protected_exec(int kvm_fd)
 		TEST_ASSERT(read(ready_pipe[0], &ready, sizeof(ready)) == sizeof(ready),
 			    "Failed to wait for protected helper: %d", errno);
 		address = get_hidden_mapping(child);
+		test_hidden_mapping_ptrace(child, address);
 		TEST_ASSERT(write(address_pipe[1], &address, sizeof(address)) == sizeof(address),
 			    "Failed to send hidden mapping address: %d", errno);
 	}
