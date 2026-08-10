@@ -400,8 +400,7 @@ static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 	if (ret)
 		return ret;
 
-	address = vm_mmap(NULL, 0, size, PROT_READ | PROT_WRITE,
-			  MAP_PRIVATE | MAP_ANONYMOUS, 0);
+	address = vm_mmap_protected_task(size);
 	if (IS_ERR_VALUE(address))
 		return address;
 	state->pgtable_addr = address;

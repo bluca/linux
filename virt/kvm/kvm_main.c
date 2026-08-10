@@ -2980,7 +2980,10 @@ static int hva_to_pfn_slow(struct kvm_follow_pfn *kfp, kvm_pfn_t *pfn)
 	struct page *page, *wpage;
 	int npages;
 
-	if (kfp->pin)
+	if (kfp->slot->flags & KVM_MEMSLOT_PROTECTED_TASK)
+		npages = get_user_page_protected_task(kfp->hva, &page, flags,
+						       kfp->pin);
+	else if (kfp->pin)
 		npages = pin_user_pages_unlocked(kfp->hva, 1, &page, flags);
 	else
 		npages = get_user_pages_unlocked(kfp->hva, 1, &page, flags);
@@ -3129,7 +3132,7 @@ static kvm_pfn_t kvm_follow_pfn(struct kvm_follow_pfn *kfp)
 		map_writable = kfp->map_writable;
 		flags = kfp->flags;
 		kfp->map_writable = NULL;
-		kfp->flags = (kfp->flags & ~FOLL_WRITE) | FOLL_FORCE;
+		kfp->flags &= ~FOLL_WRITE;
 		pfn = hva_to_pfn(kfp);
 		kfp->flags = flags;
 		kfp->map_writable = map_writable;

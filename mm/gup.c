@@ -1218,6 +1218,13 @@ static int check_vma_flags(struct vm_area_struct *vma, unsigned long gup_flags)
 
 	if (vma_is_secretmem(vma))
 		return -EFAULT;
+	if (vm_flags & VM_KVM_PROTECTED) {
+		if (!(gup_flags & FOLL_KVM_PROTECTED) || write || foreign)
+			return -EFAULT;
+		return 0;
+	}
+	if (gup_flags & FOLL_KVM_PROTECTED)
+		return -EFAULT;
 
 	if (write) {
 		if (!vma_anon &&
@@ -2682,6 +2689,30 @@ long get_user_pages_unlocked(unsigned long start, unsigned long nr_pages,
 				       &locked, gup_flags);
 }
 EXPORT_SYMBOL(get_user_pages_unlocked);
+
+long get_user_page_protected_task(unsigned long start, struct page **page,
+				    unsigned int gup_flags, bool pin)
+{
+	int locked = 0;
+
+	if (WARN_ON_ONCE(gup_flags & (FOLL_WRITE | FOLL_FORCE | FOLL_GET |
+				      INTERNAL_GUP_FLAGS)) ||
+	    WARN_ON_ONCE(!pin && (gup_flags & FOLL_LONGTERM)))
+		return -EINVAL;
+
+	gup_flags |= FOLL_TOUCH | FOLL_UNLOCKABLE | FOLL_FORCE |
+		     FOLL_KVM_PROTECTED;
+	if (pin) {
+		gup_flags |= FOLL_PIN;
+		mm_set_has_pinned_flag(current->mm);
+		return __gup_longterm_locked(current->mm, start, 1, page,
+					     &locked, gup_flags);
+	}
+
+	return __get_user_pages_locked(current->mm, start, 1, page, &locked,
+				       gup_flags);
+}
+EXPORT_SYMBOL_GPL(get_user_page_protected_task);
 
 /*
  * GUP-fast

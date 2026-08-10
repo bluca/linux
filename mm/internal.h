@@ -1641,11 +1641,13 @@ enum {
 	FOLL_UNLOCKABLE = 1 << 21,
 	/* VMA lookup+checks compatible with MADV_POPULATE_(READ|WRITE) */
 	FOLL_MADV_POPULATE = 1 << 22,
+	/* Allow KVM's protected-task memslot to resolve its hidden mapping. */
+	FOLL_KVM_PROTECTED = 1 << 23,
 };
 
 #define INTERNAL_GUP_FLAGS (FOLL_TOUCH | FOLL_TRIED | FOLL_REMOTE | FOLL_PIN | \
 			    FOLL_FAST_ONLY | FOLL_UNLOCKABLE | \
-			    FOLL_MADV_POPULATE)
+			    FOLL_MADV_POPULATE | FOLL_KVM_PROTECTED)
 
 /*
  * Indicates for which pages that are write-protected in the page table,

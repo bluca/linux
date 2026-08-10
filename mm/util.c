@@ -618,6 +618,32 @@ unsigned long vm_mmap(struct file *file, unsigned long addr,
 }
 EXPORT_SYMBOL(vm_mmap);
 
+unsigned long vm_mmap_protected_task(unsigned long len)
+{
+	const unsigned long flags = MAP_PRIVATE | MAP_ANONYMOUS;
+	const unsigned long prot = PROT_READ | PROT_WRITE;
+	struct mm_struct *mm = current->mm;
+	unsigned long populate, ret;
+
+	if (!IS_ENABLED(CONFIG_64BIT))
+		return -EOPNOTSUPP;
+	ret = security_mmap_file(NULL, prot, flags);
+	if (ret)
+		return ret;
+	ret = fsnotify_mmap_perm(NULL, prot, 0, len);
+	if (ret)
+		return ret;
+
+	if (mmap_write_lock_killable(mm))
+		return -EINTR;
+	ret = do_mmap(NULL, 0, len, prot, flags,
+		      VM_KVM_PROTECTED | VM_DONTDUMP, 0, &populate, NULL);
+	mmap_write_unlock(mm);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(vm_mmap_protected_task);
+
 #ifdef CONFIG_ARCH_HAS_USER_SHADOW_STACK
 /*
  * Perform a userland memory mapping for a shadow stack into the current
