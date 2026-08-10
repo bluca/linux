@@ -9,6 +9,7 @@
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 
+#include <asm/fpu/api.h>
 #include <asm/fsgsbase.h>
 #include <asm/msr-index.h>
 #include <asm/pgtable_types.h>
@@ -33,6 +34,7 @@ struct kvm_protected_task_x86 {
 	unsigned long pgtable_used;
 	unsigned long pgd;
 	unsigned long syscall_stub;
+	bool fpu_active;
 };
 
 struct kvm_protected_task_builder {
@@ -310,6 +312,35 @@ static int kvm_protected_task_sync_regs(struct kvm_vcpu *vcpu,
 	return 0;
 }
 
+/* Native signal setup and rt_sigreturn operate on current's active fpstate. */
+static int kvm_protected_task_activate_fpu(struct kvm_vcpu *vcpu,
+					   struct kvm_protected_task_x86 *state)
+{
+	int ret;
+
+	if (state->fpu_active)
+		return 0;
+
+	ret = fpu_swap_kvm_fpstate(&vcpu->arch.guest_fpu, true);
+	if (!ret)
+		state->fpu_active = true;
+	return ret;
+}
+
+static int kvm_protected_task_deactivate_fpu(struct kvm_vcpu *vcpu,
+					     struct kvm_protected_task_x86 *state)
+{
+	int ret;
+
+	if (!state->fpu_active)
+		return 0;
+
+	ret = fpu_swap_kvm_fpstate(&vcpu->arch.guest_fpu, false);
+	if (!ret)
+		state->fpu_active = false;
+	return ret;
+}
+
 static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 						  struct pt_regs *regs,
 						  u32 *next_slot)
@@ -491,6 +522,10 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 	struct kvm_protected_task_x86 *state = arch_state;
 	int ret;
 
+	ret = kvm_protected_task_deactivate_fpu(vcpu, state);
+	if (ret)
+		return ret;
+
 	ret = kvm_protected_task_setup_sregs(vcpu, state->pgd);
 	if (ret)
 		return ret;
@@ -499,29 +534,44 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 		return ret;
 
 	ret = kvm_vcpu_run(vcpu);
-	if (ret == -EINTR)
-		return kvm_protected_task_sync_regs(vcpu, regs, false);
+	if (ret == -EINTR) {
+		ret = kvm_protected_task_sync_regs(vcpu, regs, false);
+		goto out;
+	}
 	if (ret && (ret != -EFAULT ||
 		    vcpu->run->exit_reason != KVM_EXIT_MEMORY_FAULT))
-		return ret;
+		goto out;
 
 	switch (vcpu->run->exit_reason) {
 	case KVM_EXIT_IO:
 		if (vcpu->run->io.direction != KVM_EXIT_IO_OUT ||
 		    vcpu->run->io.size != 1 || vcpu->run->io.count != 1 ||
-		    vcpu->run->io.port != KVM_PT_SYSCALL_PORT)
-			return -EIO;
+		    vcpu->run->io.port != KVM_PT_SYSCALL_PORT) {
+			ret = -EIO;
+			break;
+		}
 		ret = kvm_protected_task_sync_regs(vcpu, regs, true);
 		if (ret)
-			return ret;
+			break;
+		if (regs->orig_ax == __NR_rt_sigreturn) {
+			ret = kvm_protected_task_activate_fpu(vcpu, state);
+			if (ret)
+				break;
+		}
 		do_protected_syscall_64(regs);
-		return 0;
+		ret = 0;
+		break;
 	case KVM_EXIT_MEMORY_FAULT:
-		return kvm_protected_task_handle_memory_fault(vcpu, regs,
-							      next_slot);
+		ret = kvm_protected_task_handle_memory_fault(vcpu, regs,
+						     next_slot);
+		break;
 	default:
-		return -EIO;
+		ret = -EIO;
+		break;
 	}
+
+out:
+	return kvm_protected_task_activate_fpu(vcpu, state) ?: ret;
 }
 
 void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *arch_state)
@@ -530,6 +580,7 @@ void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *arch_state)
 
 	if (!state)
 		return;
+	WARN_ON_ONCE(kvm_protected_task_deactivate_fpu(vcpu, state));
 	kfree(state);
 }
 
