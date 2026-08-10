@@ -6,6 +6,7 @@
 #include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/idr.h>
 #include <linux/kvm.h>
 #include <linux/kvm_host.h>
 #include <linux/kvm_protected_task.h>
@@ -25,6 +26,7 @@ struct kvm_protected_task_exec {
 	struct kvm *kvm;
 	struct kvm_vcpu *vcpu;
 	void *arch_state;
+	int debug_id;
 	u32 next_slot;
 };
 
@@ -34,6 +36,7 @@ struct kvm_protected_task_range {
 };
 
 static atomic64_t kvm_protected_task_id = ATOMIC64_INIT(0);
+static DEFINE_IDA(kvm_protected_task_debug_ids);
 
 static int kvm_protected_task_map_range(struct kvm_protected_task_exec *exec,
 					unsigned long start, unsigned long end)
@@ -112,19 +115,23 @@ static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *cont
 	struct kvm_protected_task *protected_task =
 		container_of(context, struct kvm_protected_task, context);
 	struct kvm_protected_task_exec *exec;
-	char fdname[32];
+	char fdname[sizeof("pt2147483647")];
 	int ret;
 
 	exec = kzalloc_obj(*exec);
 	if (!exec)
 		return -ENOMEM;
 
-	snprintf(fdname, sizeof(fdname), "pt-%llu",
-		 protected_task->context_id);
+	exec->debug_id = ida_alloc(&kvm_protected_task_debug_ids, GFP_KERNEL);
+	if (exec->debug_id < 0) {
+		ret = exec->debug_id;
+		goto free_exec;
+	}
+	snprintf(fdname, sizeof(fdname), "pt%d", exec->debug_id);
 	exec->kvm = kvm_create_vm(0, fdname, bprm->mm);
 	if (IS_ERR(exec->kvm)) {
 		ret = PTR_ERR(exec->kvm);
-		goto free_exec;
+		goto free_debug_id;
 	}
 	exec->kvm->protected_task = true;
 
@@ -148,6 +155,8 @@ static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *cont
 
 put_kvm:
 	kvm_put_kvm(exec->kvm);
+free_debug_id:
+	ida_free(&kvm_protected_task_debug_ids, exec->debug_id);
 free_exec:
 	kfree(exec);
 	return ret;
@@ -159,6 +168,7 @@ static void kvm_protected_task_release_exec(void *state)
 
 	kvm_arch_protected_task_cleanup(exec->vcpu, exec->arch_state);
 	kvm_put_kvm(exec->kvm);
+	ida_free(&kvm_protected_task_debug_ids, exec->debug_id);
 	kfree(exec);
 }
 
