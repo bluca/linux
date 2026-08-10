@@ -82,6 +82,8 @@ static int kvm_protected_task_map_mm(struct kvm_protected_task_exec *exec,
 	}
 
 	for_each_vma(vmi, vma) {
+		if (vma->vm_flags & VM_KVM_PROTECTED)
+			continue;
 		if (WARN_ON_ONCE(i >= nr)) {
 			ret = -EAGAIN;
 			goto unlock;
@@ -109,11 +111,8 @@ free_ranges:
 	return ret;
 }
 
-static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *context,
-					 struct linux_binprm *bprm, void **state)
+static int kvm_protected_task_create_exec(struct mm_struct *mm, void **state)
 {
-	struct kvm_protected_task *protected_task =
-		container_of(context, struct kvm_protected_task, context);
 	struct kvm_protected_task_exec *exec;
 	char fdname[sizeof("pt2147483647")];
 	int ret;
@@ -128,14 +127,14 @@ static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *cont
 		goto free_exec;
 	}
 	snprintf(fdname, sizeof(fdname), "pt%d", exec->debug_id);
-	exec->kvm = kvm_create_vm(0, fdname, bprm->mm);
+	exec->kvm = kvm_create_vm(0, fdname, mm);
 	if (IS_ERR(exec->kvm)) {
 		ret = PTR_ERR(exec->kvm);
 		goto free_debug_id;
 	}
 	exec->kvm->protected_task = true;
 
-	ret = kvm_protected_task_map_mm(exec, bprm->mm);
+	ret = kvm_protected_task_map_mm(exec, mm);
 	if (ret)
 		goto put_kvm;
 
@@ -150,8 +149,7 @@ static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *cont
 		goto put_kvm;
 
 	*state = exec;
-	return protected_task->features & KVM_PROTECTED_TASK_FEATURE_EXEC ?
-		0 : -EOPNOTSUPP;
+	return 0;
 
 put_kvm:
 	kvm_put_kvm(exec->kvm);
@@ -160,6 +158,20 @@ free_debug_id:
 free_exec:
 	kfree(exec);
 	return ret;
+}
+
+static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *context,
+					 struct linux_binprm *bprm, void **state)
+{
+	struct kvm_protected_task *protected_task =
+		container_of(context, struct kvm_protected_task, context);
+	int ret;
+
+	ret = kvm_protected_task_create_exec(bprm->mm, state);
+	if (ret)
+		return ret;
+	return protected_task->features & KVM_PROTECTED_TASK_FEATURE_EXEC ?
+		0 : -EOPNOTSUPP;
 }
 
 static void kvm_protected_task_release_exec(void *state)
@@ -180,6 +192,25 @@ static int kvm_protected_task_finalize_vcpu(void *state, struct pt_regs *regs)
 						  regs, exec->next_slot++);
 }
 
+static int kvm_protected_task_clone_exec(struct kvm_protected_task_context *context,
+					 struct pt_regs *regs, void **state)
+{
+	struct kvm_protected_task_exec *exec;
+	int ret;
+
+	ret = kvm_protected_task_create_exec(current->mm, (void **)&exec);
+	if (ret)
+		return ret;
+	ret = kvm_protected_task_finalize_vcpu(exec, regs);
+	if (ret) {
+		kvm_protected_task_release_exec(exec);
+		return ret;
+	}
+
+	*state = exec;
+	return 0;
+}
+
 static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
 {
 	struct kvm_protected_task_exec *exec = state;
@@ -188,8 +219,18 @@ static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
 						   &exec->next_slot);
 }
 
+static void kvm_protected_task_deactivate_vcpu(void *state)
+{
+	struct kvm_protected_task_exec *exec = state;
+
+	WARN_ON_ONCE(kvm_arch_protected_task_deactivate(exec->vcpu,
+							exec->arch_state));
+}
+
 static const struct kvm_protected_task_ops kvm_protected_task_ops = {
 	.stage_exec = kvm_protected_task_stage_exec,
+	.clone_exec = kvm_protected_task_clone_exec,
+	.deactivate_exec = kvm_protected_task_deactivate_vcpu,
 	.finalize_exec = kvm_protected_task_finalize_vcpu,
 	.run = kvm_protected_task_run_vcpu,
 	.cleanup_exec = kvm_protected_task_release_exec,

@@ -637,12 +637,48 @@ unsigned long vm_mmap_protected_task(unsigned long len)
 	if (mmap_write_lock_killable(mm))
 		return -EINTR;
 	ret = do_mmap(NULL, 0, len, prot, flags,
-		      VM_KVM_PROTECTED | VM_DONTDUMP, 0, &populate, NULL);
+		      VM_KVM_PROTECTED | VM_DONTCOPY | VM_DONTDUMP,
+		      0, &populate, NULL);
 	mmap_write_unlock(mm);
 
 	return ret;
 }
 EXPORT_SYMBOL_GPL(vm_mmap_protected_task);
+
+int vm_munmap_protected_task(unsigned long start, size_t len)
+{
+	struct mm_struct *mm = current->mm;
+	struct vm_area_struct *vma;
+	int ret;
+	LIST_HEAD(uf);
+	VMA_ITERATOR(vmi, mm, start);
+
+	if (mmap_write_lock_killable(mm))
+		return -EINTR;
+	vma = vma_iter_load(&vmi);
+	if (!vma || vma->vm_start != start || vma->vm_end != start + len ||
+	    !(vma->vm_flags & VM_KVM_PROTECTED)) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	vma_clear_flags(vma, VMA_SEALED_BIT);
+	vma_iter_set(&vmi, start);
+	ret = do_vmi_munmap(&vmi, mm, start, len, &uf, false);
+	if (ret) {
+		vma = vma_lookup(mm, start);
+		if (vma && vma->vm_start == start &&
+		    vma->vm_end == start + len &&
+		    vma->vm_flags & VM_KVM_PROTECTED)
+			vma_set_flags(vma, VMA_SEALED_BIT);
+	}
+
+unlock:
+	mmap_write_unlock(mm);
+	userfaultfd_unmap_complete(mm, &uf);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(vm_munmap_protected_task);
 
 #ifdef CONFIG_ARCH_HAS_USER_SHADOW_STACK
 /*

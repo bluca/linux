@@ -467,6 +467,28 @@ int fpu_copy_uabi_to_guest_fpstate(struct fpu_guest *gfpu, const void *buf,
 	return copy_uabi_from_kernel_to_xstate(kstate, ustate, vpkru);
 }
 EXPORT_SYMBOL_FOR_KVM(fpu_copy_uabi_to_guest_fpstate);
+
+int fpu_copy_task_fpstate_to_guest(struct fpu_guest *gfpu, u64 xcr0,
+				   u32 *vpkru)
+{
+	struct fpu *fpu = x86_task_fpu(current);
+	void *buf;
+	int ret;
+
+	buf = vzalloc(gfpu->uabi_size);
+	if (!buf)
+		return -ENOMEM;
+
+	fpu_sync_fpstate(fpu);
+	__copy_xstate_to_uabi_buf((struct membuf) {
+		.p = buf,
+		.left = gfpu->uabi_size,
+	}, fpu->fpstate, xcr0, current->thread.pkru, XSTATE_COPY_XSAVE);
+	ret = fpu_copy_uabi_to_guest_fpstate(gfpu, buf, xcr0, vpkru);
+	vfree(buf);
+	return ret;
+}
+EXPORT_SYMBOL_FOR_KVM(fpu_copy_task_fpstate_to_guest);
 #endif /* CONFIG_KVM */
 
 void kernel_fpu_begin_mask(unsigned int kfpu_mask)

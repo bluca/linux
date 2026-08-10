@@ -1815,6 +1815,7 @@ int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu,
 				     void *state, struct pt_regs *regs, u32 slot);
 int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,
 				struct pt_regs *regs, u32 *next_slot);
+int kvm_arch_protected_task_deactivate(struct kvm_vcpu *vcpu, void *state);
 void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *state);
 
 int kvm_cpu_has_pending_timer(struct kvm_vcpu *vcpu);

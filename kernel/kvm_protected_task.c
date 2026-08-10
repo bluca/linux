@@ -18,16 +18,6 @@ bool kvm_protected_task_can_arm(void)
 }
 EXPORT_SYMBOL_GPL(kvm_protected_task_can_arm);
 
-bool kvm_protected_task_can_fork(void)
-{
-#if IS_ENABLED(CONFIG_KVM)
-	return !current->protected_task_active &&
-	       !current->protected_task_retired;
-#else
-	return true;
-#endif
-}
-
 void kvm_protected_task_init(struct task_struct *task)
 {
 #if IS_ENABLED(CONFIG_KVM)
@@ -37,6 +27,17 @@ void kvm_protected_task_init(struct task_struct *task)
 	task->protected_task_retired = NULL;
 	task->protected_task_retired_state = NULL;
 	task->protected_task_running = false;
+#endif
+}
+
+void kvm_protected_task_fork(struct task_struct *task, bool inherit)
+{
+#if IS_ENABLED(CONFIG_KVM)
+	if (!inherit || !current->protected_task_active)
+		return;
+
+	get_file(current->protected_task_active);
+	task->protected_task_active = current->protected_task_active;
 #endif
 }
 
@@ -142,6 +143,14 @@ int kvm_protected_task_prepare_exec(struct linux_binprm *bprm)
 
 void kvm_protected_task_deactivate_exec(void)
 {
+#if IS_ENABLED(CONFIG_KVM)
+	if (current->protected_task_active && current->protected_task_state) {
+		struct kvm_protected_task_context *context =
+			current->protected_task_active->private_data;
+
+		context->ops->deactivate_exec(current->protected_task_state);
+	}
+#endif
 	kvm_protected_task_cleanup_active(current);
 }
 
@@ -187,7 +196,13 @@ bool kvm_protected_task_run(struct pt_regs *regs)
 	context = current->protected_task_active->private_data;
 	current->protected_task_running = true;
 	local_irq_enable();
-	ret = context->ops->run(current->protected_task_state, regs);
+	if (!current->protected_task_state)
+		ret = context->ops->clone_exec(context, regs,
+					       &current->protected_task_state);
+	else
+		ret = 0;
+	if (!ret)
+		ret = context->ops->run(current->protected_task_state, regs);
 	current->protected_task_running = false;
 	kvm_protected_task_cleanup_retired(current);
 	if (ret)

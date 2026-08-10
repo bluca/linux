@@ -18,6 +18,9 @@ struct kvm_protected_task_ops {
 	/* @state may be populated even when staging returns an error. */
 	int (*stage_exec)(struct kvm_protected_task_context *context,
 			  struct linux_binprm *bprm, void **state);
+	int (*clone_exec)(struct kvm_protected_task_context *context,
+			  struct pt_regs *regs, void **state);
+	void (*deactivate_exec)(void *state);
 	int (*finalize_exec)(void *state, struct pt_regs *regs);
 	int (*run)(void *state, struct pt_regs *regs);
 	void (*cleanup_exec)(void *state);
@@ -28,8 +31,8 @@ struct kvm_protected_task_context {
 };
 
 bool kvm_protected_task_can_arm(void);
-bool kvm_protected_task_can_fork(void);
 void kvm_protected_task_init(struct task_struct *task);
+void kvm_protected_task_fork(struct task_struct *task, bool inherit);
 void kvm_protected_task_cleanup(struct task_struct *task);
 void kvm_protected_task_take_exec(struct linux_binprm *bprm);
 void kvm_protected_task_cleanup_exec(struct linux_binprm *bprm);

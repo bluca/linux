@@ -2096,9 +2096,6 @@ __latent_entropy struct task_struct *copy_process(
 			return ERR_PTR(-EPERM);
 	}
 
-	if (!kvm_protected_task_can_fork())
-		return ERR_PTR(-EOPNOTSUPP);
-
 	/*
 	 * Force any signals received before this point to be delivered
 	 * before the fork happens.  Collect up signals sent to multiple
@@ -2304,6 +2301,7 @@ __latent_entropy struct task_struct *copy_process(
 	retval = copy_thread(p, args);
 	if (retval)
 		goto bad_fork_cleanup_io;
+	kvm_protected_task_fork(p, !args->kthread && !args->user_worker);
 
 	stackleak_task_init(p);
 

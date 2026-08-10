@@ -1108,6 +1108,11 @@ int __weak kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,
 	return -EOPNOTSUPP;
 }
 
+int __weak kvm_arch_protected_task_deactivate(struct kvm_vcpu *vcpu, void *state)
+{
+	return -EOPNOTSUPP;
+}
+
 void __weak kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *state)
 {
 }

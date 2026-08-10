@@ -312,6 +312,12 @@ static int kvm_protected_task_sync_regs(struct kvm_vcpu *vcpu,
 	return 0;
 }
 
+static bool kvm_protected_task_syscall_clones(unsigned long nr)
+{
+	return nr == __NR_clone || nr == __NR_clone3 || nr == __NR_fork ||
+	       nr == __NR_vfork;
+}
+
 /* Native signal setup and rt_sigreturn operate on current's active fpstate. */
 static int kvm_protected_task_activate_fpu(struct kvm_vcpu *vcpu,
 					   struct kvm_protected_task_x86 *state)
@@ -513,6 +519,11 @@ int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *arch_state,
 	ret = kvm_protected_task_setup_msrs(vcpu, state);
 	if (ret)
 		return ret;
+	ret = fpu_copy_task_fpstate_to_guest(&vcpu->arch.guest_fpu,
+			vcpu->arch.guest_supported_xcr0 | XFEATURE_MASK_FPSSE,
+			&vcpu->arch.pkru);
+	if (ret)
+		return ret;
 	return kvm_protected_task_setup_regs(vcpu, regs);
 }
 
@@ -553,7 +564,8 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 		ret = kvm_protected_task_sync_regs(vcpu, regs, true);
 		if (ret)
 			break;
-		if (regs->orig_ax == __NR_rt_sigreturn) {
+		if (regs->orig_ax == __NR_rt_sigreturn ||
+		    kvm_protected_task_syscall_clones(regs->orig_ax)) {
 			ret = kvm_protected_task_activate_fpu(vcpu, state);
 			if (ret)
 				break;
@@ -581,7 +593,26 @@ void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *arch_state)
 	if (!state)
 		return;
 	WARN_ON_ONCE(kvm_protected_task_deactivate_fpu(vcpu, state));
+	if (state->pgtable_addr && current->mm == vcpu->kvm->mm)
+		WARN_ON_ONCE(kvm_arch_protected_task_deactivate(vcpu, state));
 	kfree(state);
+}
+
+int kvm_arch_protected_task_deactivate(struct kvm_vcpu *vcpu, void *arch_state)
+{
+	struct kvm_protected_task_x86 *state = arch_state;
+	int ret;
+
+	if (!state->pgtable_addr)
+		return 0;
+	if (WARN_ON_ONCE(current->mm != vcpu->kvm->mm))
+		return -EIO;
+
+	ret = vm_munmap_protected_task(state->pgtable_addr,
+					       KVM_PT_IMAGE_PAGES * PAGE_SIZE);
+	if (!ret)
+		state->pgtable_addr = 0;
+	return ret;
 }
 
 #else
@@ -610,6 +641,11 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,
 
 void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *state)
 {
+}
+
+int kvm_arch_protected_task_deactivate(struct kvm_vcpu *vcpu, void *state)
+{
+	return -EOPNOTSUPP;
 }
 
 #endif
