@@ -3129,7 +3129,7 @@ static kvm_pfn_t kvm_follow_pfn(struct kvm_follow_pfn *kfp)
 		map_writable = kfp->map_writable;
 		flags = kfp->flags;
 		kfp->map_writable = NULL;
-		kfp->flags &= ~FOLL_WRITE;
+		kfp->flags = (kfp->flags & ~FOLL_WRITE) | FOLL_FORCE;
 		pfn = hva_to_pfn(kfp);
 		kfp->flags = flags;
 		kfp->map_writable = map_writable;

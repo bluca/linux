@@ -453,7 +453,8 @@ static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 	state->pgd = pgd;
 	state->syscall_stub = stub_gpa;
 
-	ret = vm_mprotect(state->pgtable_addr, size, PROT_READ | PROT_EXEC);
+	/* Only the protected memslot may force-access the hidden image. */
+	ret = vm_mprotect(state->pgtable_addr, size, PROT_NONE);
 	if (ret)
 		goto free_image;
 	ret = do_mseal(state->pgtable_addr, size, 0);
