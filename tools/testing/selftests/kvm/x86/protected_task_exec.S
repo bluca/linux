@@ -4,6 +4,17 @@
 .set FPSTATE_FCW, 0
 .set FPSTATE_MXCSR, 24
 .set FPSTATE_XMM15, 400
+.set FPSTATE_SW_MAGIC1, 464
+.set FPSTATE_SW_EXTENDED_SIZE, 468
+.set FPSTATE_SW_XFEATURES, 472
+.set FPSTATE_SW_XSTATE_SIZE, 480
+.set FPSTATE_XFEATURES, 512
+.set FPSTATE_MAGIC2, 576
+.set FP_XSTATE_MAGIC1, 0x46505853
+.set FP_XSTATE_MAGIC2, 0x46505845
+.set FP_XSTATE_SIZE, 576
+.set FP_XSTATE_EXTENDED_SIZE, 580
+.set XFEATURE_MASK_FPSSE, 3
 .set SIGINFO_CODE, 8
 .set SIGINFO_ADDR, 16
 .set UCONTEXT_RIP, 168
@@ -12,6 +23,9 @@
 .set UCONTEXT_TRAPNO, 200
 .set UCONTEXT_CR2, 216
 .set SA_RESTORER_SIGINFO, 0x04000004
+.set AT_HWCAP, 16
+.set AT_HWCAP2, 26
+.set ELF_HWCAP, 0x7808101
 .set ADDRESS_FD, 100
 .set READY_FD, 101
 .set CONTROL_FD, 102
@@ -103,6 +117,9 @@ exception_resume:
 	.balign 4
 failure_code:
 	.long 1
+	.balign 8
+initial_stack:
+	.quad 0
 	.balign 4
 thread_tid:
 	.long 0
@@ -121,6 +138,22 @@ reexec_marker:
 	.globl _start
 	.type _start, @function
 _start:
+	mov %rsp, initial_stack(%rip)
+	movl $80, failure_code(%rip)
+	mov $4, %edi
+	call install_exception_handler
+	test %eax, %eax
+	jne 1f
+
+	movl $73, failure_code(%rip)
+	mov initial_stack(%rip), %rdi
+	call check_cpu_profile
+	test %eax, %eax
+	je .Lcpu_profile_ok
+	mov %eax, failure_code(%rip)
+	jmp 1f
+.Lcpu_profile_ok:
+
 	movl $2, failure_code(%rip)
 	call check_hidden_mapping
 	test %eax, %eax
@@ -154,6 +187,7 @@ _start:
 	syscall
 	mov %eax, %r13d
 
+	movl $82, failure_code(%rip)
 	movdqu initial_xmm(%rip), %xmm15
 	ldmxcsr initial_mxcsr(%rip)
 	fldcw initial_fcw(%rip)
@@ -688,6 +722,10 @@ _start:
 	jne 1f
 	jmp 10f
 7:
+	mov initial_stack(%rip), %rdi
+	call check_cpu_profile
+	test %eax, %eax
+	jne 15f
 	call check_hidden_mapping
 	test %eax, %eax
 	jne 12f
@@ -806,6 +844,10 @@ check_process_clone:
 	xor %eax, %eax
 	ret
 .Lprocess_child:
+	mov initial_stack(%rip), %rdi
+	call check_cpu_profile
+	test %eax, %eax
+	jne .Lprocess_child_fail
 	call check_hidden_mapping
 	test %eax, %eax
 	jne .Lprocess_child_fail
@@ -826,6 +868,103 @@ check_process_clone:
 	syscall
 	ud2
 	.size check_process_clone, . - check_process_clone
+
+	.type check_cpu_profile, @function
+check_cpu_profile:
+	push %rbx
+	mov $73, %r11d
+	xor %eax, %eax
+	xor %ecx, %ecx
+	cpuid
+	cmp $1, %eax
+	jne 2f
+
+	mov $74, %r11d
+	mov $1, %eax
+	xor %ecx, %ecx
+	cpuid
+	mov $ELF_HWCAP, %r9d
+	cmp $ELF_HWCAP, %edx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+
+	mov $75, %r11d
+	mov $0x80000000, %eax
+	xor %ecx, %ecx
+	cpuid
+	cmp $0x80000008, %eax
+	jne 2f
+	mov $76, %r11d
+	mov $0x80000001, %eax
+	xor %ecx, %ecx
+	cpuid
+	test %ecx, %ecx
+	jne 2f
+	cmp $0x20100800, %edx
+	jne 2f
+
+	mov (%rdi), %rcx
+	lea 16(%rdi,%rcx,8), %r8
+3:
+	cmpq $0, (%r8)
+	je 4f
+	add $8, %r8
+	jmp 3b
+4:
+	add $8, %r8
+	xor %r10d, %r10d
+5:
+	cmpq $AT_HWCAP, (%r8)
+	je 7f
+	cmpq $AT_HWCAP2, (%r8)
+	je 6f
+	cmpq $0, (%r8)
+	je 8f
+	add $16, %r8
+	jmp 5b
+6:
+	mov $78, %r11d
+	cmpq $0, 8(%r8)
+	jne 2f
+	or $2, %r10d
+	add $16, %r8
+	jmp 5b
+7:
+	mov $77, %r11d
+	cmpq %r9, 8(%r8)
+	jne 2f
+	or $1, %r10d
+	add $16, %r8
+	jmp 5b
+8:
+	mov $79, %r11d
+	cmp $3, %r10d
+	jne 2f
+
+	mov $81, %r11d
+	mov $4, %edi
+	mov $2, %esi
+	mov $6, %edx
+	lea .Lxgetbv(%rip), %rcx
+	lea .Lxgetbv_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	xor %ecx, %ecx
+.Lxgetbv:
+	xgetbv
+.Lxgetbv_resume:
+	call check_exception
+	test %eax, %eax
+	jne 2f
+	xor %eax, %eax
+	pop %rbx
+	ret
+2:
+	mov %r11d, %eax
+	pop %rbx
+	ret
+	.size check_cpu_profile, . - check_cpu_profile
 
 	.type check_hidden_mapping, @function
 check_hidden_mapping:
@@ -889,6 +1028,25 @@ signal_handler:
 	mov UCONTEXT_FPSTATE(%rdx), %r8
 	test %r8, %r8
 	jz 3f
+	movl $83, failure_code(%rip)
+	cmpl $FP_XSTATE_MAGIC1, FPSTATE_SW_MAGIC1(%r8)
+	jne 3f
+	movl $84, failure_code(%rip)
+	cmpl $FP_XSTATE_EXTENDED_SIZE, FPSTATE_SW_EXTENDED_SIZE(%r8)
+	jne 3f
+	movl $85, failure_code(%rip)
+	cmpq $XFEATURE_MASK_FPSSE, FPSTATE_SW_XFEATURES(%r8)
+	jne 3f
+	movl $86, failure_code(%rip)
+	cmpl $FP_XSTATE_SIZE, FPSTATE_SW_XSTATE_SIZE(%r8)
+	jne 3f
+	movl $87, failure_code(%rip)
+	cmpq $XFEATURE_MASK_FPSSE, FPSTATE_XFEATURES(%r8)
+	jne 3f
+	movl $88, failure_code(%rip)
+	cmpl $FP_XSTATE_MAGIC2, FPSTATE_MAGIC2(%r8)
+	jne 3f
+	movl $82, failure_code(%rip)
 	cmpw $0x077f, FPSTATE_FCW(%r8)
 	jne 3f
 	cmpl $0x3f80, FPSTATE_MXCSR(%r8)
