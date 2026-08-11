@@ -405,6 +405,7 @@ static void test_protected_exec(int kvm_fd)
 	enum {
 		ADDRESS_FD = 100,
 		READY_FD = 101,
+		CONTROL_FD = 102,
 	};
 	static const char expected[] = "protected task exec\n";
 	struct kvm_protected_task_arm arm = {
@@ -439,6 +440,12 @@ static void test_protected_exec(int kvm_fd)
 		close(address_pipe[0]);
 		close(ready_pipe[1]);
 		fd = create_context_with_features(kvm_fd, KVM_PROTECTED_TASK_FEATURE_EXEC);
+		if (fd != CONTROL_FD) {
+			TEST_ASSERT(dup3(fd, CONTROL_FD, O_CLOEXEC) == CONTROL_FD,
+				    "dup3() failed: %d", errno);
+			close(fd);
+			fd = CONTROL_FD;
+		}
 		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
 		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
 		execl(helper, helper, NULL);

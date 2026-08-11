@@ -14,6 +14,7 @@
 .set SA_RESTORER_SIGINFO, 0x04000004
 .set ADDRESS_FD, 100
 .set READY_FD, 101
+.set CONTROL_FD, 102
 
 	.section .rodata
 message:
@@ -41,6 +42,12 @@ one_float:
 	.long 0x3f800000
 zero_float:
 	.long 0
+security_memfd_name:
+	.asciz "protected-task-security"
+syscall_initial_byte:
+	.byte 0x3c
+syscall_write_byte:
+	.byte 0xa5
 
 	.balign 8
 clone3_args:
@@ -193,6 +200,138 @@ _start:
 	call install_exception_handler
 	test %eax, %eax
 	jne 1f
+
+	# The ordinary guest range has RWX first-stage PTEs. Permission faults
+	# below therefore prove the independent second-stage VMA ceiling.
+	movl $60, failure_code(%rip)
+	mov $72, %eax
+	mov $CONTROL_FD, %edi
+	mov $1, %esi
+	syscall
+	cmp $-9, %rax
+	jne 1f
+
+	movl $61, failure_code(%rip)
+	mov $319, %eax
+	lea security_memfd_name(%rip), %rdi
+	mov $1, %esi
+	syscall
+	cmp $-4095, %rax
+	jae 1f
+	mov %eax, %r15d
+
+	movl $62, failure_code(%rip)
+	mov $77, %eax
+	mov %r15d, %edi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+
+	movl $63, failure_code(%rip)
+	mov $18, %eax
+	mov %r15d, %edi
+	lea syscall_initial_byte(%rip), %rsi
+	mov $1, %edx
+	xor %r10d, %r10d
+	syscall
+	cmp $1, %rax
+	jne 1f
+
+	movl $64, failure_code(%rip)
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $1, %edx
+	mov $1, %r10d
+	mov %r15d, %r8d
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae 1f
+	mov %rax, %r14
+
+	cmpb $0x3c, (%r14)
+	jne 1f
+
+	movl $65, failure_code(%rip)
+	mov $11, %edi
+	mov $2, %esi
+	mov $14, %edx
+	mov %r14, %rcx
+	lea .Lstage2_write_resume(%rip), %r8
+	mov %rcx, %r9
+	call prepare_exception
+	movb $0x5c, (%r14)
+.Lstage2_write_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+
+	movl $66, failure_code(%rip)
+	mov $18, %eax
+	mov %r15d, %edi
+	lea syscall_write_byte(%rip), %rsi
+	mov $1, %edx
+	xor %r10d, %r10d
+	syscall
+	cmp $1, %rax
+	jne 1f
+	movl $67, failure_code(%rip)
+	cmpb $0xa5, (%r14)
+	jne 1f
+	movl $68, failure_code(%rip)
+	mov $11, %eax
+	mov %r14, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	movl $69, failure_code(%rip)
+	mov $3, %eax
+	mov %r15d, %edi
+	syscall
+	test %rax, %rax
+	jne 1f
+
+	movl $70, failure_code(%rip)
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $0x22, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae 1f
+	mov %rax, %r14
+	movb $0xb8, 0(%r14)
+	movl $231, 1(%r14)
+	movb $0xbf, 5(%r14)
+	movl $69, 6(%r14)
+	movw $0x050f, 10(%r14)
+
+	mov $11, %edi
+	mov $2, %esi
+	mov $14, %edx
+	mov %r14, %rcx
+	lea .Lstage2_exec_resume(%rip), %r8
+	mov %r14, %r9
+	call prepare_exception
+	jmp *%r14
+.Lstage2_exec_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+	movl $72, failure_code(%rip)
+	mov $11, %eax
+	mov %r14, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	movl $15, failure_code(%rip)
 
 	mov $8, %edi
 	mov $1, %esi
