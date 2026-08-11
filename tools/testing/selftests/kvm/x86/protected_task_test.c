@@ -457,12 +457,23 @@ static void test_protected_exec(int kvm_fd)
 	close(ready_pipe[1]);
 	for (int i = 0; i < 12; i++) {
 		unsigned long address, addresses[2];
+		ssize_t nread;
 		size_t n;
 		pid_t target;
 		int stage = i % 6;
 
-		TEST_ASSERT(read(ready_pipe[0], &target, sizeof(target)) == sizeof(target),
-			    "Failed to wait for protected helper: %d", errno);
+		do {
+			errno = 0;
+			nread = read(ready_pipe[0], &target, sizeof(target));
+		} while (nread < 0 && errno == EINTR);
+		if (nread != sizeof(target)) {
+			int saved_errno = errno;
+
+			TEST_ASSERT(waitpid(child, &status, 0) == child,
+				    "waitpid() after checkpoint failure failed: %d", errno);
+			TEST_FAIL("Protected helper stopped before checkpoint %d: read=%zd errno=%d status=%#x",
+				  i, nread, saved_errno, status);
+		}
 		n = get_hidden_mappings(target, addresses,
 					sizeof(addresses) / sizeof(addresses[0]));
 		if (stage == 0) {
