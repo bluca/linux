@@ -9,6 +9,7 @@
 #include <linux/cpu.h>
 #include <linux/mman.h>
 #include <linux/kvm_types.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/nospec.h>
 #include <linux/pkeys.h>
 #include <linux/seq_file.h>
@@ -1739,6 +1740,8 @@ static int xstate_request_perm(unsigned long idx, bool guest)
 
 	if ((fpu_user_cfg.max_features & requested) != requested)
 		return -EOPNOTSUPP;
+	if (!guest && kvm_protected_task_is_active())
+		return -EOPNOTSUPP;
 
 	/* Lockless quick check */
 	permitted = xstate_get_group_perm(guest);
@@ -1842,11 +1845,14 @@ long fpu_xstate_prctl(int option, unsigned long arg2)
 	u64 __user *uptr = (u64 __user *)arg2;
 	u64 permitted, supported;
 	unsigned long idx = arg2;
+	bool protected_task = kvm_protected_task_is_active();
 	bool guest = false;
 
 	switch (option) {
 	case ARCH_GET_XCOMP_SUPP:
 		supported = fpu_user_cfg.max_features |	fpu_user_cfg.legacy_features;
+		if (protected_task)
+			supported &= XFEATURE_MASK_FPSSE;
 		return put_user(supported, uptr);
 
 	case ARCH_GET_XCOMP_PERM:
@@ -1856,6 +1862,8 @@ long fpu_xstate_prctl(int option, unsigned long arg2)
 		 */
 		permitted = xstate_get_host_group_perm();
 		permitted &= XFEATURE_MASK_USER_SUPPORTED;
+		if (protected_task)
+			permitted &= XFEATURE_MASK_FPSSE;
 		return put_user(permitted, uptr);
 
 	case ARCH_GET_XCOMP_GUEST_PERM:

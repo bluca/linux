@@ -30,6 +30,7 @@
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/export.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/kvm_types.h>
 #include <linux/ptrace.h>
 #include <linux/notifier.h>
@@ -854,6 +855,10 @@ static int prctl_enable_tagged_addr(struct mm_struct *mm, unsigned long nr_bits)
 		mmap_write_unlock(mm);
 		return -EINVAL;
 	}
+	if (kvm_protected_task_is_active()) {
+		mmap_write_unlock(mm);
+		return -EOPNOTSUPP;
+	}
 
 	mm_enable_lam(mm);
 
@@ -959,10 +964,13 @@ long do_arch_prctl_64(struct task_struct *task, int option, unsigned long arg2)
 	case ARCH_FORCE_TAGGED_SVA:
 		if (current != task)
 			return -EINVAL;
+		if (kvm_protected_task_is_active())
+			return -EOPNOTSUPP;
 		set_bit(MM_CONTEXT_FORCE_TAGGED_SVA, &task->mm->context.flags);
 		return 0;
 	case ARCH_GET_MAX_TAG_BITS:
-		if (!cpu_feature_enabled(X86_FEATURE_LAM))
+		if (kvm_protected_task_is_active() ||
+		    !cpu_feature_enabled(X86_FEATURE_LAM))
 			return put_user(0, (unsigned long __user *)arg2);
 		else
 			return put_user(LAM_U57_BITS, (unsigned long __user *)arg2);

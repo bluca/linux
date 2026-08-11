@@ -458,6 +458,8 @@ static inline unsigned long regs_get_kernel_argument(struct pt_regs *regs,
 #define ARCH_HAS_USER_SINGLE_STEP_REPORT
 
 struct user_desc;
+void x86_ptrace_get_hw_breakpoints(struct task_struct *task,
+				   unsigned long *db, unsigned long *dr7);
 extern int do_get_thread_area(struct task_struct *p, int idx,
 			      struct user_desc __user *info);
 extern int do_set_thread_area(struct task_struct *p, int idx,

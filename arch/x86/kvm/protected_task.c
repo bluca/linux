@@ -12,8 +12,10 @@
 #include <asm/fpu/api.h>
 #include <asm/fsgsbase.h>
 #include <asm/msr-index.h>
+#include <asm/nospec-branch.h>
 #include <asm/pgtable_types.h>
 #include <asm/processor-flags.h>
+#include <asm/ptrace.h>
 #include <asm/segment.h>
 #include <asm/syscall.h>
 #include <asm/traps.h>
@@ -255,6 +257,7 @@ static int kvm_protected_task_setup_sregs(struct kvm_vcpu *vcpu,
 					  unsigned long pgd)
 {
 	struct kvm_sregs sregs;
+	u64 cr4 = X86_CR4_PAE | X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT;
 	int ret;
 
 	ret = kvm_arch_vcpu_ioctl_get_sregs(vcpu, &sregs);
@@ -271,7 +274,9 @@ static int kvm_protected_task_setup_sregs(struct kvm_vcpu *vcpu,
 	sregs.gs.base = x86_gsbase_read_task(current);
 	sregs.cr0 = X86_CR0_PE | X86_CR0_NE | X86_CR0_AM | X86_CR0_PG;
 	sregs.cr3 = pgd;
-	sregs.cr4 = X86_CR4_PAE | X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT;
+	if (test_thread_flag(TIF_NOTSC))
+		cr4 |= X86_CR4_TSD;
+	sregs.cr4 = cr4;
 	sregs.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NX;
 
 	return kvm_arch_vcpu_ioctl_set_sregs(vcpu, &sregs);
@@ -385,6 +390,61 @@ static int kvm_protected_task_activate_fpu(struct kvm_vcpu *vcpu,
 	ret = fpu_swap_kvm_fpstate(&vcpu->arch.guest_fpu, true);
 	if (!ret)
 		state->fpu_active = true;
+	return ret;
+}
+
+static int kvm_protected_task_setup_task_msrs(struct kvm_vcpu *vcpu)
+{
+	u64 readback, value;
+	int ret;
+
+	vcpu_load(vcpu);
+	value = test_thread_flag(TIF_NOCPUID) ?
+		MSR_MISC_FEATURES_ENABLES_CPUID_FAULT : 0;
+	ret = kvm_msr_write(vcpu, MSR_PLATFORM_INFO,
+			    MSR_PLATFORM_INFO_CPUID_FAULT);
+	if (!ret)
+		ret = kvm_msr_write(vcpu, MSR_MISC_FEATURES_ENABLES, value);
+	if (!ret)
+		ret = kvm_msr_read(vcpu, MSR_MISC_FEATURES_ENABLES, &readback);
+	if (!ret && readback != value)
+		ret = -EIO;
+	value = spec_ctrl_current();
+	if (!ret)
+		ret = kvm_msr_write(vcpu, MSR_IA32_SPEC_CTRL, value);
+	if (!ret)
+		ret = kvm_msr_read(vcpu, MSR_IA32_SPEC_CTRL, &readback);
+	if (!ret && readback != value)
+		ret = -EIO;
+	if (static_cpu_has(X86_FEATURE_VIRT_SSBD)) {
+		value = test_thread_flag(TIF_SSBD) ? SPEC_CTRL_SSBD : 0;
+		if (!ret)
+			ret = kvm_msr_write(vcpu, MSR_AMD64_VIRT_SPEC_CTRL,
+					    value);
+		if (!ret)
+			ret = kvm_msr_read(vcpu, MSR_AMD64_VIRT_SPEC_CTRL,
+					   &readback);
+		if (!ret && readback != value)
+			ret = -EIO;
+	}
+	vcpu_put(vcpu);
+
+	return ret;
+}
+
+static int kvm_protected_task_setup_debugregs(struct kvm_vcpu *vcpu)
+{
+	unsigned long db[HBP_NUM], dr7;
+	int i, ret = 0;
+
+	x86_ptrace_get_hw_breakpoints(current, db, &dr7);
+	vcpu_load(vcpu);
+	for (i = 0; i < HBP_NUM && !ret; i++)
+		ret = kvm_set_dr(vcpu, i, db[i]);
+	if (!ret)
+		ret = kvm_set_dr(vcpu, 7, dr7);
+	vcpu_put(vcpu);
+
 	return ret;
 }
 
@@ -587,6 +647,9 @@ int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **statep)
 	struct kvm_protected_task_x86 *state;
 	int ret;
 
+	if (test_thread_flag(TIF_IO_BITMAP) || current->thread.iopl_emul)
+		return -EOPNOTSUPP;
+
 	state = kzalloc_obj(*state);
 	if (!state)
 		return -ENOMEM;
@@ -647,6 +710,12 @@ int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *arch_state,
 	ret = kvm_protected_task_setup_msrs(vcpu, state);
 	if (ret)
 		return ret;
+	ret = kvm_protected_task_setup_task_msrs(vcpu);
+	if (ret)
+		return ret;
+	ret = kvm_protected_task_setup_debugregs(vcpu);
+	if (ret)
+		return ret;
 	ret = fpu_copy_task_fpstate_to_guest(&vcpu->arch.guest_fpu,
 			vcpu->arch.guest_supported_xcr0 | XFEATURE_MASK_FPSSE,
 			&vcpu->arch.pkru);
@@ -666,6 +735,12 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 		return ret;
 
 	ret = kvm_protected_task_setup_sregs(vcpu, state->pgd);
+	if (ret)
+		return ret;
+	ret = kvm_protected_task_setup_task_msrs(vcpu);
+	if (ret)
+		return ret;
+	ret = kvm_protected_task_setup_debugregs(vcpu);
 	if (ret)
 		return ret;
 	ret = kvm_protected_task_setup_regs(vcpu, regs);

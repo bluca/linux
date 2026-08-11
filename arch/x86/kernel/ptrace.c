@@ -508,6 +508,20 @@ static unsigned long ptrace_get_dr7(struct perf_event *bp[])
 	return dr7;
 }
 
+void x86_ptrace_get_hw_breakpoints(struct task_struct *task,
+				   unsigned long *db, unsigned long *dr7)
+{
+	int i;
+
+	for (i = 0; i < HBP_NUM; i++) {
+		struct perf_event *bp = task->thread.ptrace_bps[i];
+
+		db[i] = bp ? counter_arch_bp(bp)->address : 0;
+	}
+	*dr7 = ptrace_get_dr7(task->thread.ptrace_bps);
+}
+EXPORT_SYMBOL_GPL(x86_ptrace_get_hw_breakpoints);
+
 static int ptrace_fill_bp_fields(struct perf_event_attr *attr,
 					int len, int type, bool disabled)
 {

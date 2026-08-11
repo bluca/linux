@@ -4,6 +4,7 @@
  * by Linus. 32/64 bits code unification by Miguel Botón.
  */
 #include <linux/capability.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/security.h>
 #include <linux/syscalls.h>
 #include <linux/bitmap.h>
@@ -79,6 +80,8 @@ long ksys_ioperm(unsigned long from, unsigned long num, int turn_on)
 	if (turn_on && (!capable(CAP_SYS_RAWIO) ||
 			security_locked_down(LOCKDOWN_IOPORT)))
 		return -EPERM;
+	if (kvm_protected_task_is_active())
+		return turn_on ? -EOPNOTSUPP : 0;
 
 	/*
 	 * If it's the first ioperm() call in this thread's lifetime, set the
@@ -196,6 +199,8 @@ SYSCALL_DEFINE1(iopl, unsigned int, level)
 		    security_locked_down(LOCKDOWN_IOPORT))
 			return -EPERM;
 	}
+	if (kvm_protected_task_is_active())
+		return -EOPNOTSUPP;
 
 	t->iopl_emul = level;
 	task_update_io_bitmap();

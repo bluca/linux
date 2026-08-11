@@ -15,6 +15,7 @@
 #include <linux/uaccess.h>
 #include <linux/sched/signal.h>
 #include <linux/compat.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/sizes.h>
 #include <linux/user.h>
 #include <linux/syscalls.h>
@@ -578,6 +579,8 @@ long shstk_prctl(struct task_struct *task, int option, unsigned long arg2)
 	}
 
 	if (option == ARCH_SHSTK_LOCK) {
+		if (kvm_protected_task_is_active())
+			return -EOPNOTSUPP;
 		task->thread.features_locked |= features;
 		return 0;
 	}
@@ -598,6 +601,9 @@ long shstk_prctl(struct task_struct *task, int option, unsigned long arg2)
 	/* Only support enabling/disabling one feature at a time. */
 	if (hweight_long(features) > 1)
 		return -EINVAL;
+	if (kvm_protected_task_is_active() &&
+	    (features & (ARCH_SHSTK_SHSTK | ARCH_SHSTK_WRSS)))
+		return -EOPNOTSUPP;
 
 	if (option == ARCH_SHSTK_DISABLE) {
 		if (features & ARCH_SHSTK_WRSS)

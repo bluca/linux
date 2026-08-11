@@ -14,6 +14,7 @@
 
 #include <linux/errno.h>
 #include <linux/gfp.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/mm.h>
@@ -614,6 +615,10 @@ static int write_ldt(void __user *ptr, unsigned long bytecount, int oldmode)
 		fill_ldt(&ldt, &ldt_info);
 		if (oldmode)
 			ldt.avl = 0;
+	}
+	if (kvm_protected_task_is_active()) {
+		error = -EOPNOTSUPP;
+		goto out;
 	}
 
 	if (down_write_killable(&mm->context.ldt_usr_sem))

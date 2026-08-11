@@ -1499,7 +1499,7 @@ bool x86_handle_user_exception(struct pt_regs *regs, unsigned int trapnr,
 			FPE_INTDIV, addr);
 		break;
 	case X86_TRAP_DB:
-		current->thread.virtual_dr6 = dr6 & DR_STEP;
+		current->thread.virtual_dr6 = dr6 & (DR_STEP | DR_TRAP_BITS);
 		clear_thread_flag(TIF_BLOCKSTEP);
 		send_sigtrap(regs, error_code, get_si_code(dr6));
 		break;
