@@ -141,6 +141,29 @@ int kvm_protected_task_prepare_exec(struct linux_binprm *bprm)
 #endif
 }
 
+unsigned long kvm_protected_task_elf_hwcap(struct linux_binprm *bprm,
+					   unsigned int type,
+					   unsigned long value)
+{
+#if IS_ENABLED(CONFIG_KVM)
+	struct kvm_protected_task_context *context;
+	struct file *file = bprm->protected_task;
+	void *state = bprm->protected_task_state;
+
+	if (!file) {
+		file = current->protected_task_active;
+		state = current->protected_task_state;
+	}
+	if (!file || !state)
+		return value;
+
+	context = file->private_data;
+	if (context->ops->elf_hwcap)
+		return context->ops->elf_hwcap(state, type, value);
+#endif
+	return value;
+}
+
 void kvm_protected_task_deactivate_exec(void)
 {
 #if IS_ENABLED(CONFIG_KVM)

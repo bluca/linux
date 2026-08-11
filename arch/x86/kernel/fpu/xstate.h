@@ -317,7 +317,7 @@ static inline int xsave_to_user_sigframe(struct xregs_state __user *buf, u32 pkr
 	XSTATE_OP(XSAVE, buf, lmask, hmask, err);
 	clac();
 
-	if (!err)
+	if (!err && (fpstate->user_xfeatures & XFEATURE_MASK_PKRU))
 		err = update_pkru_in_sigframe(buf, pkru);
 
 	return err;

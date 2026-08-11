@@ -211,6 +211,15 @@ static int kvm_protected_task_clone_exec(struct kvm_protected_task_context *cont
 	return 0;
 }
 
+static unsigned long kvm_protected_task_adjust_elf_hwcap(void *state,
+							 unsigned int type,
+							 unsigned long value)
+{
+	struct kvm_protected_task_exec *exec = state;
+
+	return kvm_arch_protected_task_elf_hwcap(exec->vcpu, type, value);
+}
+
 static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
 {
 	struct kvm_protected_task_exec *exec = state;
@@ -230,6 +239,7 @@ static void kvm_protected_task_deactivate_vcpu(void *state)
 static const struct kvm_protected_task_ops kvm_protected_task_ops = {
 	.stage_exec = kvm_protected_task_stage_exec,
 	.clone_exec = kvm_protected_task_clone_exec,
+	.elf_hwcap = kvm_protected_task_adjust_elf_hwcap,
 	.deactivate_exec = kvm_protected_task_deactivate_vcpu,
 	.finalize_exec = kvm_protected_task_finalize_vcpu,
 	.run = kvm_protected_task_run_vcpu,

@@ -1811,6 +1811,9 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type);
 void kvm_arch_destroy_vm(struct kvm *kvm);
 int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state);
 u64 kvm_arch_protected_task_features(void);
+unsigned long kvm_arch_protected_task_elf_hwcap(struct kvm_vcpu *vcpu,
+						unsigned int type,
+						unsigned long value);
 int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu,
 				     void *state, struct pt_regs *regs, u32 slot);
 int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,

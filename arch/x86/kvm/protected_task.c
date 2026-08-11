@@ -18,13 +18,19 @@
 #include <asm/syscall.h>
 #include <asm/traps.h>
 
+#include <uapi/linux/auxvec.h>
+
 #include "cpuid.h"
+#include "lapic.h"
 
 #ifdef CONFIG_X86_64
 
 #define KVM_PT_VA_LIMIT		BIT_ULL(47)
 #define KVM_PT_NONLEAF_FLAGS	(_PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_ACCESSED)
 #define KVM_PT_SYSCALL_PORT	0xec
+#define KVM_PT_CPUID_1_EDX	(BIT(0) | BIT(8) | BIT(15) | BIT(23) | \
+				 BIT(24) | BIT(25) | BIT(26))
+#define KVM_PT_CPUID_80000001_EDX (BIT(11) | BIT(20) | BIT(29))
 /* Each edge of the hidden range can require one PMD and one PTE page. */
 #define KVM_PT_HOLE_TABLE_PAGES	4
 #define KVM_PT_IMAGE_PAGES	(2 + (KVM_PT_VA_LIMIT >> PGDIR_SHIFT) + \
@@ -44,6 +50,54 @@ struct kvm_protected_task_builder {
 	unsigned long size;
 	unsigned long used;
 };
+
+static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu)
+{
+	int i;
+
+	for (i = 0; i < vcpu->arch.cpuid_nent; i++) {
+		struct kvm_cpuid_entry2 *entry = &vcpu->arch.cpuid_entries[i];
+
+		switch (entry->function) {
+		case 0:
+			entry->eax = min(entry->eax, 1U);
+			break;
+		case 1:
+			entry->ecx = 0;
+			entry->edx &= KVM_PT_CPUID_1_EDX;
+			break;
+		case 0x80000000:
+			entry->eax = min(entry->eax, 0x80000008U);
+			break;
+		case 0x80000001:
+			entry->ecx = 0;
+			entry->edx &= KVM_PT_CPUID_80000001_EDX;
+			break;
+		case 0x80000008:
+			entry->ebx = 0;
+			entry->ecx = 0;
+			entry->edx = 0;
+			break;
+		default:
+			entry->eax = 0;
+			entry->ebx = 0;
+			entry->ecx = 0;
+			entry->edx = 0;
+			break;
+		}
+	}
+
+	kvm_vcpu_after_set_cpuid(vcpu);
+}
+
+static void kvm_protected_task_restrict_xstate(struct kvm_vcpu *vcpu)
+{
+	struct fpstate *fpstate = vcpu->arch.guest_fpu.fpstate;
+
+	fpstate->user_xfeatures = XFEATURE_MASK_FPSSE;
+	fpstate->user_size = min_t(unsigned int, fpstate->user_size,
+				   sizeof(struct xregs_state));
+}
 
 static int kvm_protected_task_validate_mm(struct mm_struct *mm)
 {
@@ -542,6 +596,13 @@ int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **statep)
 		kfree(state);
 		return ret;
 	}
+	ret = kvm_apic_set_base(vcpu, 0, true);
+	if (ret) {
+		kfree(state);
+		return -EINVAL;
+	}
+	kvm_protected_task_restrict_cpuid(vcpu);
+	kvm_protected_task_restrict_xstate(vcpu);
 
 	*statep = state;
 	return 0;
@@ -550,6 +611,22 @@ int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **statep)
 u64 kvm_arch_protected_task_features(void)
 {
 	return KVM_PROTECTED_TASK_FEATURE_EXEC;
+}
+
+unsigned long kvm_arch_protected_task_elf_hwcap(struct kvm_vcpu *vcpu,
+						unsigned int type,
+						unsigned long value)
+{
+	struct kvm_cpuid_entry2 *entry;
+
+	if (type == AT_HWCAP) {
+		entry = kvm_find_cpuid_entry(vcpu, 1);
+		return entry ? entry->edx : 0;
+	}
+	if (type == AT_HWCAP2)
+		return 0;
+
+	return value;
 }
 
 int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *arch_state,

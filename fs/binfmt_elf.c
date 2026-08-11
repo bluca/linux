@@ -29,6 +29,7 @@
 #include <linux/compiler.h>
 #include <linux/highmem.h>
 #include <linux/hugetlb.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/pagemap.h>
 #include <linux/vmalloc.h>
 #include <linux/security.h>
@@ -247,7 +248,8 @@ create_elf_tables(struct linux_binprm *bprm, const struct elfhdr *exec,
 	 */
 	ARCH_DLINFO;
 #endif
-	NEW_AUX_ENT(AT_HWCAP, ELF_HWCAP);
+	NEW_AUX_ENT(AT_HWCAP,
+		    kvm_protected_task_elf_hwcap(bprm, AT_HWCAP, ELF_HWCAP));
 	NEW_AUX_ENT(AT_PAGESZ, ELF_EXEC_PAGESIZE);
 	NEW_AUX_ENT(AT_CLKTCK, CLOCKS_PER_SEC);
 	NEW_AUX_ENT(AT_PHDR, phdr_addr);
@@ -265,7 +267,8 @@ create_elf_tables(struct linux_binprm *bprm, const struct elfhdr *exec,
 	NEW_AUX_ENT(AT_SECURE, bprm->secureexec);
 	NEW_AUX_ENT(AT_RANDOM, (elf_addr_t)(unsigned long)u_rand_bytes);
 #ifdef ELF_HWCAP2
-	NEW_AUX_ENT(AT_HWCAP2, ELF_HWCAP2);
+	NEW_AUX_ENT(AT_HWCAP2,
+		    kvm_protected_task_elf_hwcap(bprm, AT_HWCAP2, ELF_HWCAP2));
 #endif
 #ifdef ELF_HWCAP3
 	NEW_AUX_ENT(AT_HWCAP3, ELF_HWCAP3);
