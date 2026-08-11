@@ -15,6 +15,33 @@
 .set FP_XSTATE_SIZE, 576
 .set FP_XSTATE_EXTENDED_SIZE, 580
 .set XFEATURE_MASK_FPSSE, 3
+.set ARCH_SET_GS, 0x1001
+.set ARCH_SET_FS, 0x1002
+.set ARCH_GET_FS, 0x1003
+.set ARCH_GET_GS, 0x1004
+.set ARCH_SET_CPUID, 0x1012
+.set ARCH_GET_XCOMP_SUPP, 0x1021
+.set ARCH_GET_XCOMP_PERM, 0x1022
+.set ARCH_REQ_XCOMP_PERM, 0x1023
+.set ARCH_ENABLE_TAGGED_ADDR, 0x4002
+.set ARCH_GET_MAX_TAG_BITS, 0x4003
+.set ARCH_FORCE_TAGGED_SVA, 0x4004
+.set ARCH_SHSTK_ENABLE, 0x5001
+.set ARCH_SHSTK_LOCK, 0x5003
+.set ARCH_SHSTK_STATUS, 0x5005
+.set ARCH_SHSTK_SHSTK, 1
+.set PR_SET_TSC, 26
+.set PR_TSC_ENABLE, 1
+.set PR_TSC_SIGSEGV, 2
+.set PR_GET_SPECULATION_CTRL, 52
+.set PR_SET_SPECULATION_CTRL, 53
+.set PR_SPEC_STORE_BYPASS, 0
+.set PR_SPEC_INDIRECT_BRANCH, 1
+.set PR_SPEC_PRCTL, 1
+.set PR_SPEC_ENABLE, 2
+.set PR_SPEC_DISABLE, 4
+.set PR_SPEC_FORCE_DISABLE, 8
+.set PR_SPEC_DISABLE_NOEXEC, 16
 .set SIGINFO_CODE, 8
 .set SIGINFO_ADDR, 16
 .set UCONTEXT_RIP, 168
@@ -62,6 +89,14 @@ syscall_initial_byte:
 	.byte 0x3c
 syscall_write_byte:
 	.byte 0xa5
+	.balign 8
+fs_marker:
+	.quad 0x0123456789abcdef
+gs_marker:
+	.quad 0xfedcba9876543210
+	.balign 4
+ldt_entry:
+	.long 0, 0, 0xfffff, 0x51
 
 	.balign 8
 clone3_args:
@@ -144,6 +179,10 @@ _start:
 	call install_exception_handler
 	test %eax, %eax
 	jne 1f
+	mov $11, %edi
+	call install_exception_handler
+	test %eax, %eax
+	jne 1f
 
 	movl $73, failure_code(%rip)
 	mov initial_stack(%rip), %rdi
@@ -153,6 +192,135 @@ _start:
 	mov %eax, failure_code(%rip)
 	jmp 1f
 .Lcpu_profile_ok:
+	movl $89, failure_code(%rip)
+	mov $157, %eax
+	mov $PR_SET_TSC, %edi
+	mov $PR_TSC_SIGSEGV, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $11, %edi
+	mov $128, %esi
+	mov $13, %edx
+	xor %ecx, %ecx
+	lea .Lrdtsc_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+.Lrdtsc:
+	rdtsc
+.Lrdtsc_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+	mov $157, %eax
+	mov $PR_SET_TSC, %edi
+	mov $PR_TSC_ENABLE, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	rdtsc
+
+	movl $90, failure_code(%rip)
+	mov $158, %eax
+	mov $ARCH_SET_CPUID, %edi
+	xor %esi, %esi
+	syscall
+	cmp $-19, %rax
+	je .Lcpuid_fault_unavailable
+	test %rax, %rax
+	jne 1f
+	movl $91, failure_code(%rip)
+	mov $11, %edi
+	mov $128, %esi
+	mov $13, %edx
+	xor %ecx, %ecx
+	lea .Lcpuid_fault_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	xor %eax, %eax
+	xor %ecx, %ecx
+.Lcpuid_fault:
+	cpuid
+.Lcpuid_fault_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+	movl $92, failure_code(%rip)
+	mov $158, %eax
+	mov $ARCH_SET_CPUID, %edi
+	mov $1, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	movl $93, failure_code(%rip)
+	xor %eax, %eax
+	xor %ecx, %ecx
+	cpuid
+.Lcpuid_fault_unavailable:
+	movl $94, failure_code(%rip)
+	call check_initial_arch_bases
+	test %eax, %eax
+	jne 1f
+
+	movl $95, failure_code(%rip)
+	call set_test_arch_bases
+	test %eax, %eax
+	jne 1f
+	call check_test_arch_bases
+	test %eax, %eax
+	jne 1f
+	call clear_arch_bases
+	test %eax, %eax
+	jne 1f
+
+	movl $96, failure_code(%rip)
+	mov $4, %edi
+	mov $2, %esi
+	mov $6, %edx
+	xor %ecx, %ecx
+	lea .Lfsgsbase_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+.Lfsgsbase:
+	rdfsbase %rax
+.Lfsgsbase_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+
+	movl $100, failure_code(%rip)
+	call check_xcomp_controls
+	test %eax, %eax
+	jne 1f
+	movl $103, failure_code(%rip)
+	call check_arch_prctl_controls
+	test %eax, %eax
+	jne 1f
+
+	movl $101, failure_code(%rip)
+	mov $154, %eax
+	mov $0x11, %edi
+	lea ldt_entry(%rip), %rsi
+	mov $16, %edx
+	syscall
+	cmp $-95, %eax
+	jne 1f
+
+	movl $102, failure_code(%rip)
+	call check_io_permissions
+	test %eax, %eax
+	jne 1f
+
+	movl $98, failure_code(%rip)
+	mov $PR_SPEC_STORE_BYPASS, %edi
+	call check_speculation_control
+	test %eax, %eax
+	jne 1f
+	movl $99, failure_code(%rip)
+	mov $PR_SPEC_INDIRECT_BRANCH, %edi
+	call check_speculation_control
+	test %eax, %eax
+	jne 1f
 
 	movl $2, failure_code(%rip)
 	call check_hidden_mapping
@@ -650,6 +818,10 @@ _start:
 	jne 1f
 	ud2
 .Ldefault_signal_done:
+	movl $97, failure_code(%rip)
+	call set_test_arch_bases
+	test %eax, %eax
+	jne 1f
 
 	movl $20, failure_code(%rip)
 	mov $57, %eax
@@ -726,6 +898,17 @@ _start:
 	call check_cpu_profile
 	test %eax, %eax
 	jne 15f
+	call check_test_arch_bases
+	test %eax, %eax
+	jne 12f
+	mov $PR_SPEC_STORE_BYPASS, %edi
+	call check_speculation_control
+	test %eax, %eax
+	jne 12f
+	mov $PR_SPEC_INDIRECT_BRANCH, %edi
+	call check_speculation_control
+	test %eax, %eax
+	jne 12f
 	call check_hidden_mapping
 	test %eax, %eax
 	jne 12f
@@ -848,6 +1031,17 @@ check_process_clone:
 	call check_cpu_profile
 	test %eax, %eax
 	jne .Lprocess_child_fail
+	call check_test_arch_bases
+	test %eax, %eax
+	jne .Lprocess_child_fail
+	mov $PR_SPEC_STORE_BYPASS, %edi
+	call check_speculation_control
+	test %eax, %eax
+	jne .Lprocess_child_fail
+	mov $PR_SPEC_INDIRECT_BRANCH, %edi
+	call check_speculation_control
+	test %eax, %eax
+	jne .Lprocess_child_fail
 	call check_hidden_mapping
 	test %eax, %eax
 	jne .Lprocess_child_fail
@@ -868,6 +1062,360 @@ check_process_clone:
 	syscall
 	ud2
 	.size check_process_clone, . - check_process_clone
+
+	.type check_initial_arch_bases, @function
+check_initial_arch_bases:
+	sub $16, %rsp
+	mov $158, %eax
+	mov $ARCH_GET_FS, %edi
+	mov %rsp, %rsi
+	syscall
+	test %rax, %rax
+	jne 1f
+	cmpq $0, (%rsp)
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_GET_GS, %edi
+	lea 8(%rsp), %rsi
+	syscall
+	test %rax, %rax
+	jne 1f
+	cmpq $0, 8(%rsp)
+	jne 1f
+	add $16, %rsp
+	xor %eax, %eax
+	ret
+1:
+	add $16, %rsp
+	mov $1, %eax
+	ret
+	.size check_initial_arch_bases, . - check_initial_arch_bases
+
+	.type set_test_arch_bases, @function
+set_test_arch_bases:
+	mov $158, %eax
+	mov $ARCH_SET_FS, %edi
+	lea fs_marker(%rip), %rsi
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_SET_GS, %edi
+	lea gs_marker(%rip), %rsi
+	syscall
+	test %rax, %rax
+	setne %al
+	movzbl %al, %eax
+	ret
+1:
+	mov $1, %eax
+	ret
+	.size set_test_arch_bases, . - set_test_arch_bases
+
+	.type check_test_arch_bases, @function
+check_test_arch_bases:
+	sub $16, %rsp
+	mov $158, %eax
+	mov $ARCH_GET_FS, %edi
+	mov %rsp, %rsi
+	syscall
+	test %rax, %rax
+	jne 1f
+	lea fs_marker(%rip), %rax
+	cmp %rax, (%rsp)
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_GET_GS, %edi
+	lea 8(%rsp), %rsi
+	syscall
+	test %rax, %rax
+	jne 1f
+	lea gs_marker(%rip), %rax
+	cmp %rax, 8(%rsp)
+	jne 1f
+	mov %fs:0, %rax
+	cmp fs_marker(%rip), %rax
+	jne 1f
+	mov %gs:0, %rax
+	cmp gs_marker(%rip), %rax
+	jne 1f
+	add $16, %rsp
+	xor %eax, %eax
+	ret
+1:
+	add $16, %rsp
+	mov $1, %eax
+	ret
+	.size check_test_arch_bases, . - check_test_arch_bases
+
+	.type clear_arch_bases, @function
+clear_arch_bases:
+	mov $158, %eax
+	mov $ARCH_SET_FS, %edi
+	xor %esi, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_SET_GS, %edi
+	xor %esi, %esi
+	syscall
+	test %rax, %rax
+	setne %al
+	movzbl %al, %eax
+	ret
+1:
+	mov $1, %eax
+	ret
+	.size clear_arch_bases, . - clear_arch_bases
+
+	.type check_xcomp_controls, @function
+check_xcomp_controls:
+	sub $16, %rsp
+	mov $158, %eax
+	mov $ARCH_GET_XCOMP_SUPP, %edi
+	mov %rsp, %rsi
+	syscall
+	test %rax, %rax
+	jne 1f
+	cmpq $XFEATURE_MASK_FPSSE, (%rsp)
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_GET_XCOMP_PERM, %edi
+	lea 8(%rsp), %rsi
+	syscall
+	test %rax, %rax
+	jne 1f
+	cmpq $XFEATURE_MASK_FPSSE, 8(%rsp)
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_REQ_XCOMP_PERM, %edi
+	mov $64, %esi
+	syscall
+	cmp $-22, %rax
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_REQ_XCOMP_PERM, %edi
+	mov $18, %esi
+	syscall
+	cmp $-95, %rax
+	setne %al
+	movzbl %al, %eax
+	add $16, %rsp
+	ret
+1:
+	add $16, %rsp
+	mov $1, %eax
+	ret
+	.size check_xcomp_controls, . - check_xcomp_controls
+
+	.type check_arch_prctl_controls, @function
+check_arch_prctl_controls:
+	sub $16, %rsp
+	mov $158, %eax
+	mov $ARCH_GET_MAX_TAG_BITS, %edi
+	mov %rsp, %rsi
+	syscall
+	test %rax, %rax
+	jz 2f
+	cmp $-22, %rax
+	je 3f
+	jmp 1f
+2:
+	cmpq $0, (%rsp)
+	jne 1f
+3:
+	mov $158, %eax
+	mov $ARCH_ENABLE_TAGGED_ADDR, %edi
+	mov $6, %esi
+	syscall
+	cmp $-95, %rax
+	je 4f
+	cmp $-19, %rax
+	je 4f
+	cmp $-22, %rax
+	jne 1f
+4:
+	mov $158, %eax
+	mov $ARCH_FORCE_TAGGED_SVA, %edi
+	xor %esi, %esi
+	syscall
+	cmp $-95, %rax
+	je 5f
+	cmp $-22, %rax
+	jne 1f
+5:
+	mov $158, %eax
+	mov $ARCH_SHSTK_STATUS, %edi
+	lea 8(%rsp), %rsi
+	syscall
+	test %rax, %rax
+	jz .Larch_prctl_cet
+	cmp $-22, %rax
+	je .Larch_prctl_success
+	jmp 1f
+.Larch_prctl_cet:
+	cmpq $0, 8(%rsp)
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_SHSTK_ENABLE, %edi
+	xor %esi, %esi
+	syscall
+	cmp $-22, %rax
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_SHSTK_ENABLE, %edi
+	mov $ARCH_SHSTK_SHSTK, %esi
+	syscall
+	cmp $-95, %rax
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_SHSTK_LOCK, %edi
+	mov $ARCH_SHSTK_SHSTK, %esi
+	syscall
+	cmp $-95, %rax
+	jne 1f
+.Larch_prctl_success:
+	add $16, %rsp
+	xor %eax, %eax
+	ret
+1:
+	add $16, %rsp
+	mov $1, %eax
+	ret
+	.size check_arch_prctl_controls, . - check_arch_prctl_controls
+
+	.type check_io_permissions, @function
+check_io_permissions:
+	mov $173, %eax
+	mov $0xffff, %edi
+	mov $2, %esi
+	mov $1, %edx
+	syscall
+	cmp $-22, %rax
+	jne 1f
+	mov $173, %eax
+	mov $0x80, %edi
+	mov $1, %esi
+	mov $1, %edx
+	syscall
+	cmp $-95, %rax
+	je 2f
+	cmp $-1, %rax
+	jne 1f
+2:
+	mov $173, %eax
+	mov $0x80, %edi
+	mov $1, %esi
+	xor %edx, %edx
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $172, %eax
+	mov $4, %edi
+	syscall
+	cmp $-22, %rax
+	jne 1f
+	mov $172, %eax
+	mov $3, %edi
+	syscall
+	cmp $-95, %rax
+	je 3f
+	cmp $-1, %rax
+	jne 1f
+3:
+	mov $172, %eax
+	xor %edi, %edi
+	syscall
+	test %rax, %rax
+	setne %al
+	movzbl %al, %eax
+	ret
+1:
+	mov $1, %eax
+	ret
+	.size check_io_permissions, . - check_io_permissions
+
+	.type check_speculation_control, @function
+check_speculation_control:
+	push %rbx
+	push %r12
+	push %r13
+	mov %edi, %ebx
+	mov $157, %eax
+	mov $PR_GET_SPECULATION_CTRL, %edi
+	mov %ebx, %esi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	syscall
+	test %rax, %rax
+	js 2f
+	mov %eax, %r12d
+	test $PR_SPEC_PRCTL, %r12d
+	jz 1f
+	test $PR_SPEC_FORCE_DISABLE, %r12d
+	jnz 1f
+	mov $PR_SPEC_ENABLE, %r13d
+	test $PR_SPEC_ENABLE, %r12d
+	jz 3f
+	mov $PR_SPEC_DISABLE, %r13d
+3:
+	mov $157, %eax
+	mov $PR_SET_SPECULATION_CTRL, %edi
+	mov %ebx, %esi
+	mov %r13d, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	syscall
+	test %rax, %rax
+	jne 2f
+	mov $157, %eax
+	mov $PR_GET_SPECULATION_CTRL, %edi
+	mov %ebx, %esi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	syscall
+	test %rax, %rax
+	js 2f
+	test %r13d, %eax
+	jz 2f
+	mov $PR_SPEC_ENABLE, %edx
+	test $PR_SPEC_DISABLE_NOEXEC, %r12d
+	jz 4f
+	mov $PR_SPEC_DISABLE_NOEXEC, %edx
+	jmp 5f
+4:
+	test $PR_SPEC_DISABLE, %r12d
+	jz 5f
+	mov $PR_SPEC_DISABLE, %edx
+5:
+	mov $157, %eax
+	mov $PR_SET_SPECULATION_CTRL, %edi
+	mov %ebx, %esi
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	syscall
+	test %rax, %rax
+	jne 2f
+1:
+	pop %r13
+	pop %r12
+	pop %rbx
+	xor %eax, %eax
+	ret
+2:
+	pop %r13
+	pop %r12
+	pop %rbx
+	mov $1, %eax
+	ret
+	.size check_speculation_control, . - check_speculation_control
 
 	.type check_cpu_profile, @function
 check_cpu_profile:

@@ -9,8 +9,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/io.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
+#include <sys/user.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -336,6 +338,50 @@ static void test_close_while_armed(int fd)
 		    ret, errno, EOPNOTSUPP);
 }
 
+static void test_io_permissions_reject_exec(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
+	if (!child) {
+		int fd, ret, saved_errno;
+
+		if (ioperm(0x80, 1, 1) < 0) {
+			TEST_ASSERT(errno == EPERM,
+				    "ioperm() failed: %d", errno);
+			_exit(0);
+		}
+
+		fd = create_context_with_features(kvm_fd,
+					  KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		errno = 0;
+		ret = execl("/proc/self/exe", "protected_task_test",
+			    "--io-permission-exec-target", NULL);
+		saved_errno = errno;
+		TEST_ASSERT(ioperm(0x80, 1, 0) == 0,
+			    "ioperm() cleanup failed: %d", errno);
+		TEST_ASSERT(ret == -1 && saved_errno == EOPNOTSUPP,
+			    "Protected exec with I/O permissions returned %d/%d, expected -1/%d",
+			    ret, saved_errno, EOPNOTSUPP);
+		TEST_ASSERT(!(get_info(fd).flags & KVM_PROTECTED_TASK_INFO_ARMED),
+			    "Rejected I/O-permission exec did not consume arm state");
+		close(fd);
+		_exit(0);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() failed: %d", errno);
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "I/O-permission exec rejection failed: %#x", status);
+}
+
 static void get_exec_helper_path(char path[PATH_MAX])
 {
 	static const char helper[] = "protected_task_exec";
@@ -396,6 +442,62 @@ static void test_hidden_mapping_ptrace(pid_t child, unsigned long address)
 	TEST_ASSERT(value == -1 && errno == EIO,
 		    "PTRACE_PEEKDATA returned %ld/%d, expected -1/%d",
 		    value, errno, EIO);
+	TEST_ASSERT(ptrace(PTRACE_DETACH, child, NULL, NULL) == 0,
+		    "PTRACE_DETACH failed: %d", errno);
+}
+
+static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
+					    int address_fd)
+{
+	struct user_regs_struct regs;
+	siginfo_t siginfo;
+	long dr6, value;
+	int status;
+
+	TEST_ASSERT(ptrace(PTRACE_ATTACH, child, NULL, NULL) == 0,
+		    "PTRACE_ATTACH failed: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() after PTRACE_ATTACH failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status), "Ptraced child did not stop: %#x", status);
+
+	errno = 0;
+	value = ptrace(PTRACE_PEEKDATA, child, (void *)address, NULL);
+	TEST_ASSERT(value == -1 && errno == EIO,
+		    "PTRACE_PEEKDATA returned %ld/%d, expected -1/%d",
+		    value, errno, EIO);
+	TEST_ASSERT(ptrace(PTRACE_GETREGS, child, NULL, &regs) == 0,
+		    "PTRACE_GETREGS failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_POKEUSER, child,
+			   (void *)offsetof(struct user, u_debugreg[0]),
+			   regs.rip) == 0,
+		    "PTRACE_POKEUSER DR0 failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_POKEUSER, child,
+			   (void *)offsetof(struct user, u_debugreg[7]), 1) == 0,
+		    "PTRACE_POKEUSER DR7 failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL, NULL) == 0,
+		    "PTRACE_CONT failed: %d", errno);
+	TEST_ASSERT(write(address_fd, &address, sizeof(address)) == sizeof(address),
+		    "Failed to release hardware-breakpoint target: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() after hardware breakpoint failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP,
+		    "Hardware breakpoint produced unexpected status: %#x", status);
+	TEST_ASSERT(ptrace(PTRACE_GETSIGINFO, child, NULL, &siginfo) == 0,
+		    "PTRACE_GETSIGINFO failed: %d", errno);
+	TEST_ASSERT(siginfo.si_signo == SIGTRAP && siginfo.si_code == TRAP_HWBKPT,
+		    "Hardware breakpoint produced signal %d/%d",
+		    siginfo.si_signo, siginfo.si_code);
+	errno = 0;
+	dr6 = ptrace(PTRACE_PEEKUSER, child,
+		     (void *)offsetof(struct user, u_debugreg[6]), NULL);
+	TEST_ASSERT(dr6 != -1 && (dr6 & 1),
+		    "Hardware breakpoint DR6 is %#lx/%d", dr6, errno);
+	TEST_ASSERT(ptrace(PTRACE_POKEUSER, child,
+			   (void *)offsetof(struct user, u_debugreg[7]), 0) == 0,
+		    "Clearing DR7 failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_POKEUSER, child,
+			   (void *)offsetof(struct user, u_debugreg[0]), 0) == 0,
+		    "Clearing DR0 failed: %d", errno);
 	TEST_ASSERT(ptrace(PTRACE_DETACH, child, NULL, NULL) == 0,
 		    "PTRACE_DETACH failed: %d", errno);
 }
@@ -502,9 +604,14 @@ static void test_protected_exec(int kvm_fd)
 				    target, n, child);
 			address = addresses[0];
 		}
-		test_hidden_mapping_ptrace(target, address);
-		TEST_ASSERT(write(address_pipe[1], &address, sizeof(address)) == sizeof(address),
-			    "Failed to send hidden mapping address: %d", errno);
+		if (stage == 0)
+			test_hardware_breakpoint_ptrace(target, address,
+						 address_pipe[1]);
+		else {
+			test_hidden_mapping_ptrace(target, address);
+			TEST_ASSERT(write(address_pipe[1], &address, sizeof(address)) == sizeof(address),
+				    "Failed to send hidden mapping address: %d", errno);
+		}
 	}
 	close(address_pipe[1]);
 	close(ready_pipe[0]);
@@ -535,6 +642,9 @@ int main(int argc, char *argv[])
 	struct kvm_protected_task_info first_info, second_info;
 	int kvm_fd, first_fd, second_fd;
 
+	if (argc == 2 && !strcmp(argv[1], "--io-permission-exec-target"))
+		return 42;
+
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
 			   KVM_CAP_PROTECTED_TASK) == 1);
@@ -557,6 +667,7 @@ int main(int argc, char *argv[])
 
 	close(first_fd);
 	test_close_while_armed(second_fd);
+	test_io_permissions_reject_exec(kvm_fd);
 	test_protected_exec(kvm_fd);
 	close(kvm_fd);
 	return 0;
