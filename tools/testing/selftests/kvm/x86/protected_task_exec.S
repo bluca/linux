@@ -10,11 +10,13 @@
 .set FPSTATE_SW_XSTATE_SIZE, 480
 .set FPSTATE_XFEATURES, 512
 .set FPSTATE_MAGIC2, 576
+.set YMMH15_OFFSET, 240
 .set FP_XSTATE_MAGIC1, 0x46505853
 .set FP_XSTATE_MAGIC2, 0x46505845
 .set FP_XSTATE_SIZE, 576
 .set FP_XSTATE_EXTENDED_SIZE, 580
 .set XFEATURE_MASK_FPSSE, 3
+.set XFEATURE_MASK_YMM, 4
 .set XFEATURE_MASK_PKU, 0x203
 .set XFEATURE_MASK_CET_USER, 0x800
 .set XFEATURE_MASK_XTILE_CFG, 0x20000
@@ -75,12 +77,21 @@
 message:
 	.ascii "protected task exec\n"
 .set message_length, . - message
+avx_message:
+	.ascii "protected task avx\n"
+.set avx_message_length, . - avx_message
 
-	.balign 16
+	.balign 32
+initial_ymm:
 initial_xmm:
 	.quad 0x5566778811223344, 0xddeeff0099aabbcc
+initial_ymmh:
+	.quad 0x0123456789abcdef, 0xfedcba9876543210
+replacement_ymm:
 replacement_xmm:
 	.quad 0x76543210fedcba98, 0xdeadbeef0badcafe
+replacement_ymmh:
+	.quad 0x0f1e2d3c4b5a6978, 0x8796a5b4c3d2e1f0
 initial_mxcsr:
 	.long 0x3f80
 initial_fcw:
@@ -218,6 +229,9 @@ thread_shstk_address:
 pku_available:
 	.long 0
 	.balign 4
+avx_available:
+	.long 0
+	.balign 4
 lam_available:
 	.long 0
 	.balign 4
@@ -243,6 +257,9 @@ expected_xstate_size:
 expected_xstate_extended_size:
 	.long FP_XSTATE_EXTENDED_SIZE
 expected_pkru_offset:
+	.long 0
+	.balign 4
+expected_ymm_offset:
 	.long 0
 	.balign 4
 expected_dynamic_xstate_size:
@@ -290,6 +307,17 @@ _start:
 	mov %eax, failure_code(%rip)
 	jmp 1f
 .Lcpu_profile_ok:
+	cmpl $0, avx_available(%rip)
+	je .Lcpu_profile_avx_reported
+	movl $133, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx_message(%rip), %rsi
+	mov $avx_message_length, %edx
+	syscall
+	cmp $avx_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx_reported:
 	movl $124, failure_code(%rip)
 	call check_initial_shstk
 	test %eax, %eax
@@ -2647,6 +2675,7 @@ check_cpu_profile:
 	push %rbx
 	push %r12
 	push %r13
+	movl $0, avx_available(%rip)
 	movl $0, pku_available(%rip)
 	movl $0, lam_available(%rip)
 	movl $0, shstk_available(%rip)
@@ -2654,6 +2683,7 @@ check_cpu_profile:
 	movl $FP_XSTATE_SIZE, expected_xstate_size(%rip)
 	movl $FP_XSTATE_EXTENDED_SIZE, expected_xstate_extended_size(%rip)
 	movl $0, expected_pkru_offset(%rip)
+	movl $0, expected_ymm_offset(%rip)
 	movl $FP_XSTATE_SIZE, expected_dynamic_xstate_size(%rip)
 	movl $0, expected_tiledata_offset(%rip)
 	movq $XFEATURE_MASK_FPSSE, expected_xfeatures(%rip)
@@ -2663,6 +2693,14 @@ check_cpu_profile:
 	xor %ecx, %ecx
 	cpuid
 	mov %eax, %r12d
+	mov $1, %eax
+	xor %ecx, %ecx
+	cpuid
+	test $0x10000000, %ecx
+	jz .Lcpu_detect_extended_max
+	movl $1, avx_available(%rip)
+.Lcpu_detect_extended_max:
+	mov %r12d, %eax
 	cmp $1, %eax
 	je .Lcpu_profile_features_done
 	cmp $7, %eax
@@ -2708,6 +2746,8 @@ check_cpu_profile:
 	mov $0x1d, %r13d
 	jmp .Lcpu_profile_check_max
 .Lcpu_profile_no_amx:
+	cmpl $0, avx_available(%rip)
+	jne .Lcpu_profile_xstate_max
 	cmpl $0, pku_available(%rip)
 	jne .Lcpu_profile_xstate_max
 	cmpl $0, shstk_available(%rip)
@@ -2730,6 +2770,8 @@ check_cpu_profile:
 	cmp $ELF_HWCAP, %edx
 	jne 2f
 	xor %r13d, %r13d
+	cmpl $0, avx_available(%rip)
+	jne .Lcpu_leaf1_xsave
 	cmpl $0, pku_available(%rip)
 	jne .Lcpu_leaf1_xsave
 	cmpl $0, shstk_available(%rip)
@@ -2739,6 +2781,10 @@ check_cpu_profile:
 .Lcpu_leaf1_xsave:
 	mov $0xc000000, %r13d
 .Lcpu_leaf1_ecx:
+	cmpl $0, avx_available(%rip)
+	je .Lcpu_leaf1_expected
+	or $0x10000000, %r13d
+.Lcpu_leaf1_expected:
 	cmp %r13d, %ecx
 	jne 2f
 	cmpl $1, %r12d
@@ -2784,6 +2830,21 @@ check_cpu_profile:
 	jne 2f
 	test %edx, %edx
 	jne 2f
+	cmpl $0, avx_available(%rip)
+	jne .Lcpu_check_avx_xstate
+	mov $132, %r11d
+	mov $0xd, %eax
+	mov $2, %ecx
+	cpuid
+	test %eax, %eax
+	jne 2f
+	test %ebx, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+.Lcpu_after_avx_xstate:
 	cmpl $0, pku_available(%rip)
 	jne .Lcpu_check_pku_xstate
 	cmpl $0, shstk_available(%rip)
@@ -2791,6 +2852,34 @@ check_cpu_profile:
 	cmpl $0, amx_available(%rip)
 	je .Lcpu_extended
 	jmp .Lcpu_check_user_xstate
+
+.Lcpu_check_avx_xstate:
+	mov $132, %r11d
+	mov $0xd, %eax
+	mov $2, %ecx
+	cpuid
+	cmp $256, %eax
+	jne 2f
+	cmp $FP_XSTATE_SIZE, %ebx
+	jb 2f
+	mov %ecx, %r12d
+	and $~2, %r12d
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov %ebx, expected_ymm_offset(%rip)
+	add %ebx, %eax
+	jc 2f
+	cmp expected_xstate_size(%rip), %eax
+	jbe .Lcpu_record_ymm
+	mov %eax, expected_xstate_size(%rip)
+	mov %eax, expected_dynamic_xstate_size(%rip)
+	add $4, %eax
+	mov %eax, expected_xstate_extended_size(%rip)
+.Lcpu_record_ymm:
+	orq $XFEATURE_MASK_YMM, expected_xfeatures(%rip)
+	orq $XFEATURE_MASK_YMM, expected_xcomp_supported(%rip)
+	jmp .Lcpu_after_avx_xstate
 
 .Lcpu_check_pku_xstate:
 	mov $106, %r11d
@@ -2804,13 +2893,16 @@ check_cpu_profile:
 	mov %eax, %r12d
 	mov %ebx, %r13d
 	add %r13d, %eax
+	cmp expected_xstate_size(%rip), %eax
+	jbe .Lcpu_record_pkru
 	mov %eax, expected_xstate_size(%rip)
 	mov %eax, expected_dynamic_xstate_size(%rip)
 	add $4, %eax
 	mov %eax, expected_xstate_extended_size(%rip)
+.Lcpu_record_pkru:
 	mov %r13d, expected_pkru_offset(%rip)
-	movq $XFEATURE_MASK_PKU, expected_xfeatures(%rip)
-	movq $XFEATURE_MASK_PKU, expected_xcomp_supported(%rip)
+	orq $0x200, expected_xfeatures(%rip)
+	orq $0x200, expected_xcomp_supported(%rip)
 .Lcpu_check_user_xstate:
 	cmpl $0, amx_available(%rip)
 	je .Lcpu_no_amx_components
@@ -2887,9 +2979,13 @@ check_cpu_profile:
 	xor %ecx, %ecx
 	cpuid
 	mov $XFEATURE_MASK_FPSSE, %r13d
+	cmpl $0, avx_available(%rip)
+	je .Lcpu_user_xfeatures_pku
+	or $XFEATURE_MASK_YMM, %r13d
+.Lcpu_user_xfeatures_pku:
 	cmpl $0, pku_available(%rip)
 	je .Lcpu_user_xfeatures_amx
-	mov $XFEATURE_MASK_PKU, %r13d
+	or $0x200, %r13d
 .Lcpu_user_xfeatures_amx:
 	cmpl $0, amx_available(%rip)
 	je .Lcpu_user_xfeatures
@@ -3062,6 +3158,8 @@ check_cpu_profile:
 	jne 2f
 
 	mov $81, %r11d
+	cmpl $0, avx_available(%rip)
+	jne .Lcpu_xgetbv
 	cmpl $0, pku_available(%rip)
 	jne .Lcpu_xgetbv
 	cmpl $0, shstk_available(%rip)
@@ -3088,9 +3186,13 @@ check_cpu_profile:
 	xor %ecx, %ecx
 	xgetbv
 	mov $XFEATURE_MASK_FPSSE, %r12d
+	cmpl $0, avx_available(%rip)
+	je .Lcpu_xgetbv_pku
+	or $XFEATURE_MASK_YMM, %r12d
+.Lcpu_xgetbv_pku:
 	cmpl $0, pku_available(%rip)
 	je .Lcpu_xgetbv_amx
-	mov $XFEATURE_MASK_PKU, %r12d
+	or $0x200, %r12d
 .Lcpu_xgetbv_amx:
 	cmpl $0, amx_available(%rip)
 	je .Lcpu_xgetbv_value
@@ -3166,7 +3268,13 @@ check_signal_roundtrip:
 	push %r12
 	push %r13
 	movl $0, signal_seen(%rip)
+	cmpl $0, avx_available(%rip)
+	je .Lsignal_roundtrip_no_avx
+	vmovdqu initial_ymm(%rip), %ymm15
+	jmp .Lsignal_roundtrip_fpu_ready
+.Lsignal_roundtrip_no_avx:
 	movdqu initial_xmm(%rip), %xmm15
+.Lsignal_roundtrip_fpu_ready:
 	ldmxcsr initial_mxcsr(%rip)
 	fldcw initial_fcw(%rip)
 	mov $39, %eax
@@ -3189,6 +3297,14 @@ check_signal_roundtrip:
 	pmovmskb %xmm0, %eax
 	cmp $0xffff, %eax
 	jne .Lsignal_roundtrip_fail
+	cmpl $0, avx_available(%rip)
+	je .Lsignal_roundtrip_no_ymmh
+	vextractf128 $1, %ymm15, %xmm0
+	pcmpeqb replacement_ymmh(%rip), %xmm0
+	pmovmskb %xmm0, %eax
+	cmp $0xffff, %eax
+	jne .Lsignal_roundtrip_fail
+.Lsignal_roundtrip_no_ymmh:
 	stmxcsr -4(%rsp)
 	cmpl $0x5f80, -4(%rsp)
 	jne .Lsignal_roundtrip_fail
@@ -3216,6 +3332,14 @@ check_replacement_fpu:
 	pmovmskb %xmm0, %eax
 	cmp $0xffff, %eax
 	jne 11f
+	cmpl $0, avx_available(%rip)
+	je .Lreplacement_fpu_no_ymmh
+	vextractf128 $1, %ymm15, %xmm0
+	pcmpeqb replacement_ymmh(%rip), %xmm0
+	pmovmskb %xmm0, %eax
+	cmp $0xffff, %eax
+	jne 11f
+.Lreplacement_fpu_no_ymmh:
 	stmxcsr -4(%rsp)
 	cmpl $0x5f80, -4(%rsp)
 	jne 11f
@@ -3290,6 +3414,20 @@ signal_handler:
 	pmovmskb %xmm0, %eax
 	cmp $0xffff, %eax
 	jne 3f
+	cmpl $0, avx_available(%rip)
+	je .Lsignal_handler_no_ymmh
+	mov expected_ymm_offset(%rip), %eax
+	add $YMMH15_OFFSET, %eax
+	movdqu (%r8,%rax), %xmm0
+	pcmpeqb initial_ymmh(%rip), %xmm0
+	pmovmskb %xmm0, %eax
+	cmp $0xffff, %eax
+	jne 3f
+	mov expected_ymm_offset(%rip), %eax
+	add $YMMH15_OFFSET, %eax
+	movdqu replacement_ymmh(%rip), %xmm0
+	movdqu %xmm0, (%r8,%rax)
+.Lsignal_handler_no_ymmh:
 	movdqu replacement_xmm(%rip), %xmm0
 	movdqu %xmm0, FPSTATE_XMM15(%r8)
 	movl $0x5f80, FPSTATE_MXCSR(%r8)

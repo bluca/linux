@@ -79,6 +79,37 @@ static struct kvm_protected_task_info get_info(int fd)
 	return info;
 }
 
+static bool kvm_supported_cpuid_has_avx(int kvm_fd)
+{
+	struct {
+		__u32 nent;
+		__u32 padding;
+		struct kvm_cpuid_entry2 entries[256];
+	} cpuid = {
+		.nent = 256,
+	};
+	bool avx = false, ymm = false, ymm_component = false;
+	unsigned int i;
+	int ret;
+
+	ret = ioctl(kvm_fd, KVM_GET_SUPPORTED_CPUID, &cpuid);
+	TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_GET_SUPPORTED_CPUID, ret));
+	for (i = 0; i < cpuid.nent; i++) {
+		struct kvm_cpuid_entry2 *entry = &cpuid.entries[i];
+
+		if (entry->function == 1 && !entry->index)
+			avx = (entry->ecx & ((1U << 26) | (1U << 28))) ==
+				((1U << 26) | (1U << 28));
+		else if (entry->function == 0xd && !entry->index)
+			ymm = entry->eax & (1U << 2);
+		else if (entry->function == 0xd && entry->index == 2)
+			ymm_component = entry->eax == 256 && entry->ebx >= 576 &&
+				!(entry->ecx & ((1U << 0) | (1U << 2)));
+	}
+
+	return avx && ymm && ymm_component;
+}
+
 static void test_create_validation(int kvm_fd)
 {
 	struct {
@@ -510,16 +541,22 @@ static void test_protected_exec(int kvm_fd)
 		CONTROL_FD = 102,
 	};
 	static const char expected[] = "protected task exec\n";
+	static const char expected_avx[] =
+		"protected task avx\nprotected task exec\nprotected task avx\n";
 	struct kvm_protected_task_arm arm = {
 		.size = sizeof(arm),
 	};
-	char helper[PATH_MAX], output[sizeof(expected)] = {};
+	const char *expected_output;
+	size_t expected_length;
+	char helper[PATH_MAX], output[sizeof(expected_avx)] = {};
 	unsigned long main_address = 0;
 	size_t nread = 0;
 	int address_pipe[2], pipefd[2], ready_pipe[2];
 	int status;
 	pid_t child;
 
+	expected_output = kvm_supported_cpuid_has_avx(kvm_fd) ? expected_avx : expected;
+	expected_length = strlen(expected_output);
 	get_exec_helper_path(helper);
 	TEST_ASSERT(pipe(pipefd) == 0, "pipe() failed: %d", errno);
 	TEST_ASSERT(pipe(address_pipe) == 0, "pipe() failed: %d", errno);
@@ -632,8 +669,8 @@ static void test_protected_exec(int kvm_fd)
 		    "waitpid() failed: %d", errno);
 	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
 		    "Protected exec helper failed: %#x", status);
-	TEST_ASSERT(nread == sizeof(expected) - 1 &&
-		    !memcmp(output, expected, sizeof(expected) - 1),
+	TEST_ASSERT(nread == expected_length &&
+		    !memcmp(output, expected_output, expected_length),
 		    "Unexpected protected exec output");
 }
 
