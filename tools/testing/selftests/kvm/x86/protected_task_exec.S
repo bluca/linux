@@ -1549,6 +1549,43 @@ check_pkey_controls:
 	jne .Lpkey_fail_free
 	cmpb $0x5a, (%r12)
 	jne .Lpkey_fail_free
+	mov $331, %eax
+	mov %r13d, %edi
+	syscall
+	test %rax, %rax
+	jne .Lpkey_fail_free
+	mov $330, %eax
+	xor %edi, %edi
+	mov $1, %esi
+	syscall
+	test %rax, %rax
+	js .Lpkey_fail_unmap
+	cmp %r13d, %eax
+	je .Lpkey_reallocated
+	mov %eax, %r13d
+	jmp .Lpkey_fail_free
+.Lpkey_reallocated:
+	mov $11, %edi
+	mov $4, %esi
+	mov $14, %edx
+	mov %r12, %rcx
+	lea .Lpkey_reallocated_fault_resume(%rip), %r8
+	mov %r12, %r9
+	call prepare_exception
+	movl %r13d, expected_pkey(%rip)
+	movq $0x25, expected_error_mask(%rip)
+	movq $0x25, expected_error(%rip)
+	mov (%r12), %rax
+.Lpkey_reallocated_fault_resume:
+	call check_exception
+	mov %eax, %r14d
+	mov %r15d, %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+	movl $0, expected_pkey(%rip)
+	test %r14d, %r14d
+	jne .Lpkey_fail_free
 	mov $329, %eax
 	mov %r12, %rdi
 	mov $4096, %esi
