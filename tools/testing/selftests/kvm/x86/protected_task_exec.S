@@ -296,6 +296,10 @@ _start:
 	call check_arch_prctl_controls
 	test %eax, %eax
 	jne 1f
+	movl $104, failure_code(%rip)
+	call check_pkey_controls
+	test %eax, %eax
+	jne 1f
 
 	movl $101, failure_code(%rip)
 	mov $154, %eax
@@ -1284,6 +1288,81 @@ check_arch_prctl_controls:
 	mov $1, %eax
 	ret
 	.size check_arch_prctl_controls, . - check_arch_prctl_controls
+
+	.type check_pkey_controls, @function
+check_pkey_controls:
+	push %r12
+	push %r13
+	push %r14
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $0x22, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae 4f
+	mov %rax, %r12
+	mov $330, %eax
+	xor %edi, %edi
+	xor %esi, %esi
+	syscall
+	cmp $-28, %rax
+	je 3f
+	test %rax, %rax
+	js 2f
+	mov %eax, %r13d
+	xor %r14d, %r14d
+	mov $329, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	mov $3, %edx
+	xor %r10d, %r10d
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $329, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	mov $3, %edx
+	mov %r13d, %r10d
+	syscall
+	cmp $-95, %rax
+	sete %r14b
+1:
+	mov $331, %eax
+	mov %r13d, %edi
+	syscall
+	test %rax, %rax
+	jne 2f
+	test %r14d, %r14d
+	jz 2f
+3:
+	xor %r14d, %r14d
+	jmp 5f
+2:
+	mov $1, %r14d
+5:
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	cmovne %eax, %r14d
+	mov %r14d, %eax
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+4:
+	mov $1, %eax
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+	.size check_pkey_controls, . - check_pkey_controls
 
 	.type check_io_permissions, @function
 check_io_permissions:
