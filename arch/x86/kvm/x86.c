@@ -11698,6 +11698,11 @@ static int vcpu_run(struct kvm_vcpu *vcpu)
 	vcpu->run->exit_reason = KVM_EXIT_UNKNOWN;
 
 	for (;;) {
+		if (kvm_check_request(KVM_REQ_PROTECTED_TASK_EXIT, vcpu)) {
+			r = -EINTR;
+			break;
+		}
+
 		/*
 		 * If another guest vCPU requests a PV TLB flush in the middle
 		 * of instruction emulation, the rest of the emulation could

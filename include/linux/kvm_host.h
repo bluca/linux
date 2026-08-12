@@ -1812,6 +1812,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm);
 int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state);
 u64 kvm_arch_protected_task_features(void);
 u64 kvm_arch_protected_task_xfeatures(struct kvm_vcpu *vcpu, void *state);
+void kvm_protected_task_vcpu_run_complete(struct kvm_vcpu *vcpu);
 unsigned long kvm_arch_protected_task_elf_hwcap(struct kvm_vcpu *vcpu,
 						unsigned int type,
 						unsigned long value);

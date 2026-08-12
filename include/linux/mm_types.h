@@ -1306,6 +1306,11 @@ struct mm_struct {
 
 #if IS_ENABLED(CONFIG_KVM)
 		atomic64_t protected_task_pkey_gen;
+		spinlock_t protected_task_lock;
+		struct list_head protected_task_vcpus;
+		wait_queue_head_t protected_task_wait;
+		unsigned int protected_task_run_count;
+		bool protected_task_quiescing;
 #endif
 
 		mm_flags_t flags; /* Must use mm_flags_* hlpers to access */

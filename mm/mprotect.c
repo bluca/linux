@@ -846,6 +846,7 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 	struct mmu_gather tlb;
 	struct vma_iterator vmi;
 	bool protected_pkey_changed = false;
+	bool protected_task_quiesced = false;
 
 	start = untagged_addr(start);
 
@@ -866,8 +867,14 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 
 	reqprot = prot;
 
-	if (mmap_write_lock_killable(current->mm))
+	if (pkey != -1 && kvm_protected_task_is_active())
+		protected_task_quiesced =
+			kvm_protected_task_begin_mm_update();
+	if (mmap_write_lock_killable(current->mm)) {
+		if (protected_task_quiesced)
+			kvm_protected_task_end_mm_update();
 		return -EINTR;
+	}
 
 	/*
 	 * If userspace did not allocate the pkey, do not let
@@ -932,8 +939,7 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 		old_vma_pkey = vma_pkey(vma);
 		new_vma_pkey = arch_override_mprotect_pkey(vma, prot, pkey);
 		if (new_vma_pkey != old_vma_pkey &&
-		    kvm_protected_task_is_active() &&
-		    atomic_read(&current->mm->mm_users) > 1) {
+		    kvm_protected_task_is_active() && !protected_task_quiesced) {
 			error = -EOPNOTSUPP;
 			break;
 		}
@@ -992,6 +998,8 @@ out:
 	if (protected_pkey_changed)
 		atomic64_inc(&current->mm->protected_task_pkey_gen);
 	mmap_write_unlock(current->mm);
+	if (protected_task_quiesced)
+		kvm_protected_task_end_mm_update();
 	return error;
 }
 

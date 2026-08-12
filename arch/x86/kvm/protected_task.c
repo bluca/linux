@@ -907,27 +907,30 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 				struct pt_regs *regs, u32 *next_slot)
 {
 	struct kvm_protected_task_x86 *state = arch_state;
+	bool run_complete = false;
 	int ret;
 
 	ret = kvm_protected_task_deactivate_fpu(vcpu, state);
 	if (ret)
-		return ret;
+		goto release;
 
 	ret = kvm_protected_task_setup_sregs(vcpu, state);
 	if (ret)
-		return ret;
+		goto out;
 	ret = kvm_protected_task_setup_task_msrs(vcpu);
 	if (ret)
-		return ret;
+		goto out;
 	ret = kvm_protected_task_setup_debugregs(vcpu);
 	if (ret)
-		return ret;
+		goto out;
 	ret = kvm_protected_task_setup_regs(vcpu, regs);
 	if (ret)
-		return ret;
+		goto out;
 	kvm_protected_task_setup_pkru(vcpu, state);
 
 	ret = kvm_vcpu_run(vcpu);
+	kvm_protected_task_vcpu_run_complete(vcpu);
+	run_complete = true;
 	kvm_protected_task_sync_pkru(vcpu, state);
 	if (ret == -EINTR) {
 		ret = kvm_protected_task_sync_regs(vcpu, regs, false);
@@ -971,7 +974,11 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 	}
 
 out:
-	return kvm_protected_task_activate_fpu(vcpu, state) ?: ret;
+	ret = kvm_protected_task_activate_fpu(vcpu, state) ?: ret;
+release:
+	if (!run_complete)
+		kvm_protected_task_vcpu_run_complete(vcpu);
+	return ret;
 }
 
 void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *arch_state)

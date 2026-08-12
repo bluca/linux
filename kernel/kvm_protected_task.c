@@ -42,6 +42,38 @@ u64 kvm_protected_task_xfeatures(void)
 #endif
 }
 
+bool kvm_protected_task_begin_mm_update(void)
+{
+#if IS_ENABLED(CONFIG_KVM)
+	struct kvm_protected_task_context *context;
+
+	if (!current->protected_task_active || !current->protected_task_state)
+		return false;
+	context = current->protected_task_active->private_data;
+	if (!context->ops->begin_mm_update)
+		return false;
+	context->ops->begin_mm_update(current->protected_task_state);
+	return true;
+#else
+	return false;
+#endif
+}
+
+void kvm_protected_task_end_mm_update(void)
+{
+#if IS_ENABLED(CONFIG_KVM)
+	struct kvm_protected_task_context *context;
+
+	if (WARN_ON_ONCE(!current->protected_task_active ||
+			 !current->protected_task_state))
+		return;
+	context = current->protected_task_active->private_data;
+	if (WARN_ON_ONCE(!context->ops->end_mm_update))
+		return;
+	context->ops->end_mm_update(current->protected_task_state);
+#endif
+}
+
 void kvm_protected_task_init(struct task_struct *task)
 {
 #if IS_ENABLED(CONFIG_KVM)
