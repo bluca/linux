@@ -637,7 +637,8 @@ unsigned long vm_mmap_protected_task(unsigned long len)
 	if (mmap_write_lock_killable(mm))
 		return -EINTR;
 	ret = do_mmap(NULL, 0, len, prot, flags,
-		      VM_KVM_PROTECTED | VM_DONTCOPY | VM_DONTDUMP,
+		      VM_KVM_PROTECTED | VM_DONTEXPAND | VM_DONTCOPY |
+		      VM_DONTDUMP,
 		      0, &populate, NULL);
 	mmap_write_unlock(mm);
 
