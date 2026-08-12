@@ -946,19 +946,17 @@ _start:
 	mov $3, %edx
 	xor %r10d, %r10d
 	syscall
-	cmp $-95, %rax
+	test %rax, %rax
+	jne .Lthread_update_syscall_fail
+	call check_pkey_shared_update
+	test %eax, %eax
 	je .Lthread_release
+	movl $112, thread_result(%rip)
+	jmp .Lthread_release
+.Lthread_update_syscall_fail:
 	movl $111, thread_result(%rip)
 .Lthread_release:
 	movl $1, thread_release(%rip)
-	lea thread_release(%rip), %rdi
-	mov $1, %esi
-	mov $1, %edx
-	xor %r10d, %r10d
-	xor %r8d, %r8d
-	xor %r9d, %r9d
-	mov $202, %eax
-	syscall
 8:
 	mov thread_tid(%rip), %edx
 	test %edx, %edx
@@ -1010,7 +1008,10 @@ _start:
 12:
 	mov failure_code(%rip), %eax
 15:
+	test %eax, %eax
+	jz .Lthread_signal_ready
 	mov %eax, thread_result(%rip)
+.Lthread_signal_ready:
 	movl $1, thread_ready(%rip)
 	lea thread_ready(%rip), %rdi
 	mov $1, %esi
@@ -1022,16 +1023,14 @@ _start:
 	syscall
 .Lthread_wait_release:
 	cmpl $0, thread_release(%rip)
-	jne .Lthread_exit
-	lea thread_release(%rip), %rdi
-	xor %esi, %esi
-	xor %edx, %edx
-	xor %r10d, %r10d
-	xor %r8d, %r8d
-	xor %r9d, %r9d
-	mov $202, %eax
-	syscall
+	jne .Lthread_check_update
+	pause
 	jmp .Lthread_wait_release
+.Lthread_check_update:
+	call check_pkey_shared_update
+	test %eax, %eax
+	je .Lthread_exit
+	movl $113, thread_result(%rip)
 .Lthread_exit:
 	mov thread_result(%rip), %eax
 	mov %eax, %edi
@@ -1677,6 +1676,37 @@ check_pkey_inheritance:
 	mov $1, %eax
 	ret
 	.size check_pkey_inheritance, . - check_pkey_inheritance
+
+	.type check_pkey_shared_update, @function
+check_pkey_shared_update:
+	cmpl $0, pku_available(%rip)
+	je .Lpkey_shared_update_success
+	xor %ecx, %ecx
+	rdpkru
+	cmpl pkey_denied_pkru(%rip), %eax
+	jne .Lpkey_shared_update_fail
+	mov $11, %edi
+	mov $4, %esi
+	mov $14, %edx
+	mov pkey_address(%rip), %rcx
+	lea .Lpkey_shared_update_fault(%rip), %r8
+	mov %rcx, %r9
+	call prepare_exception
+	movl pkey_number(%rip), %eax
+	movl %eax, expected_pkey(%rip)
+	movq $0x25, expected_error_mask(%rip)
+	movq $0x25, expected_error(%rip)
+	mov pkey_address(%rip), %rcx
+	cmpb $0x5a, (%rcx)
+	jne .Lpkey_shared_update_fail
+.Lpkey_shared_update_success:
+	xor %eax, %eax
+	ret
+.Lpkey_shared_update_fault:
+.Lpkey_shared_update_fail:
+	mov $1, %eax
+	ret
+	.size check_pkey_shared_update, . - check_pkey_shared_update
 
 	.type prepare_pkey_exec, @function
 prepare_pkey_exec:
