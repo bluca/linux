@@ -1426,6 +1426,10 @@ check_pkey_controls:
 	mov $330, %eax
 	xor %edi, %edi
 	xor %esi, %esi
+	cmpl $0, pku_available(%rip)
+	je .Lpkey_alloc
+	mov $2, %esi
+.Lpkey_alloc:
 	syscall
 	cmp $-28, %rax
 	je .Lpkey_success_unmap
@@ -1434,6 +1438,27 @@ check_pkey_controls:
 	cmp $1, %eax
 	jne .Lpkey_fail_unmap
 	mov %eax, %r13d
+	cmpl $0, pku_available(%rip)
+	je .Lpkey_initial_rights_done
+	xor %ecx, %ecx
+	rdpkru
+	mov %eax, %r14d
+	mov %r13d, %ecx
+	shl $1, %ecx
+	mov $3, %edx
+	shl %cl, %edx
+	not %edx
+	and %edx, %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+	mov %r13d, %ecx
+	shl $1, %ecx
+	shr %cl, %r14d
+	and $3, %r14d
+	cmp $2, %r14d
+	jne .Lpkey_fail_free
+.Lpkey_initial_rights_done:
 	mov $329, %eax
 	mov %r12, %rdi
 	mov $4096, %esi
