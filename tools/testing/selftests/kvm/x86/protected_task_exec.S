@@ -1491,6 +1491,39 @@ check_pkey_controls:
 	jne .Lpkey_fail_free
 	cmpb $0x5a, (%r12)
 	jne .Lpkey_fail_free
+	mov %r13d, %ecx
+	shl $1, %ecx
+	mov $2, %eax
+	shl %cl, %eax
+	or %r15d, %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+	cmpb $0x5a, (%r12)
+	jne .Lpkey_restore_fail
+	mov $11, %edi
+	mov $4, %esi
+	mov $14, %edx
+	mov %r12, %rcx
+	lea .Lpkey_write_fault_resume(%rip), %r8
+	mov %r12, %r9
+	call prepare_exception
+	movl %r13d, expected_pkey(%rip)
+	movq $0x27, expected_error_mask(%rip)
+	movq $0x27, expected_error(%rip)
+	movb $0x6b, (%r12)
+.Lpkey_write_fault_resume:
+	call check_exception
+	mov %eax, %r14d
+	mov %r15d, %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+	movl $0, expected_pkey(%rip)
+	test %r14d, %r14d
+	jne .Lpkey_fail_free
+	cmpb $0x5a, (%r12)
+	jne .Lpkey_fail_free
 	mov $329, %eax
 	mov %r12, %rdi
 	mov $4096, %esi
@@ -1502,6 +1535,11 @@ check_pkey_controls:
 .Lpkey_success_free:
 	xor %r14d, %r14d
 	jmp .Lpkey_free
+.Lpkey_restore_fail:
+	mov %r15d, %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
 .Lpkey_fail_free:
 	mov $1, %r14d
 .Lpkey_free:
