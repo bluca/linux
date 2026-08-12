@@ -4,6 +4,8 @@
  * VMA-specific functions.
  */
 
+#include <linux/kvm_protected_task.h>
+
 #include "vma_internal.h"
 #include "vma.h"
 
@@ -3293,16 +3295,25 @@ int __vm_munmap(unsigned long start, size_t len, bool unlock)
 {
 	int ret;
 	struct mm_struct *mm = current->mm;
+	bool protected_task_quiesced = false;
 	LIST_HEAD(uf);
 	VMA_ITERATOR(vmi, mm, start);
 
-	if (mmap_write_lock_killable(mm))
+	if (kvm_protected_task_needs_pgtable_update())
+		protected_task_quiesced =
+			kvm_protected_task_begin_mm_update();
+	if (mmap_write_lock_killable(mm)) {
+		if (protected_task_quiesced)
+			kvm_protected_task_end_mm_update(false);
 		return -EINTR;
+	}
 
 	ret = do_vmi_munmap(&vmi, mm, start, len, &uf, unlock);
 	if (ret || !unlock)
 		mmap_write_unlock(mm);
 
+	if (protected_task_quiesced)
+		kvm_protected_task_end_mm_update(!ret);
 	userfaultfd_unmap_complete(mm, &uf);
 	return ret;
 }

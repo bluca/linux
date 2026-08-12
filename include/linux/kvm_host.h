@@ -1814,6 +1814,8 @@ u64 kvm_arch_protected_task_features(void);
 u64 kvm_arch_protected_task_xfeatures(struct kvm_vcpu *vcpu, void *state);
 unsigned int kvm_arch_protected_task_max_tag_bits(struct kvm_vcpu *vcpu,
 						  void *state);
+bool kvm_arch_protected_task_needs_pgtable_update(struct kvm_vcpu *vcpu,
+						   void *state);
 void kvm_protected_task_vcpu_run_complete(struct kvm_vcpu *vcpu);
 unsigned long kvm_arch_protected_task_elf_hwcap(struct kvm_vcpu *vcpu,
 						unsigned int type,

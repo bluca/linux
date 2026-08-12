@@ -13,6 +13,7 @@
 #include <linux/hugetlb.h>
 #include <linux/shm.h>
 #include <linux/ksm.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/mman.h>
 #include <linux/swap.h>
 #include <linux/capability.h>
@@ -1968,6 +1969,7 @@ static unsigned long remap_move(struct vma_remap_struct *vrm)
 static unsigned long do_mremap(struct vma_remap_struct *vrm)
 {
 	struct mm_struct *mm = current->mm;
+	bool protected_task_quiesced = false;
 	unsigned long res;
 	bool failed;
 
@@ -1978,12 +1980,20 @@ static unsigned long do_mremap(struct vma_remap_struct *vrm)
 	if (res)
 		return res;
 
-	if (mmap_write_lock_killable(mm))
+	if (kvm_protected_task_needs_pgtable_update())
+		protected_task_quiesced =
+			kvm_protected_task_begin_mm_update();
+	if (mmap_write_lock_killable(mm)) {
+		if (protected_task_quiesced)
+			kvm_protected_task_end_mm_update(false);
 		return -EINTR;
+	}
 	vrm->mmap_locked = true;
 
 	if (!check_map_count_against_split_early()) {
 		mmap_write_unlock(mm);
+		if (protected_task_quiesced)
+			kvm_protected_task_end_mm_update(false);
 		return -ENOMEM;
 	}
 
@@ -2004,6 +2014,8 @@ out:
 
 	if (vrm->mmap_locked)
 		mmap_write_unlock(mm);
+	if (protected_task_quiesced)
+		kvm_protected_task_end_mm_update(!failed);
 
 	/* VMA mlock'd + was expanded, so populated expanded region. */
 	if (!failed && vrm->populate_expand)

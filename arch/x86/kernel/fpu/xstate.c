@@ -1062,6 +1062,39 @@ void *get_xsave_addr(struct xregs_state *xsave, int xfeature_nr)
 }
 EXPORT_SYMBOL_FOR_KVM(get_xsave_addr);
 
+int fpu_copy_task_supervisor_state_to_guest(struct fpu_guest *guest_fpu,
+						    u64 xfeatures)
+{
+	struct fpstate *dst = guest_fpu->fpstate;
+	struct fpu *fpu = x86_task_fpu(current);
+	struct fpstate *src = fpu->fpstate;
+	int xfeature;
+
+	if (xfeatures & ~XFEATURE_MASK_SUPERVISOR_SUPPORTED ||
+	    (dst->xfeatures & xfeatures) != xfeatures ||
+	    (src->xfeatures & xfeatures) != xfeatures)
+		return -EINVAL;
+
+	fpu_sync_fpstate(fpu);
+	for_each_set_bit(xfeature, (unsigned long *)&xfeatures, XFEATURE_MAX) {
+		void *dst_addr = __raw_xsave_addr(&dst->regs.xsave, xfeature);
+		void *src_addr = __raw_xsave_addr(&src->regs.xsave, xfeature);
+
+		if (!dst_addr || !src_addr)
+			return -EINVAL;
+		if (src->regs.xsave.header.xfeatures & BIT_ULL(xfeature)) {
+			memcpy(dst_addr, src_addr, xstate_sizes[xfeature]);
+			dst->regs.xsave.header.xfeatures |= BIT_ULL(xfeature);
+		} else {
+			memset(dst_addr, 0, xstate_sizes[xfeature]);
+			dst->regs.xsave.header.xfeatures &= ~BIT_ULL(xfeature);
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_FOR_KVM(fpu_copy_task_supervisor_state_to_guest);
+
 /*
  * Given an xstate feature nr, calculate where in the xsave buffer the state is.
  * The xsave buffer should be in standard format, not compacted (e.g. user mode

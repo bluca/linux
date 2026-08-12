@@ -872,7 +872,7 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 			kvm_protected_task_begin_mm_update();
 	if (mmap_write_lock_killable(current->mm)) {
 		if (protected_task_quiesced)
-			kvm_protected_task_end_mm_update();
+			kvm_protected_task_end_mm_update(false);
 		return -EINTR;
 	}
 
@@ -995,11 +995,9 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 		error = -ENOMEM;
 
 out:
-	if (protected_pkey_changed)
-		atomic64_inc(&current->mm->protected_task_pgtable_gen);
 	mmap_write_unlock(current->mm);
 	if (protected_task_quiesced)
-		kvm_protected_task_end_mm_update();
+		kvm_protected_task_end_mm_update(protected_pkey_changed);
 	return error;
 }
 

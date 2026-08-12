@@ -45,7 +45,8 @@ static void do_unexpected_cp(struct pt_regs *regs, unsigned long error_code)
 static DEFINE_RATELIMIT_STATE(cpf_rate, DEFAULT_RATELIMIT_INTERVAL,
 			      DEFAULT_RATELIMIT_BURST);
 
-static void do_user_cp_fault(struct pt_regs *regs, unsigned long error_code)
+void x86_force_sig_user_control_protection(struct pt_regs *regs,
+					   unsigned long error_code)
 {
 	struct task_struct *tsk;
 	unsigned long ssp;
@@ -150,7 +151,7 @@ DEFINE_IDTENTRY_ERRORCODE(exc_control_protection)
 {
 	if (user_mode(regs)) {
 		if (cpu_feature_enabled(X86_FEATURE_USER_SHSTK))
-			do_user_cp_fault(regs, error_code);
+			x86_force_sig_user_control_protection(regs, error_code);
 		else
 			do_unexpected_cp(regs, error_code);
 	} else {

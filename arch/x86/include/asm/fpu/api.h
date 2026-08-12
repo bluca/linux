@@ -157,6 +157,8 @@ extern void fpu_copy_guest_fpstate_to_uabi(struct fpu_guest *gfpu, void *buf,
 extern int fpu_copy_uabi_to_guest_fpstate(struct fpu_guest *gfpu, const void *buf, u64 xcr0, u32 *vpkru);
 extern int fpu_copy_task_fpstate_to_guest(struct fpu_guest *gfpu, u64 xcr0,
 					  u32 *vpkru);
+extern int fpu_copy_task_supervisor_state_to_guest(struct fpu_guest *gfpu,
+						    u64 xfeatures);
 
 static inline void fpstate_set_confidential(struct fpu_guest *gfpu)
 {

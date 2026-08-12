@@ -1101,6 +1101,12 @@ unsigned int __weak kvm_arch_protected_task_max_tag_bits(struct kvm_vcpu *vcpu,
 	return 0;
 }
 
+bool __weak kvm_arch_protected_task_needs_pgtable_update(struct kvm_vcpu *vcpu,
+							  void *state)
+{
+	return false;
+}
+
 int __weak kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu,
 					    void *state, struct pt_regs *regs,
 					    u32 slot)

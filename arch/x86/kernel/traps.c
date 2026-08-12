@@ -1544,6 +1544,11 @@ bool x86_handle_user_exception(struct pt_regs *regs, unsigned int trapnr,
 		do_trap(trapnr, SIGBUS, "alignment check", regs, error_code,
 			BUS_ADRALN, NULL);
 		break;
+	case X86_TRAP_CP:
+		if (!cpu_feature_enabled(X86_FEATURE_USER_SHSTK))
+			return false;
+		x86_force_sig_user_control_protection(regs, error_code);
+		break;
 	default:
 		return false;
 	}

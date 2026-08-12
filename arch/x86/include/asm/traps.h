@@ -28,6 +28,13 @@ void handle_invalid_op(struct pt_regs *regs);
 noinstr bool handle_bug(struct pt_regs *regs);
 bool x86_handle_user_exception(struct pt_regs *regs, unsigned int trapnr,
 			       unsigned long error_code, unsigned long dr6);
+#ifdef CONFIG_X86_CET
+void x86_force_sig_user_control_protection(struct pt_regs *regs,
+					   unsigned long error_code);
+#else
+static inline void x86_force_sig_user_control_protection(
+		struct pt_regs *regs, unsigned long error_code) { }
+#endif
 
 static inline int get_si_code(unsigned long condition)
 {

@@ -44,6 +44,11 @@ static void features_clr(unsigned long features)
 	current->thread.features &= ~features;
 }
 
+static bool protected_task_shstk_supported(void)
+{
+	return kvm_protected_task_xfeatures() & XFEATURE_MASK_CET_USER;
+}
+
 /*
  * Create a restore token on the shadow stack.  A token is always 8-byte
  * and aligned to 8.
@@ -101,19 +106,29 @@ static int create_rstor_token(unsigned long ssp, unsigned long *token_addr)
 static unsigned long alloc_shstk(unsigned long addr, unsigned long size,
 				 unsigned long token_offset, bool set_res_tok)
 {
+	bool protected_task_quiesced = false;
 	unsigned long mapped_addr;
 
+	if (kvm_protected_task_needs_pgtable_update())
+		protected_task_quiesced =
+			kvm_protected_task_begin_mm_update();
 	mapped_addr = vm_mmap_shadow_stack(addr, size, MAP_ABOVE4G);
 
 	if (!set_res_tok || IS_ERR_VALUE(mapped_addr))
 		goto out;
 
 	if (create_rstor_token(mapped_addr + token_offset, NULL)) {
+		if (protected_task_quiesced) {
+			kvm_protected_task_end_mm_update(true);
+			protected_task_quiesced = false;
+		}
 		vm_munmap(mapped_addr, size);
-		return -EINVAL;
+		mapped_addr = -EINVAL;
 	}
 
 out:
+	if (protected_task_quiesced)
+		kvm_protected_task_end_mm_update(!IS_ERR_VALUE(mapped_addr));
 	return mapped_addr;
 }
 
@@ -566,7 +581,8 @@ SYSCALL_DEFINE3(map_shadow_stack, unsigned long, addr, unsigned long, size, unsi
 	aligned_size = PAGE_ALIGN(size);
 	if (aligned_size < size)
 		return -EOVERFLOW;
-	if (kvm_protected_task_is_active())
+	if (kvm_protected_task_is_active() &&
+	    !protected_task_shstk_supported())
 		return -EOPNOTSUPP;
 
 	return alloc_shstk(addr, aligned_size, size, set_tok);
@@ -581,7 +597,8 @@ long shstk_prctl(struct task_struct *task, int option, unsigned long arg2)
 	}
 
 	if (option == ARCH_SHSTK_LOCK) {
-		if (kvm_protected_task_is_active())
+		if (kvm_protected_task_is_active() &&
+		    !protected_task_shstk_supported())
 			return -EOPNOTSUPP;
 		task->thread.features_locked |= features;
 		return 0;
@@ -604,6 +621,7 @@ long shstk_prctl(struct task_struct *task, int option, unsigned long arg2)
 	if (hweight_long(features) > 1)
 		return -EINVAL;
 	if (kvm_protected_task_is_active() &&
+	    !protected_task_shstk_supported() &&
 	    (features & (ARCH_SHSTK_SHSTK | ARCH_SHSTK_WRSS)))
 		return -EOPNOTSUPP;
 

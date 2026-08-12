@@ -584,6 +584,7 @@ static void exit_mm(void)
 	struct mm_struct *mm = current->mm;
 
 	exit_mm_release(current, mm);
+	kvm_protected_task_exit(current);
 	if (!mm)
 		return;
 
@@ -995,7 +996,6 @@ void __noreturn do_exit(long code)
 	 */
 	unwind_deferred_task_exit(tsk);
 
-	kvm_protected_task_exit(tsk);
 	exit_mm();
 
 	if (group_dead)

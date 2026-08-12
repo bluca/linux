@@ -368,6 +368,14 @@ static unsigned int kvm_protected_task_adjust_max_tag_bits(void *state)
 						    exec->arch_state);
 }
 
+static bool kvm_protected_task_adjust_pgtable_update(void *state)
+{
+	struct kvm_protected_task_exec *exec = state;
+
+	return kvm_arch_protected_task_needs_pgtable_update(exec->vcpu,
+							    exec->arch_state);
+}
+
 static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
 {
 	struct kvm_protected_task_exec *exec = state;
@@ -423,6 +431,7 @@ static const struct kvm_protected_task_ops kvm_protected_task_ops = {
 	.elf_hwcap = kvm_protected_task_adjust_elf_hwcap,
 	.xfeatures = kvm_protected_task_adjust_xfeatures,
 	.max_tag_bits = kvm_protected_task_adjust_max_tag_bits,
+	.needs_pgtable_update = kvm_protected_task_adjust_pgtable_update,
 	.begin_mm_update = kvm_protected_task_quiesce_mm,
 	.end_mm_update = kvm_protected_task_resume_mm,
 	.deactivate_exec = kvm_protected_task_deactivate_vcpu,

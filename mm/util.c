@@ -15,6 +15,7 @@
 #include <linux/sysctl.h>
 #include <linux/mman.h>
 #include <linux/hugetlb.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/vmalloc.h>
 #include <linux/userfaultfd_k.h>
 #include <linux/elf.h>
@@ -570,17 +571,27 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 	unsigned long ret;
 	struct mm_struct *mm = current->mm;
 	unsigned long populate;
+	bool protected_task_quiesced = false;
 	LIST_HEAD(uf);
 
 	ret = security_mmap_file(file, prot, flag);
 	if (!ret)
 		ret = fsnotify_mmap_perm(file, prot, off, len);
 	if (!ret) {
-		if (mmap_write_lock_killable(mm))
+		if ((flag & MAP_FIXED) &&
+		    kvm_protected_task_needs_pgtable_update())
+			protected_task_quiesced =
+				kvm_protected_task_begin_mm_update();
+		if (mmap_write_lock_killable(mm)) {
+			if (protected_task_quiesced)
+				kvm_protected_task_end_mm_update(false);
 			return -EINTR;
+		}
 		ret = do_mmap(file, addr, len, prot, flag, 0, pgoff, &populate,
 			      &uf);
 		mmap_write_unlock(mm);
+		if (protected_task_quiesced)
+			kvm_protected_task_end_mm_update(!IS_ERR_VALUE(ret));
 		userfaultfd_unmap_complete(mm, &uf);
 		if (populate)
 			mm_populate(ret, populate);

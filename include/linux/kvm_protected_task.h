@@ -3,6 +3,7 @@
 #define _LINUX_KVM_PROTECTED_TASK_H
 
 #include <linux/compiler_types.h>
+#include <linux/types.h>
 
 struct linux_binprm;
 struct pt_regs;
@@ -24,6 +25,7 @@ struct kvm_protected_task_ops {
 				    unsigned long value);
 	u64 (*xfeatures)(void *state);
 	unsigned int (*max_tag_bits)(void *state);
+	bool (*needs_pgtable_update)(void *state);
 	void (*begin_mm_update)(void *state);
 	void (*end_mm_update)(void *state);
 	void (*deactivate_exec)(void *state);
@@ -40,8 +42,9 @@ bool kvm_protected_task_can_arm(void);
 bool kvm_protected_task_is_active(void);
 u64 kvm_protected_task_xfeatures(void);
 unsigned int kvm_protected_task_max_tag_bits(void);
+bool kvm_protected_task_needs_pgtable_update(void);
 bool kvm_protected_task_begin_mm_update(void);
-void kvm_protected_task_end_mm_update(void);
+void kvm_protected_task_end_mm_update(bool changed);
 void kvm_protected_task_init(struct task_struct *task);
 void kvm_protected_task_fork(struct task_struct *task, bool inherit);
 void kvm_protected_task_cleanup(struct task_struct *task);

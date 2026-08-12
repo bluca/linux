@@ -57,6 +57,21 @@ unsigned int kvm_protected_task_max_tag_bits(void)
 #endif
 }
 
+bool kvm_protected_task_needs_pgtable_update(void)
+{
+#if IS_ENABLED(CONFIG_KVM)
+	struct kvm_protected_task_context *context;
+
+	if (!current->protected_task_active || !current->protected_task_state)
+		return false;
+	context = current->protected_task_active->private_data;
+	return context->ops->needs_pgtable_update &&
+		context->ops->needs_pgtable_update(current->protected_task_state);
+#else
+	return false;
+#endif
+}
+
 bool kvm_protected_task_begin_mm_update(void)
 {
 #if IS_ENABLED(CONFIG_KVM)
@@ -74,7 +89,7 @@ bool kvm_protected_task_begin_mm_update(void)
 #endif
 }
 
-void kvm_protected_task_end_mm_update(void)
+void kvm_protected_task_end_mm_update(bool changed)
 {
 #if IS_ENABLED(CONFIG_KVM)
 	struct kvm_protected_task_context *context;
@@ -85,6 +100,8 @@ void kvm_protected_task_end_mm_update(void)
 	context = current->protected_task_active->private_data;
 	if (WARN_ON_ONCE(!context->ops->end_mm_update))
 		return;
+	if (changed)
+		atomic64_inc(&current->mm->protected_task_pgtable_gen);
 	context->ops->end_mm_update(current->protected_task_state);
 #endif
 }
