@@ -17,6 +17,11 @@
 .set XFEATURE_MASK_FPSSE, 3
 .set XFEATURE_MASK_PKU, 0x203
 .set XFEATURE_MASK_CET_USER, 0x800
+.set XFEATURE_MASK_XTILE_CFG, 0x20000
+.set XFEATURE_MASK_XTILE_DATA, 0x40000
+.set XFEATURE_MASK_XTILE, 0x60000
+.set XTILE_CFG_SIZE, 64
+.set XTILE_DATA_SIZE, 8192
 .set __NR_map_shadow_stack, 453
 .set ARCH_SET_GS, 0x1001
 .set ARCH_SET_FS, 0x1002
@@ -106,6 +111,24 @@ gs_marker:
 	.balign 8
 lam_marker:
 	.quad 0x13579bdf2468ace0
+	.balign 64
+amx_config:
+	.byte 1, 0
+	.zero 14
+	.rept 8
+	.word 64
+	.endr
+	.zero 16
+	.rept 8
+	.byte 16
+	.endr
+	.zero 8
+	.balign 64
+amx_source:
+	.fill 1024, 1, 0x5a
+	.balign 64
+amx_replacement:
+	.fill 1024, 1, 0xa5
 	.balign 4
 ldt_entry:
 	.long 0, 0, 0xfffff, 0x51
@@ -201,6 +224,9 @@ lam_available:
 shstk_available:
 	.long 0
 	.balign 4
+amx_available:
+	.long 0
+	.balign 4
 pkey_number:
 	.long 0
 	.balign 4
@@ -218,9 +244,21 @@ expected_xstate_extended_size:
 	.long FP_XSTATE_EXTENDED_SIZE
 expected_pkru_offset:
 	.long 0
+	.balign 4
+expected_dynamic_xstate_size:
+	.long FP_XSTATE_SIZE
+	.balign 4
+expected_tiledata_offset:
+	.long 0
 	.balign 8
 expected_xfeatures:
 	.quad XFEATURE_MASK_FPSSE
+	.balign 8
+expected_xcomp_supported:
+	.quad XFEATURE_MASK_FPSSE
+	.balign 64
+amx_output:
+	.zero 1024
 	.balign 8
 reexec_argv:
 	.quad 0
@@ -370,6 +408,10 @@ _start:
 	call check_xcomp_controls
 	test %eax, %eax
 	jne 1f
+	movl $129, failure_code(%rip)
+	call check_amx_without_permission
+	test %eax, %eax
+	jne 1f
 	movl $103, failure_code(%rip)
 	call check_arch_prctl_controls
 	test %eax, %eax
@@ -434,40 +476,35 @@ _start:
 	test %eax, %eax
 	jne 1f
 
+	movl $82, failure_code(%rip)
+	call check_signal_roundtrip
+	test %eax, %eax
+	jne 1f
+	movl $130, failure_code(%rip)
+	call request_amx_permission
+	test %eax, %eax
+	jne 1f
+	call check_signal_roundtrip
+	test %eax, %eax
+	jne 1f
+	movl $131, failure_code(%rip)
+	call enable_amx_tiledata
+	test %eax, %eax
+	jne 1f
 	mov $39, %eax
 	syscall
-	mov %eax, %r12d
-	mov $186, %eax
+	lea amx_source(%rip), %rdi
+	call check_amx_tiledata
+	test %eax, %eax
+	jne 1f
+	movl $132, failure_code(%rip)
+	call check_signal_roundtrip
+	test %eax, %eax
+	jne 1f
+	mov $39, %eax
 	syscall
-	mov %eax, %r13d
-
-	movl $82, failure_code(%rip)
-	movdqu initial_xmm(%rip), %xmm15
-	ldmxcsr initial_mxcsr(%rip)
-	fldcw initial_fcw(%rip)
-	mov $234, %eax
-	mov %r12d, %edi
-	mov %r13d, %esi
-	mov $10, %edx
-	syscall
-	test %rax, %rax
-	jne 1f
-
-	cmpl $1, signal_seen(%rip)
-	jne 1f
-	movdqu %xmm15, %xmm0
-	pcmpeqb replacement_xmm(%rip), %xmm0
-	pmovmskb %xmm0, %eax
-	cmp $0xffff, %eax
-	jne 1f
-	stmxcsr -4(%rsp)
-	cmpl $0x5f80, -4(%rsp)
-	jne 1f
-	fnstcw -2(%rsp)
-	cmpw $0x037f, -2(%rsp)
-	jne 1f
-	movl $109, failure_code(%rip)
-	call check_pkey_signal_result
+	lea amx_replacement(%rip), %rdi
+	call check_amx_tiledata
 	test %eax, %eax
 	jne 1f
 
@@ -919,11 +956,21 @@ _start:
 	call check_process_clone
 	test %eax, %eax
 	jne 1f
+	call set_amx_dynamic_expectations
+	lea amx_replacement(%rip), %rdi
+	call check_amx_tiledata
+	test %eax, %eax
+	jne 1f
 
 	movl $21, failure_code(%rip)
 	mov $58, %eax
 	syscall
 	call check_process_clone
+	test %eax, %eax
+	jne 1f
+	call set_amx_dynamic_expectations
+	lea amx_replacement(%rip), %rdi
+	call check_amx_tiledata
 	test %eax, %eax
 	jne 1f
 
@@ -933,6 +980,11 @@ _start:
 	mov $435, %eax
 	syscall
 	call check_process_clone
+	test %eax, %eax
+	jne 1f
+	call set_amx_dynamic_expectations
+	lea amx_replacement(%rip), %rdi
+	call check_amx_tiledata
 	test %eax, %eax
 	jne 1f
 
@@ -1048,6 +1100,9 @@ _start:
 	call check_cpu_profile
 	test %eax, %eax
 	jne 15f
+	call check_amx_caller_saved
+	test %eax, %eax
+	jne 12f
 	call check_lam_enabled
 	test %eax, %eax
 	jne 12f
@@ -1162,6 +1217,11 @@ _start:
 	syscall
 	ud2
 10:
+	call set_amx_dynamic_expectations
+	lea amx_replacement(%rip), %rdi
+	call check_amx_tiledata
+	test %eax, %eax
+	jne 1f
 	call check_hidden_mapping
 	test %eax, %eax
 	jne 1f
@@ -1269,6 +1329,9 @@ check_process_clone:
 .Lprocess_child:
 	mov initial_stack(%rip), %rdi
 	call check_cpu_profile
+	test %eax, %eax
+	jne .Lprocess_child_fail
+	call check_amx_caller_saved
 	test %eax, %eax
 	jne .Lprocess_child_fail
 	call check_lam_enabled
@@ -1427,7 +1490,7 @@ check_xcomp_controls:
 	syscall
 	test %rax, %rax
 	jne 1f
-	mov expected_xfeatures(%rip), %rcx
+	mov expected_xcomp_supported(%rip), %rcx
 	cmp %rcx, (%rsp)
 	jne 1f
 	mov $158, %eax
@@ -1445,13 +1508,16 @@ check_xcomp_controls:
 	syscall
 	cmp $-22, %rax
 	jne 1f
+	cmpl $0, amx_available(%rip)
+	jne 2f
 	mov $158, %eax
 	mov $ARCH_REQ_XCOMP_PERM, %edi
 	mov $18, %esi
 	syscall
 	cmp $-95, %rax
-	setne %al
-	movzbl %al, %eax
+	jne 1f
+2:
+	xor %eax, %eax
 	add $16, %rsp
 	ret
 1:
@@ -1459,6 +1525,173 @@ check_xcomp_controls:
 	mov $1, %eax
 	ret
 	.size check_xcomp_controls, . - check_xcomp_controls
+
+	.type check_amx_without_permission, @function
+check_amx_without_permission:
+	cmpl $0, amx_available(%rip)
+	je .Lamx_without_permission_success
+	lea amx_config(%rip), %rax
+	.byte 0xc4, 0xe2, 0x78, 0x49, 0x00
+	mov $4, %edi
+	mov $1, %esi
+	mov $7, %edx
+	lea .Lamx_without_permission(%rip), %rcx
+	lea .Lamx_without_permission_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	lea amx_source(%rip), %rax
+	mov $64, %edx
+.Lamx_without_permission:
+	.byte 0xc4, 0xe2, 0x7b, 0x4b, 0x04, 0x10
+.Lamx_without_permission_resume:
+	call check_exception
+	ret
+.Lamx_without_permission_success:
+	xor %eax, %eax
+	ret
+	.size check_amx_without_permission, . - check_amx_without_permission
+
+	.type request_amx_permission, @function
+request_amx_permission:
+	cmpl $0, amx_available(%rip)
+	je .Lamx_permission_success
+	sub $8, %rsp
+	mov $158, %eax
+	mov $ARCH_REQ_XCOMP_PERM, %edi
+	mov $18, %esi
+	syscall
+	test %rax, %rax
+	jne .Lamx_permission_fail
+	mov $158, %eax
+	mov $ARCH_GET_XCOMP_PERM, %edi
+	mov %rsp, %rsi
+	syscall
+	test %rax, %rax
+	jne .Lamx_permission_fail
+	mov expected_xcomp_supported(%rip), %rcx
+	cmp %rcx, (%rsp)
+	jne .Lamx_permission_fail
+	mov $158, %eax
+	mov $ARCH_REQ_XCOMP_PERM, %edi
+	mov $18, %esi
+	syscall
+	test %rax, %rax
+	jne .Lamx_permission_fail
+	add $8, %rsp
+.Lamx_permission_success:
+	xor %eax, %eax
+	ret
+.Lamx_permission_fail:
+	add $8, %rsp
+	mov $1, %eax
+	ret
+	.size request_amx_permission, . - request_amx_permission
+
+	.type enable_amx_tiledata, @function
+enable_amx_tiledata:
+	cmpl $0, amx_available(%rip)
+	je .Lamx_enable_success
+	mov $4, %edi
+	mov $1, %esi
+	mov $7, %edx
+	lea .Lamx_enable(%rip), %rcx
+	lea .Lamx_enable_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	lea amx_source(%rip), %rax
+	mov $64, %edx
+.Lamx_enable:
+	.byte 0xc4, 0xe2, 0x7b, 0x4b, 0x04, 0x10
+.Lamx_enable_resume:
+	cmpl $0, exception_seen(%rip)
+	jne .Lamx_enable_fail
+	call set_amx_dynamic_expectations
+.Lamx_enable_success:
+	xor %eax, %eax
+	ret
+.Lamx_enable_fail:
+	mov $1, %eax
+	ret
+	.size enable_amx_tiledata, . - enable_amx_tiledata
+
+	.type set_amx_dynamic_expectations, @function
+set_amx_dynamic_expectations:
+	cmpl $0, amx_available(%rip)
+	je .Lamx_expectations_success
+	orq $XFEATURE_MASK_XTILE_DATA, expected_xfeatures(%rip)
+	mov expected_dynamic_xstate_size(%rip), %eax
+	mov %eax, expected_xstate_size(%rip)
+	add $4, %eax
+	mov %eax, expected_xstate_extended_size(%rip)
+.Lamx_expectations_success:
+	xor %eax, %eax
+	ret
+	.size set_amx_dynamic_expectations, . - set_amx_dynamic_expectations
+
+	.type check_amx_tiledata, @function
+check_amx_tiledata:
+	cmpl $0, amx_available(%rip)
+	je .Lamx_tiledata_success
+	mov %rdi, %r8
+	lea amx_output(%rip), %rax
+	mov $64, %edx
+	.byte 0xc4, 0xe2, 0x7a, 0x4b, 0x04, 0x10
+	lea amx_output(%rip), %rsi
+	mov %r8, %rdi
+	mov $128, %ecx
+	repe cmpsq
+	jne .Lamx_tiledata_fail
+.Lamx_tiledata_success:
+	xor %eax, %eax
+	ret
+.Lamx_tiledata_fail:
+	mov $1, %eax
+	ret
+	.size check_amx_tiledata, . - check_amx_tiledata
+
+	.type check_amx_caller_saved, @function
+check_amx_caller_saved:
+	cmpl $0, amx_available(%rip)
+	je .Lamx_caller_saved_success
+	sub $8, %rsp
+	mov $158, %eax
+	mov $ARCH_GET_XCOMP_PERM, %edi
+	mov %rsp, %rsi
+	syscall
+	test %rax, %rax
+	jne .Lamx_caller_saved_fail
+	mov expected_xcomp_supported(%rip), %rcx
+	cmp %rcx, (%rsp)
+	jne .Lamx_caller_saved_fail
+	add $8, %rsp
+	mov $4, %edi
+	mov $1, %esi
+	mov $7, %edx
+	lea .Lamx_caller_saved_store(%rip), %rcx
+	lea .Lamx_caller_saved_store_resume(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	lea amx_output(%rip), %rax
+	mov $64, %edx
+.Lamx_caller_saved_store:
+	.byte 0xc4, 0xe2, 0x7a, 0x4b, 0x04, 0x10
+.Lamx_caller_saved_store_resume:
+	cmpl $0, exception_seen(%rip)
+	jne .Lamx_caller_saved_error
+	lea amx_output(%rip), %rdi
+	mov $128, %ecx
+	xor %eax, %eax
+	repe scasq
+	jne .Lamx_caller_saved_error
+.Lamx_caller_saved_success:
+	xor %eax, %eax
+	ret
+.Lamx_caller_saved_fail:
+	add $8, %rsp
+.Lamx_caller_saved_error:
+	mov $1, %eax
+	ret
+	.size check_amx_caller_saved, . - check_amx_caller_saved
 
 	.type check_initial_shstk, @function
 check_initial_shstk:
@@ -2417,10 +2650,14 @@ check_cpu_profile:
 	movl $0, pku_available(%rip)
 	movl $0, lam_available(%rip)
 	movl $0, shstk_available(%rip)
+	movl $0, amx_available(%rip)
 	movl $FP_XSTATE_SIZE, expected_xstate_size(%rip)
 	movl $FP_XSTATE_EXTENDED_SIZE, expected_xstate_extended_size(%rip)
 	movl $0, expected_pkru_offset(%rip)
+	movl $FP_XSTATE_SIZE, expected_dynamic_xstate_size(%rip)
+	movl $0, expected_tiledata_offset(%rip)
 	movq $XFEATURE_MASK_FPSSE, expected_xfeatures(%rip)
+	movq $XFEATURE_MASK_FPSSE, expected_xcomp_supported(%rip)
 	mov $73, %r11d
 	xor %eax, %eax
 	xor %ecx, %ecx
@@ -2442,8 +2679,12 @@ check_cpu_profile:
 	movl $1, pku_available(%rip)
 .Lcpu_detect_shstk:
 	test $0x80, %ecx
-	jz .Lcpu_detect_lam
+	jz .Lcpu_detect_amx
 	movl $1, shstk_available(%rip)
+.Lcpu_detect_amx:
+	test $0x1000000, %edx
+	jz .Lcpu_detect_lam
+	movl $1, amx_available(%rip)
 .Lcpu_detect_lam:
 	mov $108, %r11d
 	mov $7, %eax
@@ -2462,6 +2703,11 @@ check_cpu_profile:
 	movl $1, lam_available(%rip)
 .Lcpu_profile_features_done:
 	mov $1, %r13d
+	cmpl $0, amx_available(%rip)
+	je .Lcpu_profile_no_amx
+	mov $0x1d, %r13d
+	jmp .Lcpu_profile_check_max
+.Lcpu_profile_no_amx:
 	cmpl $0, pku_available(%rip)
 	jne .Lcpu_profile_xstate_max
 	cmpl $0, shstk_available(%rip)
@@ -2487,6 +2733,8 @@ check_cpu_profile:
 	cmpl $0, pku_available(%rip)
 	jne .Lcpu_leaf1_xsave
 	cmpl $0, shstk_available(%rip)
+	jne .Lcpu_leaf1_xsave
+	cmpl $0, amx_available(%rip)
 	je .Lcpu_leaf1_ecx
 .Lcpu_leaf1_xsave:
 	mov $0xc000000, %r13d
@@ -2518,7 +2766,9 @@ check_cpu_profile:
 .Lcpu_leaf7_ecx:
 	cmp %r13d, %ecx
 	jne 2f
-	test %edx, %edx
+	mov amx_available(%rip), %r13d
+	shl $24, %r13d
+	cmp %r13d, %edx
 	jne 2f
 	mov $108, %r11d
 	mov $7, %eax
@@ -2537,6 +2787,8 @@ check_cpu_profile:
 	cmpl $0, pku_available(%rip)
 	jne .Lcpu_check_pku_xstate
 	cmpl $0, shstk_available(%rip)
+	jne .Lcpu_check_user_xstate
+	cmpl $0, amx_available(%rip)
 	je .Lcpu_extended
 	jmp .Lcpu_check_user_xstate
 
@@ -2553,26 +2805,108 @@ check_cpu_profile:
 	mov %ebx, %r13d
 	add %r13d, %eax
 	mov %eax, expected_xstate_size(%rip)
+	mov %eax, expected_dynamic_xstate_size(%rip)
 	add $4, %eax
 	mov %eax, expected_xstate_extended_size(%rip)
 	mov %r13d, expected_pkru_offset(%rip)
 	movq $XFEATURE_MASK_PKU, expected_xfeatures(%rip)
+	movq $XFEATURE_MASK_PKU, expected_xcomp_supported(%rip)
 .Lcpu_check_user_xstate:
+	cmpl $0, amx_available(%rip)
+	je .Lcpu_no_amx_components
+	mov $125, %r11d
+	mov $0xd, %eax
+	mov $17, %ecx
+	cpuid
+	cmp $XTILE_CFG_SIZE, %eax
+	jne 2f
+	cmp $FP_XSTATE_SIZE, %ebx
+	jb 2f
+	mov %ecx, %r12d
+	and $~6, %r12d
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	add %ebx, %eax
+	jc 2f
+	mov %eax, %r13d
+	cmp expected_xstate_size(%rip), %eax
+	jbe .Lcpu_check_tiledata_component
+	mov %eax, expected_xstate_size(%rip)
+	add $4, %eax
+	mov %eax, expected_xstate_extended_size(%rip)
+.Lcpu_check_tiledata_component:
+	mov $126, %r11d
+	mov $0xd, %eax
+	mov $18, %ecx
+	cpuid
+	cmp $XTILE_DATA_SIZE, %eax
+	jne 2f
+	cmp %r13d, %ebx
+	jb 2f
+	test $4, %ecx
+	jz 2f
+	mov %ecx, %r12d
+	and $~6, %r12d
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov %ebx, expected_tiledata_offset(%rip)
+	add %ebx, %eax
+	jc 2f
+	mov %eax, expected_dynamic_xstate_size(%rip)
+	orq $XFEATURE_MASK_XTILE_CFG, expected_xfeatures(%rip)
+	orq $XFEATURE_MASK_XTILE, expected_xcomp_supported(%rip)
+	jmp .Lcpu_xstate_components_done
+.Lcpu_no_amx_components:
+	mov $125, %r11d
+	mov $0xd, %eax
+	mov $17, %ecx
+	cpuid
+	test %eax, %eax
+	jne 2f
+	test %ebx, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov $0xd, %eax
+	mov $18, %ecx
+	cpuid
+	test %eax, %eax
+	jne 2f
+	test %ebx, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+.Lcpu_xstate_components_done:
 	mov $0xd, %eax
 	xor %ecx, %ecx
 	cpuid
 	mov $XFEATURE_MASK_FPSSE, %r13d
 	cmpl $0, pku_available(%rip)
-	je .Lcpu_user_xfeatures
+	je .Lcpu_user_xfeatures_amx
 	mov $XFEATURE_MASK_PKU, %r13d
+.Lcpu_user_xfeatures_amx:
+	cmpl $0, amx_available(%rip)
+	je .Lcpu_user_xfeatures
+	or $XFEATURE_MASK_XTILE, %r13d
 .Lcpu_user_xfeatures:
 	cmp %r13d, %eax
 	jne 2f
 	test %edx, %edx
 	jne 2f
 	mov expected_xstate_size(%rip), %r12d
+	cmpl $0, amx_available(%rip)
+	je .Lcpu_user_xstate_size
+	mov expected_dynamic_xstate_size(%rip), %r12d
+.Lcpu_user_xstate_size:
 	cmp %r12d, %ebx
 	jne 2f
+	mov expected_dynamic_xstate_size(%rip), %r12d
 	cmp %r12d, %ecx
 	jne 2f
 
@@ -2580,21 +2914,32 @@ check_cpu_profile:
 	mov $0xd, %eax
 	mov $1, %ecx
 	cpuid
+	xor %r12d, %r12d
 	cmpl $0, shstk_available(%rip)
-	je .Lcpu_no_cet_xstate
-	cmp $0x8, %eax
+	je .Lcpu_xstate_amx_controls
+	or $0x8, %r12d
+.Lcpu_xstate_amx_controls:
+	cmpl $0, amx_available(%rip)
+	je .Lcpu_xstate_controls
+	or $0x1c, %r12d
+.Lcpu_xstate_controls:
+	cmp %r12d, %eax
 	jne 2f
-	mov expected_xstate_size(%rip), %r12d
-	cmp %r12d, %ebx
-	jbe 2f
-	cmp $XFEATURE_MASK_CET_USER, %ecx
+	test %r12d, %r12d
+	jz .Lcpu_no_extended_xstate_controls
+	test %ebx, %ebx
+	jz 2f
+	xor %r12d, %r12d
+	cmpl $0, shstk_available(%rip)
+	je .Lcpu_xstate_supervisor_controls
+	mov $XFEATURE_MASK_CET_USER, %r12d
+.Lcpu_xstate_supervisor_controls:
+	cmp %r12d, %ecx
 	jne 2f
 	test %edx, %edx
 	jne 2f
 	jmp .Lcpu_check_cet_component
-.Lcpu_no_cet_xstate:
-	test %eax, %eax
-	jne 2f
+.Lcpu_no_extended_xstate_controls:
 	test %ebx, %ebx
 	jne 2f
 	test %ecx, %ecx
@@ -2613,8 +2958,45 @@ check_cpu_profile:
 	jne 2f
 	test %edx, %edx
 	jne 2f
-	jmp .Lcpu_extended
+	jmp .Lcpu_check_amx_palette
 .Lcpu_no_cet_component:
+	test %eax, %eax
+	jne 2f
+	test %ebx, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+.Lcpu_check_amx_palette:
+	cmpl $0, amx_available(%rip)
+	je .Lcpu_extended
+	mov $127, %r11d
+	mov $0x1d, %eax
+	xor %ecx, %ecx
+	cpuid
+	cmp $1, %eax
+	jne 2f
+	test %ebx, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov $0x1d, %eax
+	mov $1, %ecx
+	cpuid
+	cmp $0x04002000, %eax
+	jne 2f
+	cmp $0x00080040, %ebx
+	jne 2f
+	cmp $16, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov $0x1d, %eax
+	mov $2, %ecx
+	cpuid
 	test %eax, %eax
 	jne 2f
 	test %ebx, %ebx
@@ -2684,6 +3066,8 @@ check_cpu_profile:
 	jne .Lcpu_xgetbv
 	cmpl $0, shstk_available(%rip)
 	jne .Lcpu_xgetbv
+	cmpl $0, amx_available(%rip)
+	jne .Lcpu_xgetbv
 	mov $4, %edi
 	mov $2, %esi
 	mov $6, %edx
@@ -2705,12 +3089,26 @@ check_cpu_profile:
 	xgetbv
 	mov $XFEATURE_MASK_FPSSE, %r12d
 	cmpl $0, pku_available(%rip)
-	je .Lcpu_xgetbv_value
+	je .Lcpu_xgetbv_amx
 	mov $XFEATURE_MASK_PKU, %r12d
+.Lcpu_xgetbv_amx:
+	cmpl $0, amx_available(%rip)
+	je .Lcpu_xgetbv_value
+	or $XFEATURE_MASK_XTILE, %r12d
 .Lcpu_xgetbv_value:
 	cmp %r12d, %eax
 	jne 2f
 	test %edx, %edx
+	jne 2f
+	cmpl $0, amx_available(%rip)
+	je .Lcpu_profile_done
+	mov $128, %r11d
+	mov $1, %ecx
+	xgetbv
+	test %edx, %edx
+	jne 2f
+	not %r12d
+	test %r12d, %eax
 	jne 2f
 .Lcpu_profile_done:
 	xor %eax, %eax
@@ -2762,6 +3160,54 @@ check_hidden_mapping:
 	mov $1, %eax
 	ret
 	.size check_hidden_mapping, . - check_hidden_mapping
+
+	.type check_signal_roundtrip, @function
+check_signal_roundtrip:
+	push %r12
+	push %r13
+	movl $0, signal_seen(%rip)
+	movdqu initial_xmm(%rip), %xmm15
+	ldmxcsr initial_mxcsr(%rip)
+	fldcw initial_fcw(%rip)
+	mov $39, %eax
+	syscall
+	mov %eax, %r12d
+	mov $186, %eax
+	syscall
+	mov %eax, %r13d
+	mov $234, %eax
+	mov %r12d, %edi
+	mov %r13d, %esi
+	mov $10, %edx
+	syscall
+	test %rax, %rax
+	jne .Lsignal_roundtrip_fail
+	cmpl $1, signal_seen(%rip)
+	jne .Lsignal_roundtrip_fail
+	movdqu %xmm15, %xmm0
+	pcmpeqb replacement_xmm(%rip), %xmm0
+	pmovmskb %xmm0, %eax
+	cmp $0xffff, %eax
+	jne .Lsignal_roundtrip_fail
+	stmxcsr -4(%rsp)
+	cmpl $0x5f80, -4(%rsp)
+	jne .Lsignal_roundtrip_fail
+	fnstcw -2(%rsp)
+	cmpw $0x037f, -2(%rsp)
+	jne .Lsignal_roundtrip_fail
+	call check_pkey_signal_result
+	test %eax, %eax
+	jne .Lsignal_roundtrip_fail
+	pop %r13
+	pop %r12
+	xor %eax, %eax
+	ret
+.Lsignal_roundtrip_fail:
+	pop %r13
+	pop %r12
+	mov $1, %eax
+	ret
+	.size check_signal_roundtrip, . - check_signal_roundtrip
 
 	.type check_replacement_fpu, @function
 check_replacement_fpu:
@@ -2820,6 +3266,20 @@ signal_handler:
 	mov pkey_allowed_pkru(%rip), %ecx
 	movl %ecx, (%r8,%rax)
 4:
+	testq $XFEATURE_MASK_XTILE_DATA, expected_xfeatures(%rip)
+	jz 5f
+	mov expected_tiledata_offset(%rip), %eax
+	lea (%r8,%rax), %rdi
+	lea amx_source(%rip), %rsi
+	mov $128, %ecx
+	repe cmpsq
+	jne 3f
+	mov expected_tiledata_offset(%rip), %eax
+	lea (%r8,%rax), %rdi
+	lea amx_replacement(%rip), %rsi
+	mov $128, %ecx
+	rep movsq
+5:
 	movl $82, failure_code(%rip)
 	cmpw $0x077f, FPSTATE_FCW(%r8)
 	jne 3f
