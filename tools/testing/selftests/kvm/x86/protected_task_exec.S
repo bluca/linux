@@ -15,6 +15,7 @@
 .set FP_XSTATE_SIZE, 576
 .set FP_XSTATE_EXTENDED_SIZE, 580
 .set XFEATURE_MASK_FPSSE, 3
+.set XFEATURE_MASK_PKU, 0x203
 .set ARCH_SET_GS, 0x1001
 .set ARCH_SET_FS, 0x1002
 .set ARCH_GET_FS, 0x1003
@@ -44,6 +45,7 @@
 .set PR_SPEC_DISABLE_NOEXEC, 16
 .set SIGINFO_CODE, 8
 .set SIGINFO_ADDR, 16
+.set SIGINFO_PKEY, 32
 .set UCONTEXT_RIP, 168
 .set UCONTEXT_EFL, 176
 .set UCONTEXT_ERR, 192
@@ -147,6 +149,10 @@ expected_address:
 	.quad 0
 expected_cr2:
 	.quad 0
+	.balign 4
+expected_pkey:
+	.long 0
+	.balign 8
 exception_resume:
 	.quad 0
 	.balign 4
@@ -161,6 +167,36 @@ thread_tid:
 	.balign 4
 thread_result:
 	.long 0
+	.balign 4
+thread_ready:
+	.long 0
+	.balign 4
+thread_release:
+	.long 0
+	.balign 4
+pku_available:
+	.long 0
+	.balign 4
+pkey_number:
+	.long 0
+	.balign 4
+pkey_allowed_pkru:
+	.long 0
+pkey_denied_pkru:
+	.long 0
+	.balign 8
+pkey_address:
+	.quad 0
+	.balign 4
+expected_xstate_size:
+	.long FP_XSTATE_SIZE
+expected_xstate_extended_size:
+	.long FP_XSTATE_EXTENDED_SIZE
+expected_pkru_offset:
+	.long 0
+	.balign 8
+expected_xfeatures:
+	.quad XFEATURE_MASK_FPSSE
 	.balign 8
 reexec_argv:
 	.quad 0
@@ -192,6 +228,11 @@ _start:
 	mov %eax, failure_code(%rip)
 	jmp 1f
 .Lcpu_profile_ok:
+	movl $108, failure_code(%rip)
+	call check_initial_pkru
+	test %eax, %eax
+	jne 1f
+
 	movl $89, failure_code(%rip)
 	mov $157, %eax
 	mov $PR_SET_TSC, %edi
@@ -351,6 +392,10 @@ _start:
 	syscall
 	test %rax, %rax
 	jne 1f
+	movl $109, failure_code(%rip)
+	call setup_pkey_lifecycle
+	test %eax, %eax
+	jne 1f
 
 	mov $39, %eax
 	syscall
@@ -383,6 +428,10 @@ _start:
 	jne 1f
 	fnstcw -2(%rsp)
 	cmpw $0x037f, -2(%rsp)
+	jne 1f
+	movl $109, failure_code(%rip)
+	call check_pkey_signal_result
+	test %eax, %eax
 	jne 1f
 
 	movl $15, failure_code(%rip)
@@ -865,6 +914,8 @@ _start:
 	lea 65536(%rax), %rsi
 	movl $0, thread_tid(%rip)
 	movl $0, thread_result(%rip)
+	movl $0, thread_ready(%rip)
+	movl $0, thread_release(%rip)
 	mov $0x310f00, %edi
 	lea thread_tid(%rip), %rdx
 	lea thread_tid(%rip), %r10
@@ -874,6 +925,40 @@ _start:
 	test %rax, %rax
 	jz 7f
 	js 1f
+.Lthread_wait_ready:
+	cmpl $0, thread_ready(%rip)
+	jne .Lthread_ready
+	lea thread_ready(%rip), %rdi
+	xor %esi, %esi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	mov $202, %eax
+	syscall
+	jmp .Lthread_wait_ready
+.Lthread_ready:
+	cmpl $0, pku_available(%rip)
+	je .Lthread_release
+	mov $329, %eax
+	mov pkey_address(%rip), %rdi
+	mov $4096, %esi
+	mov $3, %edx
+	xor %r10d, %r10d
+	syscall
+	cmp $-95, %rax
+	je .Lthread_release
+	movl $111, thread_result(%rip)
+.Lthread_release:
+	movl $1, thread_release(%rip)
+	lea thread_release(%rip), %rdi
+	mov $1, %esi
+	mov $1, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	mov $202, %eax
+	syscall
 8:
 	mov thread_tid(%rip), %edx
 	test %edx, %edx
@@ -902,6 +987,9 @@ _start:
 	call check_cpu_profile
 	test %eax, %eax
 	jne 15f
+	call check_pkey_inheritance
+	test %eax, %eax
+	jne 12f
 	call check_test_arch_bases
 	test %eax, %eax
 	jne 12f
@@ -923,6 +1011,29 @@ _start:
 	mov failure_code(%rip), %eax
 15:
 	mov %eax, thread_result(%rip)
+	movl $1, thread_ready(%rip)
+	lea thread_ready(%rip), %rdi
+	mov $1, %esi
+	mov $1, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	mov $202, %eax
+	syscall
+.Lthread_wait_release:
+	cmpl $0, thread_release(%rip)
+	jne .Lthread_exit
+	lea thread_release(%rip), %rdi
+	xor %esi, %esi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	mov $202, %eax
+	syscall
+	jmp .Lthread_wait_release
+.Lthread_exit:
+	mov thread_result(%rip), %eax
 	mov %eax, %edi
 	mov $60, %eax
 	syscall
@@ -955,6 +1066,7 @@ _start:
 	syscall
 	test %rax, %rax
 	jne 1f
+	call prepare_pkey_exec
 
 	movl $50, failure_code(%rip)
 	cmpl $1, (%rsp)
@@ -998,6 +1110,7 @@ prepare_exception:
 	movq %r9, expected_cr2(%rip)
 	movq %r8, exception_resume(%rip)
 	movl $0, exception_seen(%rip)
+	movl $0, expected_pkey(%rip)
 	ret
 	.size prepare_exception, . - prepare_exception
 
@@ -1033,6 +1146,9 @@ check_process_clone:
 .Lprocess_child:
 	mov initial_stack(%rip), %rdi
 	call check_cpu_profile
+	test %eax, %eax
+	jne .Lprocess_child_fail
+	call check_pkey_inheritance
 	test %eax, %eax
 	jne .Lprocess_child_fail
 	call check_test_arch_bases
@@ -1182,7 +1298,8 @@ check_xcomp_controls:
 	syscall
 	test %rax, %rax
 	jne 1f
-	cmpq $XFEATURE_MASK_FPSSE, (%rsp)
+	mov expected_xfeatures(%rip), %rcx
+	cmp %rcx, (%rsp)
 	jne 1f
 	mov $158, %eax
 	mov $ARCH_GET_XCOMP_PERM, %edi
@@ -1190,7 +1307,8 @@ check_xcomp_controls:
 	syscall
 	test %rax, %rax
 	jne 1f
-	cmpq $XFEATURE_MASK_FPSSE, 8(%rsp)
+	mov expected_xfeatures(%rip), %rcx
+	cmp %rcx, 8(%rsp)
 	jne 1f
 	mov $158, %eax
 	mov $ARCH_REQ_XCOMP_PERM, %edi
@@ -1294,6 +1412,7 @@ check_pkey_controls:
 	push %r12
 	push %r13
 	push %r14
+	push %r15
 	mov $9, %eax
 	xor %edi, %edi
 	mov $4096, %esi
@@ -1303,18 +1422,19 @@ check_pkey_controls:
 	xor %r9d, %r9d
 	syscall
 	cmp $-4095, %rax
-	jae 4f
+	jae .Lpkey_no_mapping
 	mov %rax, %r12
 	mov $330, %eax
 	xor %edi, %edi
 	xor %esi, %esi
 	syscall
 	cmp $-28, %rax
-	je 3f
+	je .Lpkey_success_unmap
 	test %rax, %rax
-	js 2f
+	js .Lpkey_fail_unmap
+	cmp $1, %eax
+	jne .Lpkey_fail_unmap
 	mov %eax, %r13d
-	xor %r14d, %r14d
 	mov $329, %eax
 	mov %r12, %rdi
 	mov $4096, %esi
@@ -1322,47 +1442,253 @@ check_pkey_controls:
 	xor %r10d, %r10d
 	syscall
 	test %rax, %rax
-	jne 1f
+	jne .Lpkey_fail_free
 	mov $329, %eax
 	mov %r12, %rdi
 	mov $4096, %esi
 	mov $3, %edx
 	mov %r13d, %r10d
 	syscall
+	cmpl $0, pku_available(%rip)
+	jne .Lpkey_positive
 	cmp $-95, %rax
-	sete %r14b
-1:
+	jne .Lpkey_fail_free
+	jmp .Lpkey_success_free
+.Lpkey_positive:
+	test %rax, %rax
+	jne .Lpkey_fail_free
+	movb $0x5a, (%r12)
+	xor %ecx, %ecx
+	rdpkru
+	mov %eax, %r15d
+	mov %r13d, %ecx
+	shl $1, %ecx
+	mov $1, %eax
+	shl %cl, %eax
+	or %r15d, %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+	mov $11, %edi
+	mov $4, %esi
+	mov $14, %edx
+	mov %r12, %rcx
+	lea .Lpkey_fault_resume(%rip), %r8
+	mov %r12, %r9
+	call prepare_exception
+	movl %r13d, expected_pkey(%rip)
+	movq $0x25, expected_error_mask(%rip)
+	movq $0x25, expected_error(%rip)
+	mov (%r12), %rax
+.Lpkey_fault_resume:
+	call check_exception
+	mov %eax, %r14d
+	mov %r15d, %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+	movl $0, expected_pkey(%rip)
+	test %r14d, %r14d
+	jne .Lpkey_fail_free
+	cmpb $0x5a, (%r12)
+	jne .Lpkey_fail_free
+	mov $329, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	mov $3, %edx
+	xor %r10d, %r10d
+	syscall
+	test %rax, %rax
+	jne .Lpkey_fail_free
+.Lpkey_success_free:
+	xor %r14d, %r14d
+	jmp .Lpkey_free
+.Lpkey_fail_free:
+	mov $1, %r14d
+.Lpkey_free:
 	mov $331, %eax
 	mov %r13d, %edi
 	syscall
 	test %rax, %rax
-	jne 2f
-	test %r14d, %r14d
-	jz 2f
-3:
+	jne .Lpkey_fail_unmap
+	jmp .Lpkey_unmap
+.Lpkey_success_unmap:
 	xor %r14d, %r14d
-	jmp 5f
-2:
-	mov $1, %r14d
-5:
+.Lpkey_unmap:
 	mov $11, %eax
 	mov %r12, %rdi
 	mov $4096, %esi
 	syscall
 	test %rax, %rax
 	cmovne %eax, %r14d
+	jmp .Lpkey_return
+.Lpkey_fail_unmap:
+	mov $1, %r14d
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	syscall
+	jmp .Lpkey_return
+.Lpkey_no_mapping:
+	mov $1, %r14d
+.Lpkey_return:
 	mov %r14d, %eax
-	pop %r14
-	pop %r13
-	pop %r12
-	ret
-4:
-	mov $1, %eax
+	pop %r15
 	pop %r14
 	pop %r13
 	pop %r12
 	ret
 	.size check_pkey_controls, . - check_pkey_controls
+
+	.type check_initial_pkru, @function
+check_initial_pkru:
+	cmpl $0, pku_available(%rip)
+	je .Linitial_pkru_success
+	xor %ecx, %ecx
+	rdpkru
+	test $4, %eax
+	jz .Linitial_pkru_fail
+.Linitial_pkru_success:
+	xor %eax, %eax
+	ret
+.Linitial_pkru_fail:
+	mov $1, %eax
+	ret
+	.size check_initial_pkru, . - check_initial_pkru
+
+	.type setup_pkey_lifecycle, @function
+setup_pkey_lifecycle:
+	cmpl $0, pku_available(%rip)
+	je .Lpkey_lifecycle_success
+	push %r12
+	push %r13
+	push %r14
+	push %r15
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $0x22, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Lpkey_lifecycle_fail
+	mov %rax, %r12
+	mov $330, %eax
+	xor %edi, %edi
+	xor %esi, %esi
+	syscall
+	cmp $1, %eax
+	jne .Lpkey_lifecycle_fail
+	mov %eax, %r13d
+	mov $329, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	mov $3, %edx
+	mov %r13d, %r10d
+	syscall
+	test %rax, %rax
+	jne .Lpkey_lifecycle_fail
+	movb $0x5a, (%r12)
+	xor %ecx, %ecx
+	rdpkru
+	mov %eax, %r14d
+	mov %r13d, %ecx
+	shl $1, %ecx
+	mov $1, %r15d
+	shl %cl, %r15d
+	or %r14d, %r15d
+	mov %r13d, pkey_number(%rip)
+	mov %r14d, pkey_allowed_pkru(%rip)
+	mov %r15d, pkey_denied_pkru(%rip)
+	mov %r12, pkey_address(%rip)
+	mov %r15d, %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+	xor %eax, %eax
+	jmp .Lpkey_lifecycle_pop
+.Lpkey_lifecycle_fail:
+	mov $1, %eax
+.Lpkey_lifecycle_pop:
+	pop %r15
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+.Lpkey_lifecycle_success:
+	xor %eax, %eax
+	ret
+	.size setup_pkey_lifecycle, . - setup_pkey_lifecycle
+
+	.type check_pkey_signal_result, @function
+check_pkey_signal_result:
+	cmpl $0, pku_available(%rip)
+	je .Lpkey_signal_success
+	xor %ecx, %ecx
+	rdpkru
+	cmpl pkey_allowed_pkru(%rip), %eax
+	jne .Lpkey_signal_fail
+	mov pkey_address(%rip), %rdx
+	cmpb $0x5a, (%rdx)
+	jne .Lpkey_signal_fail
+	mov pkey_denied_pkru(%rip), %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+.Lpkey_signal_success:
+	xor %eax, %eax
+	ret
+.Lpkey_signal_fail:
+	mov $1, %eax
+	ret
+	.size check_pkey_signal_result, . - check_pkey_signal_result
+
+	.type check_pkey_inheritance, @function
+check_pkey_inheritance:
+	cmpl $0, pku_available(%rip)
+	je .Lpkey_inheritance_success
+	xor %ecx, %ecx
+	rdpkru
+	cmpl pkey_denied_pkru(%rip), %eax
+	jne .Lpkey_inheritance_fail
+	mov $11, %edi
+	mov $4, %esi
+	mov $14, %edx
+	mov pkey_address(%rip), %rcx
+	lea .Lpkey_inheritance_resume(%rip), %r8
+	mov %rcx, %r9
+	call prepare_exception
+	movl pkey_number(%rip), %eax
+	movl %eax, expected_pkey(%rip)
+	movq $0x25, expected_error_mask(%rip)
+	movq $0x25, expected_error(%rip)
+	mov pkey_address(%rip), %rcx
+	mov (%rcx), %rax
+.Lpkey_inheritance_resume:
+	call check_exception
+	test %eax, %eax
+	jne .Lpkey_inheritance_fail
+.Lpkey_inheritance_success:
+	xor %eax, %eax
+	ret
+.Lpkey_inheritance_fail:
+	mov $1, %eax
+	ret
+	.size check_pkey_inheritance, . - check_pkey_inheritance
+
+	.type prepare_pkey_exec, @function
+prepare_pkey_exec:
+	cmpl $0, pku_available(%rip)
+	je .Lpkey_exec_ready
+	mov pkey_allowed_pkru(%rip), %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+.Lpkey_exec_ready:
+	ret
+	.size prepare_pkey_exec, . - prepare_pkey_exec
 
 	.type check_io_permissions, @function
 check_io_permissions:
@@ -1499,12 +1825,23 @@ check_speculation_control:
 	.type check_cpu_profile, @function
 check_cpu_profile:
 	push %rbx
+	push %r12
+	push %r13
+	movl $0, pku_available(%rip)
+	movl $FP_XSTATE_SIZE, expected_xstate_size(%rip)
+	movl $FP_XSTATE_EXTENDED_SIZE, expected_xstate_extended_size(%rip)
+	movl $0, expected_pkru_offset(%rip)
+	movq $XFEATURE_MASK_FPSSE, expected_xfeatures(%rip)
 	mov $73, %r11d
 	xor %eax, %eax
 	xor %ecx, %ecx
 	cpuid
 	cmp $1, %eax
+	je .Lcpu_basic_leaf
+	cmp $0xd, %eax
 	jne 2f
+	movl $1, pku_available(%rip)
+.Lcpu_basic_leaf:
 
 	mov $74, %r11d
 	mov $1, %eax
@@ -1513,8 +1850,60 @@ check_cpu_profile:
 	mov $ELF_HWCAP, %r9d
 	cmp $ELF_HWCAP, %edx
 	jne 2f
+	cmpl $0, pku_available(%rip)
+	je .Lcpu_no_pku_leaf1
+	cmp $0xc000000, %ecx
+	jne 2f
+	jmp .Lcpu_pku_leaves
+.Lcpu_no_pku_leaf1:
 	test %ecx, %ecx
 	jne 2f
+	jmp .Lcpu_extended
+
+.Lcpu_pku_leaves:
+	mov $105, %r11d
+	mov $7, %eax
+	xor %ecx, %ecx
+	cpuid
+	test %eax, %eax
+	jne 2f
+	test %ebx, %ebx
+	jne 2f
+	cmp $0x18, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+
+	mov $106, %r11d
+	mov $0xd, %eax
+	mov $9, %ecx
+	cpuid
+	test %eax, %eax
+	jz 2f
+	cmp $FP_XSTATE_SIZE, %ebx
+	jb 2f
+	mov %eax, %r12d
+	mov %ebx, %r13d
+	add %r13d, %eax
+	mov %eax, expected_xstate_size(%rip)
+	add $4, %eax
+	mov %eax, expected_xstate_extended_size(%rip)
+	mov %r13d, expected_pkru_offset(%rip)
+	movq $XFEATURE_MASK_PKU, expected_xfeatures(%rip)
+	mov $0xd, %eax
+	xor %ecx, %ecx
+	cpuid
+	cmp $XFEATURE_MASK_PKU, %eax
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov expected_xstate_size(%rip), %r12d
+	cmp %r12d, %ebx
+	jne 2f
+	cmp %r12d, %ecx
+	jne 2f
+
+.Lcpu_extended:
 
 	mov $75, %r11d
 	mov $0x80000000, %eax
@@ -1570,6 +1959,8 @@ check_cpu_profile:
 	jne 2f
 
 	mov $81, %r11d
+	cmpl $0, pku_available(%rip)
+	jne .Lcpu_xgetbv_pku
 	mov $4, %edi
 	mov $2, %esi
 	mov $6, %edx
@@ -1584,11 +1975,25 @@ check_cpu_profile:
 	call check_exception
 	test %eax, %eax
 	jne 2f
+	jmp .Lcpu_profile_done
+.Lcpu_xgetbv_pku:
+	mov $107, %r11d
+	xor %ecx, %ecx
+	xgetbv
+	cmp $XFEATURE_MASK_PKU, %eax
+	jne 2f
+	test %edx, %edx
+	jne 2f
+.Lcpu_profile_done:
 	xor %eax, %eax
+	pop %r13
+	pop %r12
 	pop %rbx
 	ret
 2:
 	mov %r11d, %eax
+	pop %r13
+	pop %r12
 	pop %rbx
 	ret
 	.size check_cpu_profile, . - check_cpu_profile
@@ -1659,20 +2064,34 @@ signal_handler:
 	cmpl $FP_XSTATE_MAGIC1, FPSTATE_SW_MAGIC1(%r8)
 	jne 3f
 	movl $84, failure_code(%rip)
-	cmpl $FP_XSTATE_EXTENDED_SIZE, FPSTATE_SW_EXTENDED_SIZE(%r8)
+	mov expected_xstate_extended_size(%rip), %eax
+	cmpl %eax, FPSTATE_SW_EXTENDED_SIZE(%r8)
 	jne 3f
 	movl $85, failure_code(%rip)
-	cmpq $XFEATURE_MASK_FPSSE, FPSTATE_SW_XFEATURES(%r8)
+	mov expected_xfeatures(%rip), %rax
+	cmpq %rax, FPSTATE_SW_XFEATURES(%r8)
 	jne 3f
 	movl $86, failure_code(%rip)
-	cmpl $FP_XSTATE_SIZE, FPSTATE_SW_XSTATE_SIZE(%r8)
+	mov expected_xstate_size(%rip), %eax
+	cmpl %eax, FPSTATE_SW_XSTATE_SIZE(%r8)
 	jne 3f
 	movl $87, failure_code(%rip)
-	cmpq $XFEATURE_MASK_FPSSE, FPSTATE_XFEATURES(%r8)
+	mov expected_xfeatures(%rip), %rax
+	cmpq %rax, FPSTATE_XFEATURES(%r8)
 	jne 3f
 	movl $88, failure_code(%rip)
-	cmpl $FP_XSTATE_MAGIC2, FPSTATE_MAGIC2(%r8)
+	mov expected_xstate_size(%rip), %eax
+	cmpl $FP_XSTATE_MAGIC2, (%r8,%rax)
 	jne 3f
+	cmpl $0, pku_available(%rip)
+	je 4f
+	mov expected_pkru_offset(%rip), %eax
+	mov pkey_denied_pkru(%rip), %ecx
+	cmpl %ecx, (%r8,%rax)
+	jne 3f
+	mov pkey_allowed_pkru(%rip), %ecx
+	movl %ecx, (%r8,%rax)
+4:
 	movl $82, failure_code(%rip)
 	cmpw $0x077f, FPSTATE_FCW(%r8)
 	jne 3f
@@ -1719,8 +2138,14 @@ exception_handler:
 .Lexception_cr2:
 	movq expected_cr2(%rip), %rax
 	test %rax, %rax
-	jz .Lexception_pass
+	jz .Lexception_pkey
 	cmpq UCONTEXT_CR2(%rdx), %rax
+	jne .Lexception_fail
+.Lexception_pkey:
+	movl expected_pkey(%rip), %eax
+	test %eax, %eax
+	jz .Lexception_pass
+	cmpl SIGINFO_PKEY(%rsi), %eax
 	jne .Lexception_fail
 .Lexception_pass:
 	movl $1, exception_seen(%rip)
