@@ -32,7 +32,7 @@ struct kvm_protected_task_exec {
 	struct kvm_vcpu *vcpu;
 	struct kvm_protected_task_vcpu *registered_vcpu;
 	void *arch_state;
-	u64 pkey_gen;
+	u64 pgtable_gen;
 	int debug_id;
 	u32 next_slot;
 };
@@ -321,7 +321,7 @@ static int kvm_protected_task_finalize_vcpu(void *state, struct pt_regs *regs)
 	ret = kvm_arch_protected_task_finalize(exec->vcpu, exec->arch_state,
 					       regs, exec->next_slot++);
 	if (!ret)
-		exec->pkey_gen = atomic64_read(&current->mm->protected_task_pkey_gen);
+		exec->pgtable_gen = atomic64_read(&current->mm->protected_task_pgtable_gen);
 	return ret;
 }
 
@@ -371,13 +371,13 @@ static unsigned int kvm_protected_task_adjust_max_tag_bits(void *state)
 static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
 {
 	struct kvm_protected_task_exec *exec = state;
-	u64 pkey_gen;
+	u64 pgtable_gen;
 	int ret;
 
 	kvm_protected_task_vcpu_run_begin(exec);
-	pkey_gen = atomic64_read(&current->mm->protected_task_pkey_gen);
+	pgtable_gen = atomic64_read(&current->mm->protected_task_pgtable_gen);
 
-	if (unlikely(exec->pkey_gen != pkey_gen)) {
+	if (unlikely(exec->pgtable_gen != pgtable_gen)) {
 		struct kvm_protected_task_exec *new_exec;
 		struct kvm_protected_task_exec old_exec;
 

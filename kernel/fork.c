@@ -1106,7 +1106,7 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 	mm_init_owner(mm, p);
 	mm_pasid_init(mm);
 #if IS_ENABLED(CONFIG_KVM)
-	atomic64_set(&mm->protected_task_pkey_gen, 0);
+	atomic64_set(&mm->protected_task_pgtable_gen, 0);
 	spin_lock_init(&mm->protected_task_lock);
 	INIT_LIST_HEAD(&mm->protected_task_vcpus);
 	init_waitqueue_head(&mm->protected_task_wait);

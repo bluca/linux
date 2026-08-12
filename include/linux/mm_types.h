@@ -1305,7 +1305,7 @@ struct mm_struct {
 		mm_context_t context;
 
 #if IS_ENABLED(CONFIG_KVM)
-		atomic64_t protected_task_pkey_gen;
+		atomic64_t protected_task_pgtable_gen;
 		spinlock_t protected_task_lock;
 		struct list_head protected_task_vcpus;
 		wait_queue_head_t protected_task_wait;

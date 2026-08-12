@@ -996,7 +996,7 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 
 out:
 	if (protected_pkey_changed)
-		atomic64_inc(&current->mm->protected_task_pkey_gen);
+		atomic64_inc(&current->mm->protected_task_pgtable_gen);
 	mmap_write_unlock(current->mm);
 	if (protected_task_quiesced)
 		kvm_protected_task_end_mm_update();
