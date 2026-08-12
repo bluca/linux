@@ -360,6 +360,14 @@ static u64 kvm_protected_task_adjust_xfeatures(void *state)
 	return kvm_arch_protected_task_xfeatures(exec->vcpu, exec->arch_state);
 }
 
+static unsigned int kvm_protected_task_adjust_max_tag_bits(void *state)
+{
+	struct kvm_protected_task_exec *exec = state;
+
+	return kvm_arch_protected_task_max_tag_bits(exec->vcpu,
+						    exec->arch_state);
+}
+
 static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
 {
 	struct kvm_protected_task_exec *exec = state;
@@ -414,6 +422,7 @@ static const struct kvm_protected_task_ops kvm_protected_task_ops = {
 	.clone_exec = kvm_protected_task_clone_exec,
 	.elf_hwcap = kvm_protected_task_adjust_elf_hwcap,
 	.xfeatures = kvm_protected_task_adjust_xfeatures,
+	.max_tag_bits = kvm_protected_task_adjust_max_tag_bits,
 	.begin_mm_update = kvm_protected_task_quiesce_mm,
 	.end_mm_update = kvm_protected_task_resume_mm,
 	.deactivate_exec = kvm_protected_task_deactivate_vcpu,

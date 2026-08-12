@@ -42,6 +42,21 @@ u64 kvm_protected_task_xfeatures(void)
 #endif
 }
 
+unsigned int kvm_protected_task_max_tag_bits(void)
+{
+#if IS_ENABLED(CONFIG_KVM)
+	struct kvm_protected_task_context *context;
+
+	if (!current->protected_task_active || !current->protected_task_state)
+		return 0;
+	context = current->protected_task_active->private_data;
+	return context->ops->max_tag_bits ?
+		context->ops->max_tag_bits(current->protected_task_state) : 0;
+#else
+	return 0;
+#endif
+}
+
 bool kvm_protected_task_begin_mm_update(void)
 {
 #if IS_ENABLED(CONFIG_KVM)

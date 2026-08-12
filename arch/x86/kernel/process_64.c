@@ -855,7 +855,8 @@ static int prctl_enable_tagged_addr(struct mm_struct *mm, unsigned long nr_bits)
 		mmap_write_unlock(mm);
 		return -EINVAL;
 	}
-	if (kvm_protected_task_is_active()) {
+	if (kvm_protected_task_is_active() &&
+	    nr_bits > kvm_protected_task_max_tag_bits()) {
 		mmap_write_unlock(mm);
 		return -EOPNOTSUPP;
 	}
@@ -964,13 +965,16 @@ long do_arch_prctl_64(struct task_struct *task, int option, unsigned long arg2)
 	case ARCH_FORCE_TAGGED_SVA:
 		if (current != task)
 			return -EINVAL;
-		if (kvm_protected_task_is_active())
+		if (kvm_protected_task_is_active() &&
+		    !kvm_protected_task_max_tag_bits())
 			return -EOPNOTSUPP;
 		set_bit(MM_CONTEXT_FORCE_TAGGED_SVA, &task->mm->context.flags);
 		return 0;
 	case ARCH_GET_MAX_TAG_BITS:
-		if (kvm_protected_task_is_active() ||
-		    !cpu_feature_enabled(X86_FEATURE_LAM))
+		if (kvm_protected_task_is_active())
+			return put_user(kvm_protected_task_max_tag_bits(),
+					(unsigned long __user *)arg2);
+		if (!cpu_feature_enabled(X86_FEATURE_LAM))
 			return put_user(0, (unsigned long __user *)arg2);
 		else
 			return put_user(LAM_U57_BITS, (unsigned long __user *)arg2);

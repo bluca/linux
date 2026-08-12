@@ -23,6 +23,7 @@ struct kvm_protected_task_ops {
 	unsigned long (*elf_hwcap)(void *state, unsigned int type,
 				    unsigned long value);
 	u64 (*xfeatures)(void *state);
+	unsigned int (*max_tag_bits)(void *state);
 	void (*begin_mm_update)(void *state);
 	void (*end_mm_update)(void *state);
 	void (*deactivate_exec)(void *state);
@@ -38,6 +39,7 @@ struct kvm_protected_task_context {
 bool kvm_protected_task_can_arm(void);
 bool kvm_protected_task_is_active(void);
 u64 kvm_protected_task_xfeatures(void);
+unsigned int kvm_protected_task_max_tag_bits(void);
 bool kvm_protected_task_begin_mm_update(void);
 void kvm_protected_task_end_mm_update(void);
 void kvm_protected_task_init(struct task_struct *task);
