@@ -233,6 +233,10 @@ static int kvm_protected_task_create_exec(struct mm_struct *mm, void **state)
 	char fdname[sizeof("pt2147483647")];
 	int ret;
 
+	ret = kvm_arch_protected_task_prepare_permissions();
+	if (ret)
+		return ret;
+
 	exec = kzalloc_obj(*exec);
 	if (!exec)
 		return -ENOMEM;

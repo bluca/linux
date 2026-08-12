@@ -172,6 +172,7 @@ static inline bool fpstate_is_confidential(struct fpu_guest *gfpu)
 
 /* prctl */
 extern long fpu_xstate_prctl(int option, unsigned long arg2);
+extern u64 fpu_xstate_get_host_perm(void);
 
 extern void fpu_idle_fpregs(void);
 

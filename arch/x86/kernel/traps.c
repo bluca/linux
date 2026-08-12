@@ -1516,6 +1516,10 @@ bool x86_handle_user_exception(struct pt_regs *regs, unsigned int trapnr,
 		do_trap(trapnr, SIGILL, "invalid opcode", regs, error_code,
 			ILL_ILLOPN, addr);
 		break;
+	case X86_TRAP_NM:
+		do_trap(trapnr, SIGILL, "device not available", regs, error_code,
+			ILL_ILLOPC, addr);
+		break;
 	case X86_TRAP_OLD_MF:
 		do_trap(trapnr, SIGFPE, "coprocessor segment overrun", regs,
 			error_code, 0, NULL);

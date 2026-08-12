@@ -1773,7 +1773,8 @@ static int xstate_request_perm(unsigned long idx, bool guest)
 
 	if ((fpu_user_cfg.max_features & requested) != requested)
 		return -EOPNOTSUPP;
-	if (!guest && kvm_protected_task_is_active())
+	if (!guest && kvm_protected_task_is_active() &&
+	    (kvm_protected_task_xfeatures() & requested) != requested)
 		return -EOPNOTSUPP;
 
 	/* Lockless quick check */
@@ -1855,6 +1856,12 @@ u64 xstate_get_guest_group_perm(void)
 	return xstate_get_group_perm(true);
 }
 EXPORT_SYMBOL_FOR_KVM(xstate_get_guest_group_perm);
+
+u64 fpu_xstate_get_host_perm(void)
+{
+	return xstate_get_host_group_perm();
+}
+EXPORT_SYMBOL_FOR_KVM(fpu_xstate_get_host_perm);
 
 /**
  * fpu_xstate_prctl - xstate permission operations

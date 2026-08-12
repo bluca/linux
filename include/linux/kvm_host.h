@@ -1810,6 +1810,7 @@ int kvm_vcpu_run(struct kvm_vcpu *vcpu);
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type);
 void kvm_arch_destroy_vm(struct kvm *kvm);
 int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state);
+int kvm_arch_protected_task_prepare_permissions(void);
 u64 kvm_arch_protected_task_features(void);
 u64 kvm_arch_protected_task_xfeatures(struct kvm_vcpu *vcpu, void *state);
 unsigned int kvm_arch_protected_task_max_tag_bits(struct kvm_vcpu *vcpu,

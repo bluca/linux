@@ -20,6 +20,7 @@
 #include <asm/nospec-branch.h>
 #include <asm/pkru.h>
 #include <asm/pgtable_types.h>
+#include <asm/prctl.h>
 #include <asm/processor-flags.h>
 #include <asm/ptrace.h>
 #include <asm/segment.h>
@@ -41,9 +42,17 @@
 				 BIT(24) | BIT(25) | BIT(26))
 #define KVM_PT_CPUID_7_ECX_PKU	BIT(3)
 #define KVM_PT_CPUID_7_ECX_SHSTK BIT(7)
+#define KVM_PT_CPUID_7_EDX_AMX_TILE BIT(24)
 #define KVM_PT_CPUID_7_1_EAX	BIT(26)
-#define KVM_PT_CPUID_D_1_EAX	BIT(3)
+#define KVM_PT_CPUID_D_1_EAX_XGETBV1 BIT(2)
+#define KVM_PT_CPUID_D_1_EAX_XSAVES BIT(3)
+#define KVM_PT_CPUID_D_1_EAX_XFD BIT(4)
 #define KVM_PT_CPUID_80000001_EDX (BIT(11) | BIT(20) | BIT(29))
+#define KVM_PT_AMX_TILE_BYTES	8192
+#define KVM_PT_AMX_BYTES_PER_TILE 1024
+#define KVM_PT_AMX_BYTES_PER_ROW	64
+#define KVM_PT_AMX_NR_TILES	8
+#define KVM_PT_AMX_NR_ROWS	16
 #define KVM_PT_LAM_U57_BITS	6
 /* Each edge of the hidden range can require one PMD and one PTE page. */
 #define KVM_PT_HOLE_TABLE_PAGES	4
@@ -59,7 +68,10 @@ struct kvm_protected_task_x86 {
 	bool pku;
 	bool lam;
 	bool shstk;
+	bool amx;
 	bool fpu_active;
+	unsigned int static_user_size;
+	unsigned int dynamic_user_size;
 };
 
 struct kvm_protected_task_builder {
@@ -72,7 +84,8 @@ struct kvm_protected_task_builder {
 static u64 kvm_protected_task_xcr0(struct kvm_protected_task_x86 *state)
 {
 	return XFEATURE_MASK_FPSSE |
-		(state->pku ? XFEATURE_MASK_PKRU : 0);
+		(state->pku ? XFEATURE_MASK_PKRU : 0) |
+		(state->amx ? XFEATURE_MASK_XTILE : 0);
 }
 
 static u64 kvm_protected_task_profile_xfeatures(
@@ -82,11 +95,25 @@ static u64 kvm_protected_task_profile_xfeatures(
 		(state->shstk ? XFEATURE_MASK_CET_USER : 0);
 }
 
+static bool kvm_protected_task_xstate_component(
+		struct kvm_cpuid_entry2 *entry, unsigned int size,
+		bool xfd, unsigned int *end)
+{
+	if (!entry || entry->eax != size || entry->ebx < sizeof(struct xregs_state) ||
+	    (entry->ecx & BIT(0)) || (xfd && !(entry->ecx & BIT(2))) ||
+	    check_add_overflow(entry->ebx, entry->eax, end))
+		return false;
+
+	return true;
+}
+
 static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 					       struct kvm_protected_task_x86 *state)
 {
 	struct kvm_cpuid_entry2 *leaf1, *leaf7, *leaf71;
 	struct kvm_cpuid_entry2 *leafd0, *leafd1, *leafd9, *leafd11;
+	struct kvm_cpuid_entry2 *leafd17, *leafd18, *leaf1d0, *leaf1d1;
+	unsigned int tilecfg_end = 0, tiledata_end = 0;
 	u64 xcr0;
 	int i;
 
@@ -97,6 +124,10 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 	leafd1 = kvm_find_cpuid_entry_index(vcpu, 0xd, 1);
 	leafd9 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_PKRU);
 	leafd11 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_CET_USER);
+	leafd17 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_XTILE_CFG);
+	leafd18 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_XTILE_DATA);
+	leaf1d0 = kvm_find_cpuid_entry_index(vcpu, 0x1d, 0);
+	leaf1d1 = kvm_find_cpuid_entry_index(vcpu, 0x1d, 1);
 	state->pku = leaf1 && (leaf1->ecx & KVM_PT_CPUID_1_ECX) &&
 		     leaf7 && (leaf7->ecx & KVM_PT_CPUID_7_ECX_PKU) &&
 		     leafd0 && (leafd0->eax & XFEATURE_MASK_PKRU) &&
@@ -106,12 +137,41 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 	state->shstk = cpu_feature_enabled(X86_FEATURE_USER_SHSTK) &&
 		leaf1 && (leaf1->ecx & KVM_PT_CPUID_1_ECX) &&
 		leaf7 && (leaf7->ecx & KVM_PT_CPUID_7_ECX_SHSTK) &&
-		leafd1 && (leafd1->eax & KVM_PT_CPUID_D_1_EAX) &&
+		leafd1 && (leafd1->eax & KVM_PT_CPUID_D_1_EAX_XSAVES) &&
 		(leafd1->ecx & XFEATURE_MASK_CET_USER) &&
 		leafd11 && leafd11->eax == sizeof(struct cet_user_state) &&
 		(leafd11->ecx & BIT(0)) &&
 		(vcpu->arch.guest_fpu.fpstate->xfeatures &
 		 XFEATURE_MASK_CET_USER);
+	state->amx = cpu_feature_enabled(X86_FEATURE_AMX_TILE) &&
+		leaf7 && (leaf7->edx & KVM_PT_CPUID_7_EDX_AMX_TILE) &&
+		leafd0 && (leafd0->eax & XFEATURE_MASK_XTILE) == XFEATURE_MASK_XTILE &&
+		leafd1 &&
+		(leafd1->eax & (KVM_PT_CPUID_D_1_EAX_XGETBV1 |
+				 KVM_PT_CPUID_D_1_EAX_XSAVES |
+				 KVM_PT_CPUID_D_1_EAX_XFD)) ==
+			(KVM_PT_CPUID_D_1_EAX_XGETBV1 |
+			 KVM_PT_CPUID_D_1_EAX_XSAVES |
+			 KVM_PT_CPUID_D_1_EAX_XFD) &&
+		kvm_protected_task_xstate_component(leafd17,
+				sizeof(struct xtile_cfg), false, &tilecfg_end) &&
+		kvm_protected_task_xstate_component(leafd18,
+				KVM_PT_AMX_TILE_BYTES, true, &tiledata_end) &&
+		leafd18->ebx >= tilecfg_end &&
+		leaf1d0 && leaf1d0->eax >= 1 && leaf1d1 &&
+		(leaf1d1->eax & 0xffff) == KVM_PT_AMX_TILE_BYTES &&
+		(leaf1d1->eax >> 16) == KVM_PT_AMX_BYTES_PER_TILE &&
+		(leaf1d1->ebx & 0xffff) == KVM_PT_AMX_BYTES_PER_ROW &&
+		(leaf1d1->ebx >> 16) == KVM_PT_AMX_NR_TILES &&
+		(leaf1d1->ecx & 0xffff) == KVM_PT_AMX_NR_ROWS;
+	state->static_user_size = sizeof(struct xregs_state);
+	if (state->pku)
+		state->static_user_size = max(state->static_user_size,
+					  leafd9->ebx + leafd9->eax);
+	if (state->amx)
+		state->static_user_size = max(state->static_user_size, tilecfg_end);
+	state->dynamic_user_size = state->amx ? tiledata_end :
+		state->static_user_size;
 	xcr0 = kvm_protected_task_xcr0(state);
 
 	for (i = 0; i < vcpu->arch.cpuid_nent; i++) {
@@ -120,11 +180,12 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 		switch (entry->function) {
 		case 0:
 			entry->eax = min(entry->eax,
+					 state->amx ? 0x1dU :
 					 state->pku || state->shstk ? 0xdU :
 					 state->lam ? 7U : 1U);
 			break;
 		case 1:
-			entry->ecx &= state->pku || state->shstk ?
+			entry->ecx &= state->pku || state->shstk || state->amx ?
 					KVM_PT_CPUID_1_ECX : 0;
 			entry->edx &= KVM_PT_CPUID_1_EDX;
 			break;
@@ -135,7 +196,8 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 				entry->ecx &=
 					(state->pku ? KVM_PT_CPUID_7_ECX_PKU : 0) |
 					(state->shstk ? KVM_PT_CPUID_7_ECX_SHSTK : 0);
-				entry->edx = 0;
+				entry->edx &= state->amx ?
+					KVM_PT_CPUID_7_EDX_AMX_TILE : 0;
 			} else if (entry->index == 1 && state->lam) {
 				entry->eax &= KVM_PT_CPUID_7_1_EAX;
 				entry->ebx = 0;
@@ -149,7 +211,7 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 			}
 			break;
 		case 0xd:
-			if (!(state->pku || state->shstk)) {
+			if (!(state->pku || state->shstk || state->amx)) {
 				entry->eax = 0;
 				entry->ebx = 0;
 				entry->ecx = 0;
@@ -159,12 +221,15 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 			if (!entry->index) {
 				entry->eax = xcr0;
 				entry->edx = 0;
-				entry->ecx = state->pku ?
-					leafd9->ebx + leafd9->eax :
-					sizeof(struct xregs_state);
-			} else if (entry->index == 1 && state->shstk) {
-				entry->eax &= KVM_PT_CPUID_D_1_EAX;
-				entry->ecx &= XFEATURE_MASK_CET_USER;
+				entry->ecx = state->dynamic_user_size;
+			} else if (entry->index == 1 &&
+				   (state->shstk || state->amx)) {
+				entry->eax &=
+					(state->shstk ? KVM_PT_CPUID_D_1_EAX_XSAVES : 0) |
+					(state->amx ? KVM_PT_CPUID_D_1_EAX_XGETBV1 |
+						      KVM_PT_CPUID_D_1_EAX_XSAVES |
+						      KVM_PT_CPUID_D_1_EAX_XFD : 0);
+				entry->ecx &= state->shstk ? XFEATURE_MASK_CET_USER : 0;
 				entry->edx = 0;
 			} else if (entry->index == XFEATURE_PKRU && state->pku) {
 				entry->ecx = 0;
@@ -174,10 +239,35 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 				entry->eax = sizeof(struct cet_user_state);
 				entry->ecx = BIT(0);
 				entry->edx = 0;
+			} else if ((entry->index == XFEATURE_XTILE_CFG ||
+				    entry->index == XFEATURE_XTILE_DATA) &&
+				   state->amx) {
+				entry->ecx &= BIT(1) | BIT(2);
+				entry->edx = 0;
 			} else {
 				entry->eax = 0;
 				entry->ebx = 0;
 				entry->ecx = 0;
+				entry->edx = 0;
+			}
+			break;
+		case 0x1d:
+			if (!state->amx || entry->index > 1) {
+				entry->eax = 0;
+				entry->ebx = 0;
+				entry->ecx = 0;
+				entry->edx = 0;
+			} else if (!entry->index) {
+				entry->eax = 1;
+				entry->ebx = 0;
+				entry->ecx = 0;
+				entry->edx = 0;
+			} else {
+				entry->eax = KVM_PT_AMX_TILE_BYTES |
+					KVM_PT_AMX_BYTES_PER_TILE << 16;
+				entry->ebx = KVM_PT_AMX_BYTES_PER_ROW |
+					KVM_PT_AMX_NR_TILES << 16;
+				entry->ecx = KVM_PT_AMX_NR_ROWS;
 				entry->edx = 0;
 			}
 			break;
@@ -205,23 +295,50 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 	kvm_vcpu_after_set_cpuid(vcpu);
 }
 
+static bool kvm_protected_task_amx_permitted(void)
+{
+	return fpu_xstate_get_host_perm() & XFEATURE_MASK_XTILE_DATA;
+}
+
+static void kvm_protected_task_sync_dynamic_xstate(
+		struct kvm_vcpu *vcpu, struct kvm_protected_task_x86 *state,
+		bool enable)
+{
+	struct fpu_guest *guest_fpu = &vcpu->arch.guest_fpu;
+	struct fpstate *fpstate = guest_fpu->fpstate;
+	u64 user_xfeatures = kvm_protected_task_xcr0(state);
+	u64 xfd = fpstate->xfd;
+	bool amx_enabled;
+
+	if (!state->amx)
+		return;
+
+	amx_enabled = enable || (fpstate->user_xfeatures &
+				 XFEATURE_MASK_XTILE_DATA);
+	if (amx_enabled)
+		xfd &= ~XFEATURE_MASK_XTILE_DATA;
+	else {
+		user_xfeatures &= ~XFEATURE_MASK_XTILE_DATA;
+		xfd |= XFEATURE_MASK_XTILE_DATA;
+	}
+	fpstate->user_xfeatures = user_xfeatures;
+	fpstate->user_size = amx_enabled ? state->dynamic_user_size :
+		state->static_user_size;
+	fpu_update_guest_xfd(guest_fpu, xfd);
+}
+
 static void kvm_protected_task_restrict_xstate(
 		struct kvm_vcpu *vcpu, struct kvm_protected_task_x86 *state)
 {
 	struct fpstate *fpstate = vcpu->arch.guest_fpu.fpstate;
-	struct kvm_cpuid_entry2 *leafd9;
+	u64 user_xfeatures = kvm_protected_task_xcr0(state);
 
-	if (!state->pku) {
-		fpstate->user_xfeatures = XFEATURE_MASK_FPSSE;
-		fpstate->user_size = min_t(unsigned int, fpstate->user_size,
-					   sizeof(struct xregs_state));
-		return;
-	}
+	if (state->amx)
+		user_xfeatures &= ~XFEATURE_MASK_XTILE_DATA;
+	fpstate->user_xfeatures = user_xfeatures;
+	fpstate->user_size = state->static_user_size;
 
-	leafd9 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_PKRU);
-	fpstate->user_xfeatures = kvm_protected_task_xcr0(state);
-	fpstate->user_size = min_t(unsigned int, fpstate->user_size,
-				   leafd9->ebx + leafd9->eax);
+	kvm_protected_task_sync_dynamic_xstate(vcpu, state, false);
 }
 
 static int kvm_protected_task_validate_mm(struct mm_struct *mm)
@@ -490,7 +607,7 @@ static int kvm_protected_task_setup_sregs(struct kvm_vcpu *vcpu,
 		(state->lam ? mm_lam_cr3_mask(current->mm) : 0);
 	if (test_thread_flag(TIF_NOTSC))
 		cr4 |= X86_CR4_TSD;
-	if (state->pku || state->shstk)
+	if (state->pku || state->shstk || state->amx)
 		cr4 |= X86_CR4_OSXSAVE;
 	if (state->pku)
 		cr4 |= X86_CR4_PKE;
@@ -500,7 +617,7 @@ static int kvm_protected_task_setup_sregs(struct kvm_vcpu *vcpu,
 	sregs.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NX;
 
 	ret = kvm_arch_vcpu_ioctl_set_sregs(vcpu, &sregs);
-	if (ret || !(state->pku || state->shstk))
+	if (ret || !(state->pku || state->shstk || state->amx))
 		return ret;
 	return __kvm_set_xcr(vcpu, XCR_XFEATURE_ENABLED_MASK,
 				 kvm_protected_task_xcr0(state)) ? -EINVAL : 0;
@@ -777,6 +894,18 @@ static int kvm_protected_task_handle_exception(struct kvm_vcpu *vcpu,
 	ret = kvm_protected_task_activate_fpu(vcpu, state);
 	if (ret)
 		return ret;
+	if (trapnr == X86_TRAP_NM) {
+		u64 xfd_err = vcpu->arch.guest_fpu.xfd_err;
+
+		vcpu->arch.guest_fpu.xfd_err = 0;
+		if (!state->amx ||
+		    (xfd_err & XFEATURE_MASK_XTILE_DATA) != XFEATURE_MASK_XTILE_DATA)
+			return -EIO;
+		if (kvm_protected_task_amx_permitted()) {
+			kvm_protected_task_sync_dynamic_xstate(vcpu, state, true);
+			return 0;
+		}
+	}
 
 	if (trapnr == X86_TRAP_PF) {
 		unsigned long address = vcpu->arch.cr2;
@@ -928,6 +1057,16 @@ int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **statep)
 	return 0;
 }
 
+int kvm_arch_protected_task_prepare_permissions(void)
+{
+	if (!cpu_feature_enabled(X86_FEATURE_AMX_TILE) ||
+	    !kvm_cpu_cap_has(X86_FEATURE_AMX_TILE))
+		return 0;
+
+	return fpu_xstate_prctl(ARCH_REQ_XCOMP_GUEST_PERM,
+				XFEATURE_XTILE_DATA);
+}
+
 u64 kvm_arch_protected_task_features(void)
 {
 	return KVM_PROTECTED_TASK_FEATURE_EXEC;
@@ -1004,6 +1143,7 @@ int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *arch_state,
 				&vcpu->arch.guest_fpu, XFEATURE_MASK_CET_USER);
 	if (ret)
 		return ret;
+	kvm_protected_task_sync_dynamic_xstate(vcpu, state, false);
 	return kvm_protected_task_setup_regs(vcpu, regs);
 }
 
@@ -1017,6 +1157,7 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 	ret = kvm_protected_task_deactivate_fpu(vcpu, state);
 	if (ret)
 		goto release;
+	kvm_protected_task_sync_dynamic_xstate(vcpu, state, false);
 
 	ret = kvm_protected_task_setup_sregs(vcpu, state);
 	if (ret)
@@ -1118,6 +1259,11 @@ int kvm_arch_protected_task_deactivate(struct kvm_vcpu *vcpu, void *arch_state)
 int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state)
 {
 	return -EOPNOTSUPP;
+}
+
+int kvm_arch_protected_task_prepare_permissions(void)
+{
+	return 0;
 }
 
 u64 kvm_arch_protected_task_features(void)
