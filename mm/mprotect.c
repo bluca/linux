@@ -25,6 +25,7 @@
 #include <linux/migrate.h>
 #include <linux/perf_event.h>
 #include <linux/pkeys.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/ksm.h>
 #include <linux/uaccess.h>
 #include <linux/mm_inline.h>
@@ -874,6 +875,10 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 	error = -EINVAL;
 	if ((pkey != -1) && !mm_pkey_is_allocated(current->mm, pkey))
 		goto out;
+	if (pkey > 0 && kvm_protected_task_is_active()) {
+		error = -EOPNOTSUPP;
+		goto out;
+	}
 
 	vma_iter_init(&vmi, current->mm, start);
 	vma = vma_find(&vmi, end);
