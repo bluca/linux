@@ -566,6 +566,8 @@ SYSCALL_DEFINE3(map_shadow_stack, unsigned long, addr, unsigned long, size, unsi
 	aligned_size = PAGE_ALIGN(size);
 	if (aligned_size < size)
 		return -EOVERFLOW;
+	if (kvm_protected_task_is_active())
+		return -EOPNOTSUPP;
 
 	return alloc_shstk(addr, aligned_size, size, set_tok);
 }
