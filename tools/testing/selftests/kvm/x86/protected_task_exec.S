@@ -940,6 +940,29 @@ _start:
 .Lthread_ready:
 	cmpl $0, pku_available(%rip)
 	je .Lthread_release
+	cmpl $1, thread_ready(%rip)
+	jne .Lthread_update_ready
+	call check_pkey_inheritance
+	test %eax, %eax
+	je .Lthread_release_isolation
+	movl $114, thread_result(%rip)
+.Lthread_release_isolation:
+	movl $1, thread_release(%rip)
+.Lthread_wait_update_ready:
+	cmpl $2, thread_ready(%rip)
+	je .Lthread_update_ready
+	lea thread_ready(%rip), %rdi
+	xor %esi, %esi
+	mov $1, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	mov $202, %eax
+	syscall
+	jmp .Lthread_wait_update_ready
+.Lthread_update_ready:
+	cmpl $0, thread_result(%rip)
+	jne .Lthread_release
 	mov $329, %eax
 	mov pkey_address(%rip), %rdi
 	mov $4096, %esi
@@ -956,7 +979,7 @@ _start:
 .Lthread_update_syscall_fail:
 	movl $111, thread_result(%rip)
 .Lthread_release:
-	movl $1, thread_release(%rip)
+	movl $2, thread_release(%rip)
 8:
 	mov thread_tid(%rip), %edx
 	test %edx, %edx
@@ -1009,9 +1032,20 @@ _start:
 	mov failure_code(%rip), %eax
 15:
 	test %eax, %eax
-	jz .Lthread_signal_ready
+	jz .Lthread_prepare_isolation
 	mov %eax, thread_result(%rip)
-.Lthread_signal_ready:
+	jmp .Lthread_signal_update_ready
+.Lthread_prepare_isolation:
+	cmpl $0, pku_available(%rip)
+	je .Lthread_signal_update_ready
+	mov pkey_allowed_pkru(%rip), %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+	xor %ecx, %ecx
+	rdpkru
+	cmpl pkey_allowed_pkru(%rip), %eax
+	jne .Lthread_isolation_fail
 	movl $1, thread_ready(%rip)
 	lea thread_ready(%rip), %rdi
 	mov $1, %esi
@@ -1021,12 +1055,48 @@ _start:
 	xor %r9d, %r9d
 	mov $202, %eax
 	syscall
+.Lthread_wait_isolation_release:
+	cmpl $1, thread_release(%rip)
+	je .Lthread_check_isolation
+	pause
+	jmp .Lthread_wait_isolation_release
+.Lthread_check_isolation:
+	xor %ecx, %ecx
+	rdpkru
+	cmpl pkey_allowed_pkru(%rip), %eax
+	jne .Lthread_isolation_fail
+	mov pkey_address(%rip), %rax
+	cmpb $0x5a, (%rax)
+	jne .Lthread_isolation_fail
+	mov pkey_denied_pkru(%rip), %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+	jmp .Lthread_signal_update_ready
+.Lthread_isolation_fail:
+	mov pkey_denied_pkru(%rip), %eax
+	xor %ecx, %ecx
+	xor %edx, %edx
+	wrpkru
+	movl $115, thread_result(%rip)
+.Lthread_signal_update_ready:
+	movl $2, thread_ready(%rip)
+	lea thread_ready(%rip), %rdi
+	mov $1, %esi
+	mov $1, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	mov $202, %eax
+	syscall
 .Lthread_wait_release:
-	cmpl $0, thread_release(%rip)
-	jne .Lthread_check_update
+	cmpl $2, thread_release(%rip)
+	je .Lthread_check_update
 	pause
 	jmp .Lthread_wait_release
 .Lthread_check_update:
+	cmpl $0, thread_result(%rip)
+	jne .Lthread_exit
 	call check_pkey_shared_update
 	test %eax, %eax
 	je .Lthread_exit
