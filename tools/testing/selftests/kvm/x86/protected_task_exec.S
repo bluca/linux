@@ -16,6 +16,7 @@
 .set FP_XSTATE_EXTENDED_SIZE, 580
 .set XFEATURE_MASK_FPSSE, 3
 .set XFEATURE_MASK_PKU, 0x203
+.set XFEATURE_MASK_CET_USER, 0x800
 .set __NR_map_shadow_stack, 453
 .set ARCH_SET_GS, 0x1001
 .set ARCH_SET_FS, 0x1002
@@ -30,9 +31,13 @@
 .set ARCH_GET_MAX_TAG_BITS, 0x4003
 .set ARCH_FORCE_TAGGED_SVA, 0x4004
 .set ARCH_SHSTK_ENABLE, 0x5001
+.set ARCH_SHSTK_DISABLE, 0x5002
 .set ARCH_SHSTK_LOCK, 0x5003
 .set ARCH_SHSTK_STATUS, 0x5005
 .set ARCH_SHSTK_SHSTK, 1
+.set ARCH_SHSTK_WRSS, 2
+.set SHADOW_STACK_SET_TOKEN, 1
+.set SEGV_CPERR, 10
 .set PR_SET_TSC, 26
 .set PR_TSC_ENABLE, 1
 .set PR_TSC_SIGSEGV, 2
@@ -158,6 +163,11 @@ expected_cr2:
 expected_pkey:
 	.long 0
 	.balign 8
+shstk_repair_address:
+	.quad 0
+shstk_repair_value:
+	.quad 0
+	.balign 8
 exception_resume:
 	.quad 0
 	.balign 4
@@ -178,11 +188,17 @@ thread_ready:
 	.balign 4
 thread_release:
 	.long 0
+	.balign 8
+thread_shstk_address:
+	.quad 0
 	.balign 4
 pku_available:
 	.long 0
 	.balign 4
 lam_available:
+	.long 0
+	.balign 4
+shstk_available:
 	.long 0
 	.balign 4
 pkey_number:
@@ -236,6 +252,19 @@ _start:
 	mov %eax, failure_code(%rip)
 	jmp 1f
 .Lcpu_profile_ok:
+	movl $124, failure_code(%rip)
+	call check_initial_shstk
+	test %eax, %eax
+	jne 1f
+	cmpl $0, shstk_available(%rip)
+	je .Lshstk_enabled
+	mov $158, %eax
+	mov $ARCH_SHSTK_ENABLE, %edi
+	mov $ARCH_SHSTK_SHSTK, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+.Lshstk_enabled:
 	movl $108, failure_code(%rip)
 	call check_initial_pkru
 	test %eax, %eax
@@ -1004,6 +1033,9 @@ _start:
 	mov thread_result(%rip), %edi
 	test %edi, %edi
 	jnz 2f
+	call check_released_thread_shstk
+	test %eax, %eax
+	jne 1f
 	mov %r14, %rdi
 	mov $65536, %esi
 	mov $11, %eax
@@ -1019,6 +1051,17 @@ _start:
 	call check_lam_enabled
 	test %eax, %eax
 	jne 12f
+	call check_shstk_enabled
+	test %eax, %eax
+	jne 12f
+	cmpl $0, shstk_available(%rip)
+	je .Lthread_shstk_recorded
+	xor %eax, %eax
+	rdsspq %rax
+	sub $8, %rax
+	and $-4096, %rax
+	mov %rax, thread_shstk_address(%rip)
+.Lthread_shstk_recorded:
 	call check_pkey_inheritance
 	test %eax, %eax
 	jne 12f
@@ -1231,6 +1274,9 @@ check_process_clone:
 	call check_lam_enabled
 	test %eax, %eax
 	jne .Lprocess_child_fail
+	call check_shstk_enabled
+	test %eax, %eax
+	jne .Lprocess_child_fail
 	call check_pkey_inheritance
 	test %eax, %eax
 	jne .Lprocess_child_fail
@@ -1414,6 +1460,143 @@ check_xcomp_controls:
 	ret
 	.size check_xcomp_controls, . - check_xcomp_controls
 
+	.type check_initial_shstk, @function
+check_initial_shstk:
+	sub $8, %rsp
+	mov $158, %eax
+	mov $ARCH_SHSTK_STATUS, %edi
+	mov %rsp, %rsi
+	syscall
+	test %rax, %rax
+	jz .Linitial_shstk_status
+	cmpl $0, shstk_available(%rip)
+	jne .Linitial_shstk_fail
+	cmp $-22, %rax
+	je .Linitial_shstk_success
+	jmp .Linitial_shstk_fail
+.Linitial_shstk_status:
+	cmpq $0, (%rsp)
+	jne .Linitial_shstk_fail
+.Linitial_shstk_success:
+	add $8, %rsp
+	xor %eax, %eax
+	ret
+.Linitial_shstk_fail:
+	add $8, %rsp
+	mov $1, %eax
+	ret
+	.size check_initial_shstk, . - check_initial_shstk
+
+	.type check_shstk_enabled, @function
+check_shstk_enabled:
+	cmpl $0, shstk_available(%rip)
+	je .Lshstk_enabled_success
+	movl $125, failure_code(%rip)
+	sub $8, %rsp
+	mov $158, %eax
+	mov $ARCH_SHSTK_STATUS, %edi
+	mov %rsp, %rsi
+	syscall
+	test %rax, %rax
+	jne .Lshstk_enabled_fail
+	cmpq $ARCH_SHSTK_SHSTK, (%rsp)
+	jne .Lshstk_enabled_fail
+	xor %eax, %eax
+	rdsspq %rax
+	test %rax, %rax
+	je .Lshstk_enabled_fail
+	add $8, %rsp
+.Lshstk_enabled_success:
+	xor %eax, %eax
+	ret
+.Lshstk_enabled_fail:
+	add $8, %rsp
+	mov $1, %eax
+	ret
+	.size check_shstk_enabled, . - check_shstk_enabled
+
+	.type check_released_thread_shstk, @function
+check_released_thread_shstk:
+	push %r12
+	cmpl $0, shstk_available(%rip)
+	je .Lreleased_thread_shstk_success
+	movl $130, failure_code(%rip)
+	mov thread_shstk_address(%rip), %rdi
+	test %rdi, %rdi
+	je .Lreleased_thread_shstk_fail
+	mov $9, %eax
+	mov $4096, %esi
+	mov $3, %edx
+	mov $0x32, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp thread_shstk_address(%rip), %rax
+	jne .Lreleased_thread_shstk_fail
+	mov $11, %edi
+	mov $2, %esi
+	mov $14, %edx
+	mov %rax, %rcx
+	lea .Lreleased_thread_shstk_resume(%rip), %r8
+	mov %rax, %r9
+	call prepare_exception
+	movq $0x47, expected_error_mask(%rip)
+	movq $0x47, expected_error(%rip)
+	mov thread_shstk_address(%rip), %rax
+	movabs $0x3cc3a55a96696996, %rcx
+	mov %rcx, (%rax)
+.Lreleased_thread_shstk_resume:
+	xor %r12d, %r12d
+	cmpl $0, exception_seen(%rip)
+	setne %r12b
+	cmp %rcx, (%rax)
+	jne .Lreleased_thread_shstk_cleanup_fail
+	mov %rax, %rdi
+	mov $11, %eax
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne .Lreleased_thread_shstk_cleanup_fail
+	test %r12d, %r12d
+	jne .Lreleased_thread_shstk_fail
+.Lreleased_thread_shstk_success:
+	xor %eax, %eax
+	pop %r12
+	ret
+.Lreleased_thread_shstk_cleanup_fail:
+	mov $1, %r12d
+	mov thread_shstk_address(%rip), %rdi
+	mov $11, %eax
+	mov $4096, %esi
+	syscall
+.Lreleased_thread_shstk_fail:
+	mov $1, %eax
+	pop %r12
+	ret
+	.size check_released_thread_shstk, . - check_released_thread_shstk
+
+	.type check_shstk_control_protection, @function
+check_shstk_control_protection:
+	mov $11, %edi
+	mov $SEGV_CPERR, %esi
+	mov $21, %edx
+	xor %ecx, %ecx
+	lea .Lshstk_retry_ret(%rip), %r8
+	xor %r9d, %r9d
+	call prepare_exception
+	movq $0x7fff, expected_error_mask(%rip)
+	movq $1, expected_error(%rip)
+	xor %eax, %eax
+	rdsspq %rax
+	mov %rax, shstk_repair_address(%rip)
+	mov (%rax), %rcx
+	mov %rcx, shstk_repair_value(%rip)
+	xor %ecx, %ecx
+	wrssq %rcx, (%rax)
+.Lshstk_retry_ret:
+	ret
+	.size check_shstk_control_protection, . - check_shstk_control_protection
+
 	.type check_arch_prctl_controls, @function
 check_arch_prctl_controls:
 	sub $16, %rsp
@@ -1508,9 +1691,13 @@ check_arch_prctl_controls:
 	test %rax, %rax
 	jz .Larch_prctl_cet
 	cmp $-22, %rax
-	je .Larch_prctl_success
-	jmp 1f
+	jne 1f
+	cmpl $0, shstk_available(%rip)
+	jne 1f
+	jmp .Larch_prctl_success
 .Larch_prctl_cet:
+	cmpl $0, shstk_available(%rip)
+	jne .Larch_prctl_cet_enabled
 	cmpq $0, 8(%rsp)
 	jne 1f
 	mov $158, %eax
@@ -1538,6 +1725,102 @@ check_arch_prctl_controls:
 	xor %edx, %edx
 	syscall
 	cmp $-95, %rax
+	jne 1f
+	jmp .Larch_prctl_success
+.Larch_prctl_cet_enabled:
+	cmpq $ARCH_SHSTK_SHSTK, 8(%rsp)
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_SHSTK_ENABLE, %edi
+	mov $ARCH_SHSTK_SHSTK, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_SHSTK_ENABLE, %edi
+	mov $ARCH_SHSTK_WRSS, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	movl $129, failure_code(%rip)
+	call check_shstk_control_protection
+	call check_exception
+	test %eax, %eax
+	jne 1f
+	movl $126, failure_code(%rip)
+	mov $__NR_map_shadow_stack, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $SHADOW_STACK_SET_TOKEN, %edx
+	syscall
+	cmp $-4095, %rax
+	jae 1f
+	mov %rax, 8(%rsp)
+	cmpq $0, (%rax)
+	jne 1f
+	lea 4096(%rax), %rcx
+	or $1, %rcx
+	cmp %rcx, 4088(%rax)
+	jne 1f
+	movl $127, failure_code(%rip)
+	mov $11, %edi
+	mov $2, %esi
+	mov $14, %edx
+	mov %rax, %rcx
+	lea .Lshstk_write_resume(%rip), %r8
+	mov %rax, %r9
+	call prepare_exception
+	movq $0x47, expected_error_mask(%rip)
+	movq $0x47, expected_error(%rip)
+	mov 8(%rsp), %rax
+	movq $1, (%rax)
+.Lshstk_write_resume:
+	call check_exception
+	test %eax, %eax
+	jne 1f
+	mov 8(%rsp), %rcx
+	movabs $0x5a5aa5a55aa5a5a5, %rax
+	wrssq %rax, (%rcx)
+	cmp %rax, (%rcx)
+	jne 1f
+	movl $128, failure_code(%rip)
+	mov $9, %eax
+	mov 8(%rsp), %rdi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $0x32, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp 8(%rsp), %rax
+	jne 1f
+	movabs $0xa55a5aa55aa55aa5, %rcx
+	mov %rcx, (%rax)
+	cmp %rcx, (%rax)
+	jne 1f
+	mov %rax, %rdi
+	mov $11, %eax
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_SHSTK_DISABLE, %edi
+	mov $ARCH_SHSTK_WRSS, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_SHSTK_LOCK, %edi
+	mov $ARCH_SHSTK_SHSTK, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_SHSTK_DISABLE, %edi
+	mov $ARCH_SHSTK_SHSTK, %esi
+	syscall
+	cmp $-1, %rax
 	jne 1f
 .Larch_prctl_success:
 	add $16, %rsp
@@ -2133,6 +2416,7 @@ check_cpu_profile:
 	push %r13
 	movl $0, pku_available(%rip)
 	movl $0, lam_available(%rip)
+	movl $0, shstk_available(%rip)
 	movl $FP_XSTATE_SIZE, expected_xstate_size(%rip)
 	movl $FP_XSTATE_EXTENDED_SIZE, expected_xstate_extended_size(%rip)
 	movl $0, expected_pkru_offset(%rip)
@@ -2141,14 +2425,26 @@ check_cpu_profile:
 	xor %eax, %eax
 	xor %ecx, %ecx
 	cpuid
+	mov %eax, %r12d
 	cmp $1, %eax
-	je .Lcpu_basic_leaf
+	je .Lcpu_profile_features_done
 	cmp $7, %eax
-	je .Lcpu_check_lam
+	je .Lcpu_detect_extended_features
 	cmp $0xd, %eax
 	jne 2f
+.Lcpu_detect_extended_features:
+	mov $105, %r11d
+	mov $7, %eax
+	xor %ecx, %ecx
+	cpuid
+	test $0x8, %ecx
+	jz .Lcpu_detect_shstk
 	movl $1, pku_available(%rip)
-.Lcpu_check_lam:
+.Lcpu_detect_shstk:
+	test $0x80, %ecx
+	jz .Lcpu_detect_lam
+	movl $1, shstk_available(%rip)
+.Lcpu_detect_lam:
 	mov $108, %r11d
 	mov $7, %eax
 	mov $1, %ecx
@@ -2160,11 +2456,25 @@ check_cpu_profile:
 	test %edx, %edx
 	jne 2f
 	test %eax, %eax
-	je .Lcpu_basic_leaf
+	je .Lcpu_profile_features_done
 	cmp $0x4000000, %eax
 	jne 2f
 	movl $1, lam_available(%rip)
-.Lcpu_basic_leaf:
+.Lcpu_profile_features_done:
+	mov $1, %r13d
+	cmpl $0, pku_available(%rip)
+	jne .Lcpu_profile_xstate_max
+	cmpl $0, shstk_available(%rip)
+	jne .Lcpu_profile_xstate_max
+	cmpl $0, lam_available(%rip)
+	je .Lcpu_profile_check_max
+	mov $7, %r13d
+	jmp .Lcpu_profile_check_max
+.Lcpu_profile_xstate_max:
+	mov $0xd, %r13d
+.Lcpu_profile_check_max:
+	cmp %r13d, %r12d
+	jne 2f
 
 	mov $74, %r11d
 	mov $1, %eax
@@ -2173,15 +2483,17 @@ check_cpu_profile:
 	mov $ELF_HWCAP, %r9d
 	cmp $ELF_HWCAP, %edx
 	jne 2f
+	xor %r13d, %r13d
 	cmpl $0, pku_available(%rip)
-	je .Lcpu_no_pku_leaf1
-	cmp $0xc000000, %ecx
+	jne .Lcpu_leaf1_xsave
+	cmpl $0, shstk_available(%rip)
+	je .Lcpu_leaf1_ecx
+.Lcpu_leaf1_xsave:
+	mov $0xc000000, %r13d
+.Lcpu_leaf1_ecx:
+	cmp %r13d, %ecx
 	jne 2f
-	jmp .Lcpu_leaf7
-.Lcpu_no_pku_leaf1:
-	test %ecx, %ecx
-	jne 2f
-	cmpl $0, lam_available(%rip)
+	cmpl $1, %r12d
 	jne .Lcpu_leaf7
 	jmp .Lcpu_extended
 
@@ -2197,8 +2509,12 @@ check_cpu_profile:
 	jne 2f
 	xor %r13d, %r13d
 	cmpl $0, pku_available(%rip)
-	je .Lcpu_leaf7_ecx
+	je .Lcpu_leaf7_shstk
 	mov $0x18, %r13d
+.Lcpu_leaf7_shstk:
+	cmpl $0, shstk_available(%rip)
+	je .Lcpu_leaf7_ecx
+	or $0x80, %r13d
 .Lcpu_leaf7_ecx:
 	cmp %r13d, %ecx
 	jne 2f
@@ -2219,8 +2535,12 @@ check_cpu_profile:
 	test %edx, %edx
 	jne 2f
 	cmpl $0, pku_available(%rip)
+	jne .Lcpu_check_pku_xstate
+	cmpl $0, shstk_available(%rip)
 	je .Lcpu_extended
+	jmp .Lcpu_check_user_xstate
 
+.Lcpu_check_pku_xstate:
 	mov $106, %r11d
 	mov $0xd, %eax
 	mov $9, %ecx
@@ -2237,10 +2557,16 @@ check_cpu_profile:
 	mov %eax, expected_xstate_extended_size(%rip)
 	mov %r13d, expected_pkru_offset(%rip)
 	movq $XFEATURE_MASK_PKU, expected_xfeatures(%rip)
+.Lcpu_check_user_xstate:
 	mov $0xd, %eax
 	xor %ecx, %ecx
 	cpuid
-	cmp $XFEATURE_MASK_PKU, %eax
+	mov $XFEATURE_MASK_FPSSE, %r13d
+	cmpl $0, pku_available(%rip)
+	je .Lcpu_user_xfeatures
+	mov $XFEATURE_MASK_PKU, %r13d
+.Lcpu_user_xfeatures:
+	cmp %r13d, %eax
 	jne 2f
 	test %edx, %edx
 	jne 2f
@@ -2248,6 +2574,54 @@ check_cpu_profile:
 	cmp %r12d, %ebx
 	jne 2f
 	cmp %r12d, %ecx
+	jne 2f
+
+	mov $123, %r11d
+	mov $0xd, %eax
+	mov $1, %ecx
+	cpuid
+	cmpl $0, shstk_available(%rip)
+	je .Lcpu_no_cet_xstate
+	cmp $0x8, %eax
+	jne 2f
+	mov expected_xstate_size(%rip), %r12d
+	cmp %r12d, %ebx
+	jbe 2f
+	cmp $XFEATURE_MASK_CET_USER, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	jmp .Lcpu_check_cet_component
+.Lcpu_no_cet_xstate:
+	test %eax, %eax
+	jne 2f
+	test %ebx, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+.Lcpu_check_cet_component:
+	mov $0xd, %eax
+	mov $11, %ecx
+	cpuid
+	cmpl $0, shstk_available(%rip)
+	je .Lcpu_no_cet_component
+	cmp $16, %eax
+	jne 2f
+	cmp $1, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	jmp .Lcpu_extended
+.Lcpu_no_cet_component:
+	test %eax, %eax
+	jne 2f
+	test %ebx, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
 	jne 2f
 
 .Lcpu_extended:
@@ -2307,7 +2681,9 @@ check_cpu_profile:
 
 	mov $81, %r11d
 	cmpl $0, pku_available(%rip)
-	jne .Lcpu_xgetbv_pku
+	jne .Lcpu_xgetbv
+	cmpl $0, shstk_available(%rip)
+	jne .Lcpu_xgetbv
 	mov $4, %edi
 	mov $2, %esi
 	mov $6, %edx
@@ -2323,11 +2699,16 @@ check_cpu_profile:
 	test %eax, %eax
 	jne 2f
 	jmp .Lcpu_profile_done
-.Lcpu_xgetbv_pku:
+.Lcpu_xgetbv:
 	mov $107, %r11d
 	xor %ecx, %ecx
 	xgetbv
-	cmp $XFEATURE_MASK_PKU, %eax
+	mov $XFEATURE_MASK_FPSSE, %r12d
+	cmpl $0, pku_available(%rip)
+	je .Lcpu_xgetbv_value
+	mov $XFEATURE_MASK_PKU, %r12d
+.Lcpu_xgetbv_value:
+	cmp %r12d, %eax
 	jne 2f
 	test %edx, %edx
 	jne 2f
@@ -2461,6 +2842,12 @@ signal_handler:
 	.type exception_handler, @function
 exception_handler:
 	andq $~0x40000, UCONTEXT_EFL(%rdx)
+	cmpq $21, expected_trap(%rip)
+	jne .Lexception_validate
+	mov shstk_repair_address(%rip), %rax
+	mov shstk_repair_value(%rip), %rcx
+	wrssq %rcx, (%rax)
+.Lexception_validate:
 	cmpl expected_signal(%rip), %edi
 	jne .Lexception_fail
 	movl SIGINFO_CODE(%rsi), %eax
