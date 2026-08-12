@@ -27,6 +27,21 @@ bool kvm_protected_task_is_active(void)
 #endif
 }
 
+u64 kvm_protected_task_xfeatures(void)
+{
+#if IS_ENABLED(CONFIG_KVM)
+	struct kvm_protected_task_context *context;
+
+	if (!current->protected_task_active || !current->protected_task_state)
+		return 0;
+	context = current->protected_task_active->private_data;
+	return context->ops->xfeatures ?
+		context->ops->xfeatures(current->protected_task_state) : 0;
+#else
+	return 0;
+#endif
+}
+
 void kvm_protected_task_init(struct task_struct *task)
 {
 #if IS_ENABLED(CONFIG_KVM)

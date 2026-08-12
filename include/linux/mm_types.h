@@ -1304,6 +1304,10 @@ struct mm_struct {
 		/* Architecture-specific MM context */
 		mm_context_t context;
 
+#if IS_ENABLED(CONFIG_KVM)
+		atomic64_t protected_task_pkey_gen;
+#endif
+
 		mm_flags_t flags; /* Must use mm_flags_* hlpers to access */
 
 #ifdef CONFIG_AIO

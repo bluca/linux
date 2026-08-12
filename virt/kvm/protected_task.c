@@ -26,6 +26,7 @@ struct kvm_protected_task_exec {
 	struct kvm *kvm;
 	struct kvm_vcpu *vcpu;
 	void *arch_state;
+	u64 pkey_gen;
 	int debug_id;
 	u32 next_slot;
 };
@@ -174,22 +175,31 @@ static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *cont
 		0 : -EOPNOTSUPP;
 }
 
+static void kvm_protected_task_release_exec_resources(struct kvm_protected_task_exec *exec)
+{
+	kvm_arch_protected_task_cleanup(exec->vcpu, exec->arch_state);
+	kvm_put_kvm(exec->kvm);
+	ida_free(&kvm_protected_task_debug_ids, exec->debug_id);
+}
+
 static void kvm_protected_task_release_exec(void *state)
 {
 	struct kvm_protected_task_exec *exec = state;
 
-	kvm_arch_protected_task_cleanup(exec->vcpu, exec->arch_state);
-	kvm_put_kvm(exec->kvm);
-	ida_free(&kvm_protected_task_debug_ids, exec->debug_id);
+	kvm_protected_task_release_exec_resources(exec);
 	kfree(exec);
 }
 
 static int kvm_protected_task_finalize_vcpu(void *state, struct pt_regs *regs)
 {
 	struct kvm_protected_task_exec *exec = state;
+	int ret;
 
-	return kvm_arch_protected_task_finalize(exec->vcpu, exec->arch_state,
-						  regs, exec->next_slot++);
+	ret = kvm_arch_protected_task_finalize(exec->vcpu, exec->arch_state,
+					       regs, exec->next_slot++);
+	if (!ret)
+		exec->pkey_gen = atomic64_read(&current->mm->protected_task_pkey_gen);
+	return ret;
 }
 
 static int kvm_protected_task_clone_exec(struct kvm_protected_task_context *context,
@@ -220,9 +230,38 @@ static unsigned long kvm_protected_task_adjust_elf_hwcap(void *state,
 	return kvm_arch_protected_task_elf_hwcap(exec->vcpu, type, value);
 }
 
+static u64 kvm_protected_task_adjust_xfeatures(void *state)
+{
+	struct kvm_protected_task_exec *exec = state;
+
+	return kvm_arch_protected_task_xfeatures(exec->vcpu, exec->arch_state);
+}
+
 static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
 {
 	struct kvm_protected_task_exec *exec = state;
+	u64 pkey_gen = atomic64_read(&current->mm->protected_task_pkey_gen);
+
+	if (unlikely(exec->pkey_gen != pkey_gen)) {
+		struct kvm_protected_task_exec *new_exec;
+		struct kvm_protected_task_exec old_exec;
+		int ret;
+
+		ret = kvm_protected_task_create_exec(current->mm,
+						     (void **)&new_exec);
+		if (ret)
+			return ret;
+		ret = kvm_protected_task_finalize_vcpu(new_exec, regs);
+		if (ret) {
+			kvm_protected_task_release_exec(new_exec);
+			return ret;
+		}
+
+		old_exec = *exec;
+		*exec = *new_exec;
+		kfree(new_exec);
+		kvm_protected_task_release_exec_resources(&old_exec);
+	}
 
 	return kvm_arch_protected_task_run(exec->vcpu, exec->arch_state, regs,
 						   &exec->next_slot);
@@ -240,6 +279,7 @@ static const struct kvm_protected_task_ops kvm_protected_task_ops = {
 	.stage_exec = kvm_protected_task_stage_exec,
 	.clone_exec = kvm_protected_task_clone_exec,
 	.elf_hwcap = kvm_protected_task_adjust_elf_hwcap,
+	.xfeatures = kvm_protected_task_adjust_xfeatures,
 	.deactivate_exec = kvm_protected_task_deactivate_vcpu,
 	.finalize_exec = kvm_protected_task_finalize_vcpu,
 	.run = kvm_protected_task_run_vcpu,

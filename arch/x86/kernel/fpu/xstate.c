@@ -1844,15 +1844,15 @@ long fpu_xstate_prctl(int option, unsigned long arg2)
 {
 	u64 __user *uptr = (u64 __user *)arg2;
 	u64 permitted, supported;
+	u64 protected_xfeatures = kvm_protected_task_xfeatures();
 	unsigned long idx = arg2;
-	bool protected_task = kvm_protected_task_is_active();
 	bool guest = false;
 
 	switch (option) {
 	case ARCH_GET_XCOMP_SUPP:
 		supported = fpu_user_cfg.max_features |	fpu_user_cfg.legacy_features;
-		if (protected_task)
-			supported &= XFEATURE_MASK_FPSSE;
+		if (protected_xfeatures)
+			supported &= protected_xfeatures;
 		return put_user(supported, uptr);
 
 	case ARCH_GET_XCOMP_PERM:
@@ -1862,8 +1862,8 @@ long fpu_xstate_prctl(int option, unsigned long arg2)
 		 */
 		permitted = xstate_get_host_group_perm();
 		permitted &= XFEATURE_MASK_USER_SUPPORTED;
-		if (protected_task)
-			permitted &= XFEATURE_MASK_FPSSE;
+		if (protected_xfeatures)
+			permitted &= protected_xfeatures;
 		return put_user(permitted, uptr);
 
 	case ARCH_GET_XCOMP_GUEST_PERM:

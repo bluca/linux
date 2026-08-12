@@ -845,6 +845,7 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 				(prot & PROT_READ);
 	struct mmu_gather tlb;
 	struct vma_iterator vmi;
+	bool protected_pkey_changed = false;
 
 	start = untagged_addr(start);
 
@@ -875,11 +876,6 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 	error = -EINVAL;
 	if ((pkey != -1) && !mm_pkey_is_allocated(current->mm, pkey))
 		goto out;
-	if (pkey > 0 && kvm_protected_task_is_active()) {
-		error = -EOPNOTSUPP;
-		goto out;
-	}
-
 	vma_iter_init(&vmi, current->mm, start);
 	vma = vma_find(&vmi, end);
 	error = -ENOMEM;
@@ -915,7 +911,7 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 		vm_flags_t mask_off_old_flags;
 		vma_flags_t new_vma_flags;
 		vm_flags_t newflags;
-		int new_vma_pkey;
+		int new_vma_pkey, old_vma_pkey;
 
 		if (vma->vm_start != tmp) {
 			error = -ENOMEM;
@@ -933,7 +929,14 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 		 */
 		mask_off_old_flags = VM_ACCESS_FLAGS | VM_FLAGS_CLEAR;
 
+		old_vma_pkey = vma_pkey(vma);
 		new_vma_pkey = arch_override_mprotect_pkey(vma, prot, pkey);
+		if (new_vma_pkey != old_vma_pkey &&
+		    kvm_protected_task_is_active() &&
+		    atomic_read(&current->mm->mm_users) > 1) {
+			error = -EOPNOTSUPP;
+			break;
+		}
 		newflags = calc_vm_prot_bits(prot, new_vma_pkey);
 		newflags |= (vma->vm_flags & ~mask_off_old_flags);
 		new_vma_flags = legacy_to_vma_flags(newflags);
@@ -972,6 +975,9 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 		error = mprotect_fixup(&vmi, &tlb, vma, &prev, nstart, tmp, newflags);
 		if (error)
 			break;
+		if (new_vma_pkey != old_vma_pkey &&
+		    kvm_protected_task_is_active())
+			protected_pkey_changed = true;
 
 		tmp = vma_iter_end(&vmi);
 		nstart = tmp;
@@ -983,6 +989,8 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 		error = -ENOMEM;
 
 out:
+	if (protected_pkey_changed)
+		atomic64_inc(&current->mm->protected_task_pkey_gen);
 	mmap_write_unlock(current->mm);
 	return error;
 }

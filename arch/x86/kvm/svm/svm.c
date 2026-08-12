@@ -3359,6 +3359,8 @@ static int protected_task_exception_interception(struct kvm_vcpu *vcpu,
 {
 	struct vcpu_svm *svm = to_svm(vcpu);
 
+	if (vector == PF_VECTOR)
+		vcpu->arch.cr2 = svm->vmcb->control.exit_info_2;
 	vcpu->run->exit_reason = KVM_EXIT_EXCEPTION;
 	vcpu->run->ex.exception = vector;
 	vcpu->run->ex.error_code = x86_exception_has_error_code(vector) ?

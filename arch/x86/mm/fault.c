@@ -654,6 +654,18 @@ void x86_force_sig_user_page_fault(struct pt_regs *regs,
 }
 EXPORT_SYMBOL_GPL(x86_force_sig_user_page_fault);
 
+void x86_force_sig_user_pkey_fault(struct pt_regs *regs,
+				   unsigned long error_code,
+				   unsigned long address, u32 pkey)
+{
+	if (WARN_ON_ONCE(!user_mode(regs)))
+		return;
+	sanitize_error_code(address, &error_code);
+	set_signal_archinfo(address, error_code);
+	force_sig_pkuerr((void __user *)address, pkey);
+}
+EXPORT_SYMBOL_GPL(x86_force_sig_user_pkey_fault);
+
 static noinline void
 page_fault_oops(struct pt_regs *regs, unsigned long error_code,
 		unsigned long address)
