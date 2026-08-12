@@ -16,6 +16,7 @@
 .set FP_XSTATE_EXTENDED_SIZE, 580
 .set XFEATURE_MASK_FPSSE, 3
 .set XFEATURE_MASK_PKU, 0x203
+.set __NR_map_shadow_stack, 453
 .set ARCH_SET_GS, 0x1001
 .set ARCH_SET_FS, 0x1002
 .set ARCH_GET_FS, 0x1003
@@ -1527,6 +1528,14 @@ check_arch_prctl_controls:
 	mov $158, %eax
 	mov $ARCH_SHSTK_LOCK, %edi
 	mov $ARCH_SHSTK_SHSTK, %esi
+	syscall
+	cmp $-95, %rax
+	jne 1f
+	movl $122, failure_code(%rip)
+	mov $__NR_map_shadow_stack, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	xor %edx, %edx
 	syscall
 	cmp $-95, %rax
 	jne 1f
