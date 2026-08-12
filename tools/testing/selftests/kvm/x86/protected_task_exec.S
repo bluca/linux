@@ -24,6 +24,7 @@
 .set ARCH_GET_XCOMP_SUPP, 0x1021
 .set ARCH_GET_XCOMP_PERM, 0x1022
 .set ARCH_REQ_XCOMP_PERM, 0x1023
+.set ARCH_GET_UNTAG_MASK, 0x4001
 .set ARCH_ENABLE_TAGGED_ADDR, 0x4002
 .set ARCH_GET_MAX_TAG_BITS, 0x4003
 .set ARCH_FORCE_TAGGED_SVA, 0x4004
@@ -96,6 +97,9 @@ fs_marker:
 	.quad 0x0123456789abcdef
 gs_marker:
 	.quad 0xfedcba9876543210
+	.balign 8
+lam_marker:
+	.quad 0x13579bdf2468ace0
 	.balign 4
 ldt_entry:
 	.long 0, 0, 0xfffff, 0x51
@@ -175,6 +179,9 @@ thread_release:
 	.long 0
 	.balign 4
 pku_available:
+	.long 0
+	.balign 4
+lam_available:
 	.long 0
 	.balign 4
 pkey_number:
@@ -1008,6 +1015,9 @@ _start:
 	call check_cpu_profile
 	test %eax, %eax
 	jne 15f
+	call check_lam_enabled
+	test %eax, %eax
+	jne 12f
 	call check_pkey_inheritance
 	test %eax, %eax
 	jne 12f
@@ -1217,6 +1227,9 @@ check_process_clone:
 	call check_cpu_profile
 	test %eax, %eax
 	jne .Lprocess_child_fail
+	call check_lam_enabled
+	test %eax, %eax
+	jne .Lprocess_child_fail
 	call check_pkey_inheritance
 	test %eax, %eax
 	jne .Lprocess_child_fail
@@ -1403,39 +1416,90 @@ check_xcomp_controls:
 	.type check_arch_prctl_controls, @function
 check_arch_prctl_controls:
 	sub $16, %rsp
+	movl $116, failure_code(%rip)
 	mov $158, %eax
 	mov $ARCH_GET_MAX_TAG_BITS, %edi
 	mov %rsp, %rsi
 	syscall
 	test %rax, %rax
-	jz 2f
+	jz .Larch_prctl_tag_bits
 	cmp $-22, %rax
-	je 3f
-	jmp 1f
-2:
+	jne 1f
+	cmpl $0, lam_available(%rip)
+	jne 1f
+	jmp .Larch_prctl_no_lam
+.Larch_prctl_tag_bits:
+	cmpl $0, lam_available(%rip)
+	jne .Larch_prctl_lam
 	cmpq $0, (%rsp)
 	jne 1f
-3:
+	jmp .Larch_prctl_no_lam
+.Larch_prctl_lam:
+	cmpq $6, (%rsp)
+	jne 1f
+	movl $117, failure_code(%rip)
+	mov $158, %eax
+	mov $ARCH_GET_UNTAG_MASK, %edi
+	lea 8(%rsp), %rsi
+	syscall
+	test %rax, %rax
+	jne 1f
+	cmpq $-1, 8(%rsp)
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_ENABLE_TAGGED_ADDR, %edi
+	mov $6, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	mov $158, %eax
+	mov $ARCH_GET_UNTAG_MASK, %edi
+	mov %rsp, %rsi
+	syscall
+	test %rax, %rax
+	jne 1f
+	movabs $0x81ffffffffffffff, %rax
+	cmp %rax, (%rsp)
+	jne 1f
+	movl $118, failure_code(%rip)
+	lea lam_marker(%rip), %rcx
+	movabs $0x0200000000000000, %rax
+	or %rax, %rcx
+	mov (%rcx), %rax
+	cmp lam_marker(%rip), %rax
+	jne 1f
+	movl $119, failure_code(%rip)
+	mov $158, %eax
+	mov $ARCH_FORCE_TAGGED_SVA, %edi
+	xor %esi, %esi
+	syscall
+	test %rax, %rax
+	jne 1f
+	jmp .Larch_prctl_cet_status
+.Larch_prctl_no_lam:
+	movl $117, failure_code(%rip)
 	mov $158, %eax
 	mov $ARCH_ENABLE_TAGGED_ADDR, %edi
 	mov $6, %esi
 	syscall
 	cmp $-95, %rax
-	je 4f
+	je .Larch_prctl_force_no_lam
 	cmp $-19, %rax
-	je 4f
+	je .Larch_prctl_force_no_lam
 	cmp $-22, %rax
 	jne 1f
-4:
+.Larch_prctl_force_no_lam:
+	movl $119, failure_code(%rip)
 	mov $158, %eax
 	mov $ARCH_FORCE_TAGGED_SVA, %edi
 	xor %esi, %esi
 	syscall
 	cmp $-95, %rax
-	je 5f
+	je .Larch_prctl_cet_status
 	cmp $-22, %rax
 	jne 1f
-5:
+.Larch_prctl_cet_status:
+	movl $120, failure_code(%rip)
 	mov $158, %eax
 	mov $ARCH_SHSTK_STATUS, %edi
 	lea 8(%rsp), %rsi
@@ -1475,6 +1539,37 @@ check_arch_prctl_controls:
 	mov $1, %eax
 	ret
 	.size check_arch_prctl_controls, . - check_arch_prctl_controls
+
+	.type check_lam_enabled, @function
+check_lam_enabled:
+	cmpl $0, lam_available(%rip)
+	je .Llam_enabled_success
+	movl $121, failure_code(%rip)
+	sub $8, %rsp
+	mov $158, %eax
+	mov $ARCH_GET_UNTAG_MASK, %edi
+	mov %rsp, %rsi
+	syscall
+	test %rax, %rax
+	jne .Llam_enabled_fail
+	movabs $0x81ffffffffffffff, %rax
+	cmp %rax, (%rsp)
+	jne .Llam_enabled_fail
+	lea lam_marker(%rip), %rcx
+	movabs $0x0200000000000000, %rax
+	or %rax, %rcx
+	mov (%rcx), %rax
+	cmp lam_marker(%rip), %rax
+	jne .Llam_enabled_fail
+	add $8, %rsp
+.Llam_enabled_success:
+	xor %eax, %eax
+	ret
+.Llam_enabled_fail:
+	add $8, %rsp
+	mov $1, %eax
+	ret
+	.size check_lam_enabled, . - check_lam_enabled
 
 	.type check_pkey_controls, @function
 check_pkey_controls:
@@ -2028,6 +2123,7 @@ check_cpu_profile:
 	push %r12
 	push %r13
 	movl $0, pku_available(%rip)
+	movl $0, lam_available(%rip)
 	movl $FP_XSTATE_SIZE, expected_xstate_size(%rip)
 	movl $FP_XSTATE_EXTENDED_SIZE, expected_xstate_extended_size(%rip)
 	movl $0, expected_pkru_offset(%rip)
@@ -2038,9 +2134,27 @@ check_cpu_profile:
 	cpuid
 	cmp $1, %eax
 	je .Lcpu_basic_leaf
+	cmp $7, %eax
+	je .Lcpu_check_lam
 	cmp $0xd, %eax
 	jne 2f
 	movl $1, pku_available(%rip)
+.Lcpu_check_lam:
+	mov $108, %r11d
+	mov $7, %eax
+	mov $1, %ecx
+	cpuid
+	test %ebx, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	test %eax, %eax
+	je .Lcpu_basic_leaf
+	cmp $0x4000000, %eax
+	jne 2f
+	movl $1, lam_available(%rip)
 .Lcpu_basic_leaf:
 
 	mov $74, %r11d
@@ -2054,25 +2168,49 @@ check_cpu_profile:
 	je .Lcpu_no_pku_leaf1
 	cmp $0xc000000, %ecx
 	jne 2f
-	jmp .Lcpu_pku_leaves
+	jmp .Lcpu_leaf7
 .Lcpu_no_pku_leaf1:
 	test %ecx, %ecx
 	jne 2f
+	cmpl $0, lam_available(%rip)
+	jne .Lcpu_leaf7
 	jmp .Lcpu_extended
 
-.Lcpu_pku_leaves:
+.Lcpu_leaf7:
 	mov $105, %r11d
 	mov $7, %eax
 	xor %ecx, %ecx
 	cpuid
-	test %eax, %eax
+	mov lam_available(%rip), %r12d
+	cmp %r12d, %eax
 	jne 2f
 	test %ebx, %ebx
 	jne 2f
-	cmp $0x18, %ecx
+	xor %r13d, %r13d
+	cmpl $0, pku_available(%rip)
+	je .Lcpu_leaf7_ecx
+	mov $0x18, %r13d
+.Lcpu_leaf7_ecx:
+	cmp %r13d, %ecx
 	jne 2f
 	test %edx, %edx
 	jne 2f
+	mov $108, %r11d
+	mov $7, %eax
+	mov $1, %ecx
+	cpuid
+	mov lam_available(%rip), %r12d
+	shl $26, %r12d
+	cmp %r12d, %eax
+	jne 2f
+	test %ebx, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	cmpl $0, pku_available(%rip)
+	je .Lcpu_extended
 
 	mov $106, %r11d
 	mov $0xd, %eax
