@@ -37,10 +37,9 @@
 #define KVM_PT_VA_LIMIT		BIT_ULL(47)
 #define KVM_PT_NONLEAF_FLAGS	(_PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_ACCESSED)
 #define KVM_PT_SYSCALL_PORT	0xec
-#define KVM_PT_CPUID_1_ECX_FMA BIT(12)
 #define KVM_PT_CPUID_1_ECX_XSAVE BIT(26)
 #define KVM_PT_CPUID_1_ECX_AVX BIT(28)
-#define KVM_PT_CPUID_1_ECX_F16C BIT(29)
+#define KVM_PT_CPUID_1_ECX_YMM (BIT(12) | KVM_PT_CPUID_1_ECX_AVX | BIT(29))
 #define KVM_PT_CPUID_1_EDX	(BIT(0) | BIT(8) | BIT(15) | BIT(23) | \
 				 BIT(24) | BIT(25) | BIT(26))
 #define KVM_PT_CPUID_7_EBX_AVX2 BIT(5)
@@ -53,7 +52,8 @@
 #define KVM_PT_CPUID_7_ECX_PKU	BIT(3)
 #define KVM_PT_CPUID_7_ECX_SHSTK BIT(7)
 #define KVM_PT_CPUID_7_EDX_AMX_TILE BIT(24)
-#define KVM_PT_CPUID_7_1_EAX	BIT(26)
+#define KVM_PT_CPUID_7_1_EAX_AVX512_BF16 BIT(5)
+#define KVM_PT_CPUID_7_1_EAX_LAM BIT(26)
 #define KVM_PT_CPUID_D_1_EAX_XGETBV1 BIT(2)
 #define KVM_PT_CPUID_D_1_EAX_XSAVES BIT(3)
 #define KVM_PT_CPUID_D_1_EAX_XFD BIT(4)
@@ -68,6 +68,42 @@
 #define KVM_PT_HOLE_TABLE_PAGES	4
 #define KVM_PT_IMAGE_PAGES	(2 + (KVM_PT_VA_LIMIT >> PGDIR_SHIFT) + \
 				 KVM_PT_HOLE_TABLE_PAGES)
+
+struct kvm_pt_cpuid_classes {
+	u32 baseline;
+	u32 ymm;
+	u32 zmm;
+	u32 tile;
+};
+
+static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_1_ecx = {
+	.ymm = KVM_PT_CPUID_1_ECX_YMM,
+};
+
+static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_1_edx = {
+	.baseline = KVM_PT_CPUID_1_EDX,
+};
+
+static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_7_0_ebx = {
+	.ymm = KVM_PT_CPUID_7_EBX_AVX2,
+	.zmm = KVM_PT_CPUID_7_EBX_AVX512,
+};
+
+static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_7_0_ecx = {
+	.zmm = KVM_PT_CPUID_7_ECX_AVX512,
+};
+
+static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_7_0_edx = {
+	.tile = KVM_PT_CPUID_7_EDX_AMX_TILE,
+};
+
+static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_7_1_eax = {
+	.zmm = KVM_PT_CPUID_7_1_EAX_AVX512_BF16,
+};
+
+static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_80000001_edx = {
+	.baseline = KVM_PT_CPUID_80000001_EDX,
+};
 
 struct kvm_protected_task_x86 {
 	unsigned long pgtable_addr;
@@ -85,6 +121,22 @@ struct kvm_protected_task_x86 {
 	unsigned int static_user_size;
 	unsigned int dynamic_user_size;
 };
+
+static u32 kvm_protected_task_cpuid_class_mask(
+		struct kvm_protected_task_x86 *state,
+		const struct kvm_pt_cpuid_classes *classes)
+{
+	u32 mask = classes->baseline;
+
+	if (state->avx)
+		mask |= classes->ymm;
+	if (state->avx512)
+		mask |= classes->zmm;
+	if (state->amx)
+		mask |= classes->tile;
+
+	return mask;
+}
 
 struct kvm_protected_task_builder {
 	u8 *image;
@@ -130,6 +182,7 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 	struct kvm_cpuid_entry2 *leafd17, *leafd18, *leaf1d0, *leaf1d1;
 	unsigned int hi16_zmm_end = 0, opmask_end = 0, tilecfg_end = 0;
 	unsigned int tiledata_end = 0, ymm_end = 0, zmm_hi256_end = 0;
+	u32 leaf7_1_eax;
 	u64 xcr0;
 	int i;
 
@@ -175,7 +228,7 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 		     leafd0 && (leafd0->eax & XFEATURE_MASK_PKRU) &&
 		     leafd9 && leafd9->eax &&
 		     leafd9->ebx >= sizeof(struct xregs_state);
-	state->lam = leaf71 && (leaf71->eax & KVM_PT_CPUID_7_1_EAX);
+	state->lam = leaf71 && (leaf71->eax & KVM_PT_CPUID_7_1_EAX_LAM);
 	state->shstk = cpu_feature_enabled(X86_FEATURE_USER_SHSTK) &&
 		leaf1 && (leaf1->ecx & KVM_PT_CPUID_1_ECX_XSAVE) &&
 		leaf7 && (leaf7->ecx & KVM_PT_CPUID_7_ECX_SHSTK) &&
@@ -220,6 +273,10 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 	state->dynamic_user_size = state->amx ? tiledata_end :
 		state->static_user_size;
 	xcr0 = kvm_protected_task_xcr0(state);
+	leaf7_1_eax = kvm_protected_task_cpuid_class_mask(state,
+							 &kvm_pt_cpuid_7_1_eax) |
+		(state->lam ? KVM_PT_CPUID_7_1_EAX_LAM : 0);
+	leaf7_1_eax &= leaf71 ? leaf71->eax : 0;
 
 	for (i = 0; i < vcpu->arch.cpuid_nent; i++) {
 		struct kvm_cpuid_entry2 *entry = &vcpu->arch.cpuid_entries[i];
@@ -232,28 +289,26 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 					 state->lam ? 7U : 1U);
 			break;
 		case 1:
-			entry->ecx &=
-				(state->avx ? KVM_PT_CPUID_1_ECX_FMA |
-					      KVM_PT_CPUID_1_ECX_AVX |
-					      KVM_PT_CPUID_1_ECX_F16C : 0) |
+			entry->ecx &= kvm_protected_task_cpuid_class_mask(
+						state, &kvm_pt_cpuid_1_ecx) |
 				(state->avx || state->pku || state->shstk || state->amx ?
 				 KVM_PT_CPUID_1_ECX_XSAVE : 0);
-			entry->edx &= KVM_PT_CPUID_1_EDX;
+			entry->edx &= kvm_protected_task_cpuid_class_mask(
+						state, &kvm_pt_cpuid_1_edx);
 			break;
 		case 7:
 			if (!entry->index) {
-				entry->eax = state->lam ? 1 : 0;
-				entry->ebx &=
-					(state->avx ? KVM_PT_CPUID_7_EBX_AVX2 : 0) |
-					(state->avx512 ? KVM_PT_CPUID_7_EBX_AVX512 : 0);
-				entry->ecx &=
-					(state->avx512 ? KVM_PT_CPUID_7_ECX_AVX512 : 0) |
+				entry->eax = leaf7_1_eax ? 1 : 0;
+				entry->ebx &= kvm_protected_task_cpuid_class_mask(
+						state, &kvm_pt_cpuid_7_0_ebx);
+				entry->ecx &= kvm_protected_task_cpuid_class_mask(
+						state, &kvm_pt_cpuid_7_0_ecx) |
 					(state->pku ? KVM_PT_CPUID_7_ECX_PKU : 0) |
 					(state->shstk ? KVM_PT_CPUID_7_ECX_SHSTK : 0);
-				entry->edx &= state->amx ?
-					KVM_PT_CPUID_7_EDX_AMX_TILE : 0;
-			} else if (entry->index == 1 && state->lam) {
-				entry->eax &= KVM_PT_CPUID_7_1_EAX;
+				entry->edx &= kvm_protected_task_cpuid_class_mask(
+						state, &kvm_pt_cpuid_7_0_edx);
+			} else if (entry->index == 1 && leaf7_1_eax) {
+				entry->eax &= leaf7_1_eax;
 				entry->ebx = 0;
 				entry->ecx = 0;
 				entry->edx = 0;
@@ -348,7 +403,8 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 			break;
 		case 0x80000001:
 			entry->ecx = 0;
-			entry->edx &= KVM_PT_CPUID_80000001_EDX;
+			entry->edx &= kvm_protected_task_cpuid_class_mask(
+						state, &kvm_pt_cpuid_80000001_edx);
 			break;
 		case 0x80000008:
 			entry->ebx = 0;
