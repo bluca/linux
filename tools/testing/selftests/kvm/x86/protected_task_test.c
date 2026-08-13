@@ -858,7 +858,7 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		offsetof(struct user_fpregs_struct, xmm_space) + 15 * 16;
 	const size_t mxcsr_offset = offsetof(struct user_fpregs_struct, mxcsr);
 	unsigned int eax, ebx, xstate_capacity, edx;
-	struct user_regs_struct regs;
+	struct user_regs_struct original_regs, regs;
 	struct ptrace_syscall_info syscall_info;
 	unsigned char *expected_xstate, *original_xstate, *xstate;
 	unsigned long breakpoint_rip, event_child;
@@ -897,6 +897,7 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		    value, errno, EIO);
 	TEST_ASSERT(ptrace(PTRACE_GETREGS, child, NULL, &regs) == 0,
 		    "PTRACE_GETREGS failed: %d", errno);
+	original_regs = regs;
 	iov.iov_base = xstate;
 	iov.iov_len = xstate_capacity;
 	TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_XSTATE,
@@ -955,8 +956,33 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	memcpy(expected_xstate, xstate, xstate_size);
 	breakpoint_rip = regs.rip;
 	regs.r15 = sentinel;
+	regs.r14 = 0x1122334455667788;
+	regs.r13 = 0x2233445566778899;
+	regs.r12 = 0x33445566778899aa;
+	regs.rbp = 0x445566778899aabb;
+	regs.rbx = 0x5566778899aabbcc;
+	regs.r11 = 0x66778899aabbccdd;
+	regs.r10 = 0x778899aabbccddee;
+	regs.r9 = 0x8899aabbccddeeff;
+	regs.r8 = 0x99aabbccddeeff00;
+	regs.rax = 0xaabbccddeeff0011;
+	regs.rcx = 0xbbccddeeff001122;
+	regs.rdx = 0xccddeeff00112233;
+	regs.rsi = 0xddeeff0011223344;
+	regs.rdi = 0xeeff001122334455;
+	regs.rsp -= 16;
 	TEST_ASSERT(ptrace(PTRACE_SETREGS, child, NULL, &regs) == 0,
 		    "PTRACE_SETREGS failed: %d", errno);
+	{
+		struct user_regs_struct expected_regs = regs;
+
+		TEST_ASSERT(ptrace(PTRACE_GETREGS, child, NULL, &regs) == 0,
+			    "PTRACE_GETREGS after write failed: %d", errno);
+		TEST_ASSERT(!memcmp(&regs, &expected_regs,
+				    offsetof(struct user_regs_struct, orig_rax)) &&
+			    regs.rsp == expected_regs.rsp,
+			    "PTRACE_SETREGS did not update complete GPR state");
+	}
 	errno = 0;
 	instruction = ptrace(PTRACE_PEEKTEXT, child, (void *)breakpoint_rip, NULL);
 	TEST_ASSERT(instruction != -1 || !errno,
@@ -979,13 +1005,30 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		    siginfo.si_signo, siginfo.si_code);
 	TEST_ASSERT(ptrace(PTRACE_GETREGS, child, NULL, &regs) == 0,
 		    "PTRACE_GETREGS after software breakpoint failed: %d", errno);
+	TEST_ASSERT(regs.r14 == 0x1122334455667788 &&
+		    regs.r13 == 0x2233445566778899 &&
+		    regs.r12 == 0x33445566778899aa &&
+		    regs.rbp == 0x445566778899aabb &&
+		    regs.rbx == 0x5566778899aabbcc &&
+		    regs.r11 == 0x66778899aabbccdd &&
+		    regs.r10 == 0x778899aabbccddee &&
+		    regs.r9 == 0x8899aabbccddeeff &&
+		    regs.r8 == 0x99aabbccddeeff00 &&
+		    regs.rax == 0xaabbccddeeff0011 &&
+		    regs.rcx == 0xbbccddeeff001122 &&
+		    regs.rdx == 0xccddeeff00112233 &&
+		    regs.rsi == 0xddeeff0011223344 &&
+		    regs.rdi == 0xeeff001122334455 &&
+		    regs.r15 == sentinel && regs.rsp == original_regs.rsp - 16,
+		    "Complete GPR state changed at software breakpoint");
 	TEST_ASSERT(regs.rip == breakpoint_rip + 1,
 		    "Software breakpoint produced RIP %#llx, expected %#lx",
 		    regs.rip, breakpoint_rip + 1);
 	TEST_ASSERT(ptrace(PTRACE_POKETEXT, child, (void *)breakpoint_rip,
 			   (void *)instruction) == 0,
 		    "PTRACE_POKETEXT restore failed: %d", errno);
-	regs.rip = breakpoint_rip;
+	regs = original_regs;
+	regs.r15 = sentinel;
 	TEST_ASSERT(ptrace(PTRACE_SETREGS, child, NULL, &regs) == 0,
 		    "PTRACE_SETREGS after software breakpoint failed: %d", errno);
 	TEST_ASSERT(ptrace(PTRACE_POKEUSER, child,
@@ -1035,6 +1078,9 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	TEST_ASSERT(regs.r15 == sentinel,
 		    "PTRACE_SETREGS value was not preserved: %#llx",
 		    regs.r15);
+	regs.r15 = original_regs.r15;
+	TEST_ASSERT(ptrace(PTRACE_SETREGS, child, NULL, &regs) == 0,
+		    "PTRACE_SETREGS GPR restore failed: %d", errno);
 	iov.iov_len = xstate_capacity;
 	TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_XSTATE,
 			   &iov) == 0,
