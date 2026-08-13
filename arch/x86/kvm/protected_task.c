@@ -44,6 +44,7 @@
 #define KVM_PT_CPUID_1_EDX	(BIT(0) | BIT(8) | BIT(15) | BIT(23) | \
 				 BIT(24) | BIT(25) | BIT(26))
 #define KVM_PT_CPUID_7_EBX_AVX2 BIT(5)
+#define KVM_PT_CPUID_7_EBX_AVX512F BIT(16)
 #define KVM_PT_CPUID_7_ECX_PKU	BIT(3)
 #define KVM_PT_CPUID_7_ECX_SHSTK BIT(7)
 #define KVM_PT_CPUID_7_EDX_AMX_TILE BIT(24)
@@ -70,6 +71,7 @@ struct kvm_protected_task_x86 {
 	unsigned long pgd;
 	unsigned long syscall_stub;
 	bool avx;
+	bool avx512;
 	bool pku;
 	bool lam;
 	bool shstk;
@@ -90,6 +92,7 @@ static u64 kvm_protected_task_xcr0(struct kvm_protected_task_x86 *state)
 {
 	return XFEATURE_MASK_FPSSE |
 		(state->avx ? XFEATURE_MASK_YMM : 0) |
+		(state->avx512 ? XFEATURE_MASK_AVX512 : 0) |
 		(state->pku ? XFEATURE_MASK_PKRU : 0) |
 		(state->amx ? XFEATURE_MASK_XTILE : 0);
 }
@@ -117,9 +120,11 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 					       struct kvm_protected_task_x86 *state)
 {
 	struct kvm_cpuid_entry2 *leaf1, *leaf7, *leaf71;
-	struct kvm_cpuid_entry2 *leafd0, *leafd1, *leafd2, *leafd9, *leafd11;
+	struct kvm_cpuid_entry2 *leafd0, *leafd1, *leafd2, *leafd5, *leafd6;
+	struct kvm_cpuid_entry2 *leafd7, *leafd9, *leafd11;
 	struct kvm_cpuid_entry2 *leafd17, *leafd18, *leaf1d0, *leaf1d1;
-	unsigned int tilecfg_end = 0, tiledata_end = 0, ymm_end = 0;
+	unsigned int hi16_zmm_end = 0, opmask_end = 0, tilecfg_end = 0;
+	unsigned int tiledata_end = 0, ymm_end = 0, zmm_hi256_end = 0;
 	u64 xcr0;
 	int i;
 
@@ -129,6 +134,9 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 	leafd0 = kvm_find_cpuid_entry_index(vcpu, 0xd, 0);
 	leafd1 = kvm_find_cpuid_entry_index(vcpu, 0xd, 1);
 	leafd2 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_YMM);
+	leafd5 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_OPMASK);
+	leafd6 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_ZMM_Hi256);
+	leafd7 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_Hi16_ZMM);
 	leafd9 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_PKRU);
 	leafd11 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_CET_USER);
 	leafd17 = kvm_find_cpuid_entry_index(vcpu, 0xd, XFEATURE_XTILE_CFG);
@@ -142,6 +150,21 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 		kvm_protected_task_xstate_component(leafd2,
 				sizeof(struct ymmh_struct), false, &ymm_end) &&
 		(vcpu->arch.guest_fpu.fpstate->xfeatures & XFEATURE_MASK_YMM);
+	state->avx512 = state->avx && cpu_feature_enabled(X86_FEATURE_AVX512F) &&
+		leaf7 && (leaf7->ebx & KVM_PT_CPUID_7_EBX_AVX512F) &&
+		leafd0 &&
+		(leafd0->eax & XFEATURE_MASK_AVX512) == XFEATURE_MASK_AVX512 &&
+		kvm_protected_task_xstate_component(leafd5,
+				sizeof(struct avx_512_opmask_state), false,
+				&opmask_end) && leafd5->ebx >= ymm_end &&
+		kvm_protected_task_xstate_component(leafd6,
+				sizeof(struct avx_512_zmm_uppers_state), false,
+				&zmm_hi256_end) && leafd6->ebx >= opmask_end &&
+		kvm_protected_task_xstate_component(leafd7,
+				sizeof(struct avx_512_hi16_state), false,
+				&hi16_zmm_end) && leafd7->ebx >= zmm_hi256_end &&
+		(vcpu->arch.guest_fpu.fpstate->xfeatures & XFEATURE_MASK_AVX512) ==
+			XFEATURE_MASK_AVX512;
 	state->pku = leaf1 && (leaf1->ecx & KVM_PT_CPUID_1_ECX_XSAVE) &&
 		     leaf7 && (leaf7->ecx & KVM_PT_CPUID_7_ECX_PKU) &&
 		     leafd0 && (leafd0->eax & XFEATURE_MASK_PKRU) &&
@@ -181,6 +204,9 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 	state->static_user_size = sizeof(struct xregs_state);
 	if (state->avx)
 		state->static_user_size = max(state->static_user_size, ymm_end);
+	if (state->avx512)
+		state->static_user_size = max(state->static_user_size,
+					      hi16_zmm_end);
 	if (state->pku)
 		state->static_user_size = max(state->static_user_size,
 					  leafd9->ebx + leafd9->eax);
@@ -212,7 +238,9 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 		case 7:
 			if (!entry->index) {
 				entry->eax = state->lam ? 1 : 0;
-				entry->ebx &= state->avx ? KVM_PT_CPUID_7_EBX_AVX2 : 0;
+				entry->ebx &=
+					(state->avx ? KVM_PT_CPUID_7_EBX_AVX2 : 0) |
+					(state->avx512 ? KVM_PT_CPUID_7_EBX_AVX512F : 0);
 				entry->ecx &=
 					(state->pku ? KVM_PT_CPUID_7_ECX_PKU : 0) |
 					(state->shstk ? KVM_PT_CPUID_7_ECX_SHSTK : 0);
@@ -253,6 +281,20 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 				entry->edx = 0;
 			} else if (entry->index == XFEATURE_YMM && state->avx) {
 				entry->eax = sizeof(struct ymmh_struct);
+				entry->ecx &= BIT(1);
+				entry->edx = 0;
+			} else if (entry->index == XFEATURE_OPMASK && state->avx512) {
+				entry->eax = sizeof(struct avx_512_opmask_state);
+				entry->ecx &= BIT(1);
+				entry->edx = 0;
+			} else if (entry->index == XFEATURE_ZMM_Hi256 &&
+				   state->avx512) {
+				entry->eax = sizeof(struct avx_512_zmm_uppers_state);
+				entry->ecx &= BIT(1);
+				entry->edx = 0;
+			} else if (entry->index == XFEATURE_Hi16_ZMM &&
+				   state->avx512) {
+				entry->eax = sizeof(struct avx_512_hi16_state);
 				entry->ecx &= BIT(1);
 				entry->edx = 0;
 			} else if (entry->index == XFEATURE_PKRU && state->pku) {
