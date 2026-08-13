@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <sys/ioctl.h>
 #include <sys/io.h>
 #include <sys/mman.h>
@@ -20,6 +21,7 @@
 #include <unistd.h>
 
 #include <linux/kvm.h>
+#include <linux/ptrace.h>
 
 #include "kvm_util.h"
 #include "test_util.h"
@@ -835,6 +837,7 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		offsetof(struct user_fpregs_struct, xmm_space) + 15 * 16;
 	unsigned int eax, ebx, xstate_capacity, edx;
 	struct user_regs_struct regs;
+	struct ptrace_syscall_info syscall_info;
 	unsigned char *expected_xstate, *xstate;
 	unsigned long breakpoint_rip;
 	__u64 xstate_bv;
@@ -856,6 +859,9 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	TEST_ASSERT(waitpid(child, &status, 0) == child,
 		    "waitpid() after PTRACE_ATTACH failed: %d", errno);
 	TEST_ASSERT(WIFSTOPPED(status), "Ptraced child did not stop: %#x", status);
+	TEST_ASSERT(ptrace(PTRACE_SETOPTIONS, child, NULL,
+			   PTRACE_O_TRACESYSGOOD) == 0,
+		    "PTRACE_SETOPTIONS failed: %d", errno);
 
 	errno = 0;
 	value = ptrace(PTRACE_PEEKDATA, child, (void *)address, NULL);
@@ -982,6 +988,55 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		    "NT_X86_XSTATE size changed after single-step: %zu", iov.iov_len);
 	TEST_ASSERT(!memcmp(xstate, expected_xstate, xstate_size),
 		    "NT_X86_XSTATE changed after single-step");
+	TEST_ASSERT(ptrace(PTRACE_SYSCALL, child, NULL, NULL) == 0,
+		    "PTRACE_SYSCALL to entry failed: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() at syscall entry failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == (SIGTRAP | 0x80),
+		    "Syscall entry produced unexpected status: %#x", status);
+	memset(&syscall_info, 0, sizeof(syscall_info));
+	value = ptrace(PTRACE_GET_SYSCALL_INFO, child, sizeof(syscall_info),
+		       &syscall_info);
+	TEST_ASSERT(value > 0, "PTRACE_GET_SYSCALL_INFO at entry failed: %d", errno);
+	TEST_ASSERT(syscall_info.op == PTRACE_SYSCALL_INFO_ENTRY &&
+		    syscall_info.entry.nr == SYS_write &&
+		    syscall_info.entry.args[0] == STDOUT_FILENO &&
+		    syscall_info.entry.args[1] == address &&
+		    syscall_info.entry.args[2] == 1,
+		    "Unexpected syscall entry: op=%u nr=%llu args=%llu/%#llx/%llu",
+		    syscall_info.op, syscall_info.entry.nr,
+		    syscall_info.entry.args[0], syscall_info.entry.args[1],
+		    syscall_info.entry.args[2]);
+	TEST_ASSERT(ptrace(PTRACE_SYSCALL, child, NULL, NULL) == 0,
+		    "PTRACE_SYSCALL to exit failed: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() at syscall exit failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == (SIGTRAP | 0x80),
+		    "Syscall exit produced unexpected status: %#x", status);
+	memset(&syscall_info, 0, sizeof(syscall_info));
+	value = ptrace(PTRACE_GET_SYSCALL_INFO, child, sizeof(syscall_info),
+		       &syscall_info);
+	TEST_ASSERT(value > 0, "PTRACE_GET_SYSCALL_INFO at exit failed: %d", errno);
+	TEST_ASSERT(syscall_info.op == PTRACE_SYSCALL_INFO_EXIT &&
+		    syscall_info.exit.is_error &&
+		    syscall_info.exit.rval == -EFAULT,
+		    "Unexpected syscall exit: op=%u error=%u rval=%lld",
+		    syscall_info.op, syscall_info.exit.is_error,
+		    syscall_info.exit.rval);
+	TEST_ASSERT(kill(child, SIGUSR1) == 0,
+		    "kill(SIGUSR1) failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL, NULL) == 0,
+		    "PTRACE_CONT to signal stop failed: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() at signal stop failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGUSR1,
+		    "Signal delivery produced unexpected status: %#x", status);
+	TEST_ASSERT(ptrace(PTRACE_GETSIGINFO, child, NULL, &siginfo) == 0,
+		    "PTRACE_GETSIGINFO at signal stop failed: %d", errno);
+	TEST_ASSERT(siginfo.si_signo == SIGUSR1 && siginfo.si_code == SI_USER &&
+		    siginfo.si_pid == getpid(),
+		    "Signal stop produced signal %d/%d from %d",
+		    siginfo.si_signo, siginfo.si_code, siginfo.si_pid);
 	TEST_ASSERT(ptrace(PTRACE_DETACH, child, NULL, NULL) == 0,
 		    "PTRACE_DETACH failed: %d", errno);
 	free(expected_xstate);
