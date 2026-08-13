@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <cpuid.h>
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -12,6 +14,7 @@
 #include <sys/io.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
+#include <sys/uio.h>
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -823,11 +826,30 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 					    int address_fd)
 {
 	const unsigned long sentinel = 0x0123456789abcdef;
+	const unsigned char xmm_sentinel[16] = {
+		0x98, 0xba, 0xdc, 0xfe, 0x10, 0x32, 0x54, 0x76,
+		0xfe, 0xca, 0xad, 0x0b, 0xef, 0xbe, 0xad, 0xde,
+	};
+	const size_t xstate_bv_offset = 512;
+	const size_t xmm15_offset =
+		offsetof(struct user_fpregs_struct, xmm_space) + 15 * 16;
+	unsigned int eax, ebx, xstate_capacity, edx;
 	struct user_regs_struct regs;
+	unsigned char *expected_xstate, *xstate;
 	unsigned long breakpoint_rip;
+	__u64 xstate_bv;
+	struct iovec iov;
+	size_t xstate_size;
 	siginfo_t siginfo;
 	long dr6, value;
 	int status;
+
+	__cpuid_count(0xd, 0, eax, ebx, xstate_capacity, edx);
+	TEST_ASSERT(xstate_capacity >= xmm15_offset + sizeof(xmm_sentinel),
+		    "Invalid xstate buffer size: %u", xstate_capacity);
+	xstate = malloc(xstate_capacity);
+	expected_xstate = malloc(xstate_capacity);
+	TEST_ASSERT(xstate && expected_xstate, "Failed to allocate xstate buffers");
 
 	TEST_ASSERT(ptrace(PTRACE_ATTACH, child, NULL, NULL) == 0,
 		    "PTRACE_ATTACH failed: %d", errno);
@@ -842,6 +864,34 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		    value, errno, EIO);
 	TEST_ASSERT(ptrace(PTRACE_GETREGS, child, NULL, &regs) == 0,
 		    "PTRACE_GETREGS failed: %d", errno);
+	iov.iov_base = xstate;
+	iov.iov_len = xstate_capacity;
+	TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_XSTATE,
+			   &iov) == 0,
+		    "PTRACE_GETREGSET NT_X86_XSTATE failed: %d", errno);
+	xstate_size = iov.iov_len;
+	TEST_ASSERT(xstate_size >= xmm15_offset + sizeof(xmm_sentinel),
+		    "NT_X86_XSTATE is too short: %zu", xstate_size);
+	TEST_ASSERT(xstate_size >= xstate_bv_offset + sizeof(xstate_bv),
+		    "NT_X86_XSTATE has no header: %zu", xstate_size);
+	memcpy(&xstate_bv, xstate + xstate_bv_offset, sizeof(xstate_bv));
+	xstate_bv |= 1ULL << 1;
+	memcpy(xstate + xstate_bv_offset, &xstate_bv, sizeof(xstate_bv));
+	memcpy(xstate + xmm15_offset, xmm_sentinel, sizeof(xmm_sentinel));
+	TEST_ASSERT(ptrace(PTRACE_SETREGSET, child, (void *)NT_X86_XSTATE,
+			   &iov) == 0,
+		    "PTRACE_SETREGSET NT_X86_XSTATE failed: %d", errno);
+	iov.iov_len = xstate_capacity;
+	TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_XSTATE,
+			   &iov) == 0,
+		    "PTRACE_GETREGSET after xstate write failed: %d", errno);
+	TEST_ASSERT(iov.iov_len == xstate_size,
+		    "NT_X86_XSTATE size changed from %zu to %zu",
+		    xstate_size, iov.iov_len);
+	TEST_ASSERT(!memcmp(xstate + xmm15_offset, xmm_sentinel,
+			    sizeof(xmm_sentinel)),
+		    "PTRACE_SETREGSET did not update XMM15");
+	memcpy(expected_xstate, xstate, xstate_size);
 	breakpoint_rip = regs.rip;
 	regs.r15 = sentinel;
 	TEST_ASSERT(ptrace(PTRACE_SETREGS, child, NULL, &regs) == 0,
@@ -895,8 +945,18 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	TEST_ASSERT(regs.r15 == sentinel,
 		    "PTRACE_SETREGS value was not preserved: %#llx",
 		    regs.r15);
+	iov.iov_len = xstate_capacity;
+	TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_XSTATE,
+			   &iov) == 0,
+		    "PTRACE_GETREGSET after single-step failed: %d", errno);
+	TEST_ASSERT(iov.iov_len == xstate_size,
+		    "NT_X86_XSTATE size changed after single-step: %zu", iov.iov_len);
+	TEST_ASSERT(!memcmp(xstate, expected_xstate, xstate_size),
+		    "NT_X86_XSTATE changed after single-step");
 	TEST_ASSERT(ptrace(PTRACE_DETACH, child, NULL, NULL) == 0,
 		    "PTRACE_DETACH failed: %d", errno);
+	free(expected_xstate);
+	free(xstate);
 }
 
 static void test_protected_exec(int kvm_fd)
