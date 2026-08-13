@@ -839,7 +839,7 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	struct user_regs_struct regs;
 	struct ptrace_syscall_info syscall_info;
 	unsigned char *expected_xstate, *xstate;
-	unsigned long breakpoint_rip;
+	unsigned long breakpoint_rip, event_child;
 	__u64 xstate_bv;
 	struct iovec iov;
 	size_t xstate_size;
@@ -860,7 +860,7 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		    "waitpid() after PTRACE_ATTACH failed: %d", errno);
 	TEST_ASSERT(WIFSTOPPED(status), "Ptraced child did not stop: %#x", status);
 	TEST_ASSERT(ptrace(PTRACE_SETOPTIONS, child, NULL,
-			   PTRACE_O_TRACESYSGOOD) == 0,
+			   PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEFORK) == 0,
 		    "PTRACE_SETOPTIONS failed: %d", errno);
 
 	errno = 0;
@@ -1037,10 +1037,75 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		    siginfo.si_pid == getpid(),
 		    "Signal stop produced signal %d/%d from %d",
 		    siginfo.si_signo, siginfo.si_code, siginfo.si_pid);
+	TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL, NULL) == 0,
+		    "PTRACE_CONT to fork event failed: %d", errno);
+	for (;;) {
+		TEST_ASSERT(waitpid(child, &status, 0) == child,
+			    "waitpid() before fork event failed: %d", errno);
+		TEST_ASSERT(WIFSTOPPED(status),
+			    "Tracee exited before fork event: %#x", status);
+		if (WSTOPSIG(status) == SIGTRAP &&
+		    (unsigned int)status >> 16 == PTRACE_EVENT_FORK)
+			break;
+		TEST_ASSERT((unsigned int)status >> 16 == 0,
+			    "Unexpected ptrace event before fork: %#x", status);
+		TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL,
+				   (void *)(long)WSTOPSIG(status)) == 0,
+			    "PTRACE_CONT before fork event failed: %d", errno);
+	}
+	TEST_ASSERT(ptrace(PTRACE_GETEVENTMSG, child, NULL, &event_child) == 0,
+		    "PTRACE_GETEVENTMSG at fork failed: %d", errno);
+	TEST_ASSERT(event_child > 0, "Fork event returned child %lu", event_child);
+	TEST_ASSERT(waitpid(event_child, &status, __WALL) == event_child,
+		    "waitpid() for traced fork child failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status),
+		    "Traced fork child did not stop: %#x", status);
+	TEST_ASSERT(ptrace(PTRACE_DETACH, event_child, NULL, NULL) == 0,
+		    "PTRACE_DETACH fork child failed: %d", errno);
 	TEST_ASSERT(ptrace(PTRACE_DETACH, child, NULL, NULL) == 0,
 		    "PTRACE_DETACH failed: %d", errno);
 	free(expected_xstate);
 	free(xstate);
+}
+
+static void test_exec_event_ptrace(pid_t child, unsigned long address,
+				    int address_fd)
+{
+	struct user_regs_struct regs;
+	unsigned long event_msg;
+	long value;
+	int status;
+
+	TEST_ASSERT(ptrace(PTRACE_ATTACH, child, NULL, NULL) == 0,
+		    "PTRACE_ATTACH before exec failed: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() before exec failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status),
+		    "Ptraced exec child did not stop: %#x", status);
+	errno = 0;
+	value = ptrace(PTRACE_PEEKDATA, child, (void *)address, NULL);
+	TEST_ASSERT(value == -1 && errno == EIO,
+		    "PTRACE_PEEKDATA before exec returned %ld/%d, expected -1/%d",
+		    value, errno, EIO);
+	TEST_ASSERT(ptrace(PTRACE_SETOPTIONS, child, NULL,
+			   PTRACE_O_TRACEEXEC) == 0,
+		    "PTRACE_SETOPTIONS before exec failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL, NULL) == 0,
+		    "PTRACE_CONT to exec event failed: %d", errno);
+	TEST_ASSERT(write(address_fd, &address, sizeof(address)) == sizeof(address),
+		    "Failed to release exec-event target: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() at exec event failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP &&
+		    (unsigned int)status >> 16 == PTRACE_EVENT_EXEC,
+		    "Exec event produced unexpected status: %#x", status);
+	TEST_ASSERT(ptrace(PTRACE_GETEVENTMSG, child, NULL, &event_msg) == 0,
+		    "PTRACE_GETEVENTMSG at exec failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_GETREGS, child, NULL, &regs) == 0,
+		    "PTRACE_GETREGS at exec failed: %d", errno);
+	TEST_ASSERT(regs.rip, "Exec event has a zero RIP");
+	TEST_ASSERT(ptrace(PTRACE_DETACH, child, NULL, NULL) == 0,
+		    "PTRACE_DETACH after exec failed: %d", errno);
 }
 
 static void test_protected_exec(int kvm_fd)
@@ -1156,6 +1221,8 @@ static void test_protected_exec(int kvm_fd)
 		if (stage == 0)
 			test_hardware_breakpoint_ptrace(target, address,
 						 address_pipe[1]);
+		else if (i == 5)
+			test_exec_event_ptrace(target, address, address_pipe[1]);
 		else {
 			test_hidden_mapping_ptrace(target, address);
 			TEST_ASSERT(write(address_pipe[1], &address, sizeof(address)) == sizeof(address),
