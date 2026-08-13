@@ -2090,6 +2090,10 @@ static int db_interception(struct kvm_vcpu *vcpu)
 
 static int bp_interception(struct kvm_vcpu *vcpu)
 {
+	if (vcpu->kvm->protected_task &&
+	    !kvm_skip_emulated_instruction(vcpu))
+		return 1;
+
 	return svm_prepare_debug_exit(vcpu, BP_VECTOR, DR6_ACTIVE_LOW);
 }
 
