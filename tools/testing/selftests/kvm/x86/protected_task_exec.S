@@ -174,6 +174,15 @@ avxneconvert_message:
 avxvnniint16_message:
 	.ascii "protected task avxvnniint16\n"
 .set avxvnniint16_message_length, . - avxvnniint16_message
+sha512_message:
+	.ascii "protected task sha512\n"
+.set sha512_message_length, . - sha512_message
+sm3_message:
+	.ascii "protected task sm3\n"
+.set sm3_message_length, . - sm3_message
+sm4_message:
+	.ascii "protected task sm4\n"
+.set sm4_message_length, . - sm4_message
 
 	.balign 64
 initial_zmm15:
@@ -437,6 +446,15 @@ avxneconvert_available:
 	.long 0
 	.balign 4
 avxvnniint16_available:
+	.long 0
+	.balign 4
+sha512_available:
+	.long 0
+	.balign 4
+sm3_available:
+	.long 0
+	.balign 4
+sm4_available:
 	.long 0
 	.balign 4
 leaf7_max_subleaf:
@@ -856,6 +874,39 @@ _start:
 	cmp $avxvnniint16_message_length, %rax
 	jne 1f
 .Lcpu_profile_avxvnniint16_reported:
+	cmpl $0, sha512_available(%rip)
+	je .Lcpu_profile_sha512_reported
+	movl $169, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea sha512_message(%rip), %rsi
+	mov $sha512_message_length, %edx
+	syscall
+	cmp $sha512_message_length, %rax
+	jne 1f
+.Lcpu_profile_sha512_reported:
+	cmpl $0, sm3_available(%rip)
+	je .Lcpu_profile_sm3_reported
+	movl $170, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea sm3_message(%rip), %rsi
+	mov $sm3_message_length, %edx
+	syscall
+	cmp $sm3_message_length, %rax
+	jne 1f
+.Lcpu_profile_sm3_reported:
+	cmpl $0, sm4_available(%rip)
+	je .Lcpu_profile_sm4_reported
+	movl $171, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea sm4_message(%rip), %rsi
+	mov $sm4_message_length, %edx
+	syscall
+	cmp $sm4_message_length, %rax
+	jne 1f
+.Lcpu_profile_sm4_reported:
 	movl $124, failure_code(%rip)
 	call check_initial_shstk
 	test %eax, %eax
@@ -3243,6 +3294,9 @@ check_cpu_profile:
 	movl $0, avxvnniint8_available(%rip)
 	movl $0, avxneconvert_available(%rip)
 	movl $0, avxvnniint16_available(%rip)
+	movl $0, sha512_available(%rip)
+	movl $0, sm3_available(%rip)
+	movl $0, sm4_available(%rip)
 	movl $0, leaf7_max_subleaf(%rip)
 	movl $0, pku_available(%rip)
 	movl $0, lam_available(%rip)
@@ -3314,7 +3368,7 @@ check_cpu_profile:
 	and $~0x430, %r13d
 	jne 2f
 	mov %eax, %r13d
-	and $~0x4800030, %r13d
+	and $~0x4800037, %r13d
 	jne 2f
 	test $0x4000000, %eax
 	jz .Lcpu_profile_features_done
@@ -3523,6 +3577,21 @@ check_cpu_profile:
 	xor %r10d, %r10d
 	cmpl $0, avx_available(%rip)
 	je .Lcpu_leaf7_1_avx512bf16
+	test $0x1, %eax
+	jz .Lcpu_leaf7_1_sm3
+	movl $1, sha512_available(%rip)
+	or $0x1, %r13d
+.Lcpu_leaf7_1_sm3:
+	test $0x2, %eax
+	jz .Lcpu_leaf7_1_sm4
+	movl $1, sm3_available(%rip)
+	or $0x2, %r13d
+.Lcpu_leaf7_1_sm4:
+	test $0x4, %eax
+	jz .Lcpu_leaf7_1_avxvnni
+	movl $1, sm4_available(%rip)
+	or $0x4, %r13d
+.Lcpu_leaf7_1_avxvnni:
 	test $0x10, %eax
 	jz .Lcpu_leaf7_1_avxifma
 	movl $1, avxvnni_available(%rip)
@@ -4169,8 +4238,20 @@ check_cpu_profile:
 	vbcstnebf162ps initial_xmm(%rip), %ymm0
 .Lcpu_instruction_avxvnniint16:
 	cmpl $0, avxvnniint16_available(%rip)
-	je .Lcpu_instructions_done
+	je .Lcpu_instruction_sha512
 	vpdpwsud %ymm0, %ymm0, %ymm0
+.Lcpu_instruction_sha512:
+	cmpl $0, sha512_available(%rip)
+	je .Lcpu_instruction_sm3
+	vsha512msg1 %xmm0, %ymm0
+.Lcpu_instruction_sm3:
+	cmpl $0, sm3_available(%rip)
+	je .Lcpu_instruction_sm4
+	vsm3msg1 %xmm0, %xmm0, %xmm0
+.Lcpu_instruction_sm4:
+	cmpl $0, sm4_available(%rip)
+	je .Lcpu_instructions_done
+	{vex} vsm4rnds4 %ymm0, %ymm0, %ymm0
 .Lcpu_instructions_done:
 	xor %eax, %eax
 	pop %r13

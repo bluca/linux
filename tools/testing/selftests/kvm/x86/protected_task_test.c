@@ -110,6 +110,9 @@ struct protected_avx_features {
 	bool avxvnniint8;
 	bool avxneconvert;
 	bool avxvnniint16;
+	bool sha512;
+	bool sm3;
+	bool sm4;
 };
 
 static bool kvm_supported_xstate_component(
@@ -171,6 +174,9 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avx512vp2intersect = entry->edx & (1U << 8);
 			features.avx512fp16 = entry->edx & (1U << 23);
 		} else if (entry->function == 7 && entry->index == 1) {
+			features.sha512 = entry->eax & (1U << 0);
+			features.sm3 = entry->eax & (1U << 1);
+			features.sm4 = entry->eax & (1U << 2);
 			features.avxvnni = entry->eax & (1U << 4);
 			features.avx512bf16 = entry->eax & (1U << 5);
 			features.avxifma = entry->eax & (1U << 23);
@@ -205,7 +211,8 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		features.fma = features.f16c = features.avx2 =
 			features.avxvnni = features.avxifma =
 			features.avxvnniint8 = features.avxneconvert =
-			features.avxvnniint16 = false;
+			features.avxvnniint16 = features.sha512 =
+			features.sm3 = features.sm4 = false;
 	if (!features.avx512)
 		features.avx512dq = features.avx512ifma =
 			features.avx512pf = features.avx512er =
@@ -327,6 +334,15 @@ static void append_expected_avx_profile(
 	if (features->avxvnniint16)
 		append_expected_output(output, output_size, length,
 				       "protected task avxvnniint16\n");
+	if (features->sha512)
+		append_expected_output(output, output_size, length,
+				       "protected task sha512\n");
+	if (features->sm3)
+		append_expected_output(output, output_size, length,
+				       "protected task sm3\n");
+	if (features->sm4)
+		append_expected_output(output, output_size, length,
+				       "protected task sm4\n");
 }
 
 static void test_create_validation(int kvm_fd)
