@@ -120,6 +120,30 @@ avx512bw_message:
 avx512vl_message:
 	.ascii "protected task avx512vl\n"
 .set avx512vl_message_length, . - avx512vl_message
+avx512vbmi_message:
+	.ascii "protected task avx512vbmi\n"
+.set avx512vbmi_message_length, . - avx512vbmi_message
+avx512vbmi2_message:
+	.ascii "protected task avx512vbmi2\n"
+.set avx512vbmi2_message_length, . - avx512vbmi2_message
+gfni_message:
+	.ascii "protected task gfni\n"
+.set gfni_message_length, . - gfni_message
+vaes_message:
+	.ascii "protected task vaes\n"
+.set vaes_message_length, . - vaes_message
+vpclmulqdq_message:
+	.ascii "protected task vpclmulqdq\n"
+.set vpclmulqdq_message_length, . - vpclmulqdq_message
+avx512vnni_message:
+	.ascii "protected task avx512vnni\n"
+.set avx512vnni_message_length, . - avx512vnni_message
+avx512bitalg_message:
+	.ascii "protected task avx512bitalg\n"
+.set avx512bitalg_message_length, . - avx512bitalg_message
+avx512vpopcntdq_message:
+	.ascii "protected task avx512vpopcntdq\n"
+.set avx512vpopcntdq_message_length, . - avx512vpopcntdq_message
 
 	.balign 64
 initial_zmm15:
@@ -329,6 +353,30 @@ avx512bw_available:
 	.long 0
 	.balign 4
 avx512vl_available:
+	.long 0
+	.balign 4
+avx512vbmi_available:
+	.long 0
+	.balign 4
+avx512vbmi2_available:
+	.long 0
+	.balign 4
+gfni_available:
+	.long 0
+	.balign 4
+vaes_available:
+	.long 0
+	.balign 4
+vpclmulqdq_available:
+	.long 0
+	.balign 4
+avx512vnni_available:
+	.long 0
+	.balign 4
+avx512bitalg_available:
+	.long 0
+	.balign 4
+avx512vpopcntdq_available:
 	.long 0
 	.balign 4
 lam_available:
@@ -547,6 +595,94 @@ _start:
 	cmp $avx512vl_message_length, %rax
 	jne 1f
 .Lcpu_profile_avx512vl_reported:
+	cmpl $0, avx512vbmi_available(%rip)
+	je .Lcpu_profile_avx512vbmi_reported
+	movl $147, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx512vbmi_message(%rip), %rsi
+	mov $avx512vbmi_message_length, %edx
+	syscall
+	cmp $avx512vbmi_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx512vbmi_reported:
+	cmpl $0, avx512vbmi2_available(%rip)
+	je .Lcpu_profile_avx512vbmi2_reported
+	movl $148, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx512vbmi2_message(%rip), %rsi
+	mov $avx512vbmi2_message_length, %edx
+	syscall
+	cmp $avx512vbmi2_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx512vbmi2_reported:
+	cmpl $0, gfni_available(%rip)
+	je .Lcpu_profile_gfni_reported
+	movl $149, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea gfni_message(%rip), %rsi
+	mov $gfni_message_length, %edx
+	syscall
+	cmp $gfni_message_length, %rax
+	jne 1f
+.Lcpu_profile_gfni_reported:
+	cmpl $0, vaes_available(%rip)
+	je .Lcpu_profile_vaes_reported
+	movl $150, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea vaes_message(%rip), %rsi
+	mov $vaes_message_length, %edx
+	syscall
+	cmp $vaes_message_length, %rax
+	jne 1f
+.Lcpu_profile_vaes_reported:
+	cmpl $0, vpclmulqdq_available(%rip)
+	je .Lcpu_profile_vpclmulqdq_reported
+	movl $151, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea vpclmulqdq_message(%rip), %rsi
+	mov $vpclmulqdq_message_length, %edx
+	syscall
+	cmp $vpclmulqdq_message_length, %rax
+	jne 1f
+.Lcpu_profile_vpclmulqdq_reported:
+	cmpl $0, avx512vnni_available(%rip)
+	je .Lcpu_profile_avx512vnni_reported
+	movl $152, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx512vnni_message(%rip), %rsi
+	mov $avx512vnni_message_length, %edx
+	syscall
+	cmp $avx512vnni_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx512vnni_reported:
+	cmpl $0, avx512bitalg_available(%rip)
+	je .Lcpu_profile_avx512bitalg_reported
+	movl $153, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx512bitalg_message(%rip), %rsi
+	mov $avx512bitalg_message_length, %edx
+	syscall
+	cmp $avx512bitalg_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx512bitalg_reported:
+	cmpl $0, avx512vpopcntdq_available(%rip)
+	je .Lcpu_profile_avx512vpopcntdq_reported
+	movl $154, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx512vpopcntdq_message(%rip), %rsi
+	mov $avx512vpopcntdq_message_length, %edx
+	syscall
+	cmp $avx512vpopcntdq_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx512vpopcntdq_reported:
 	movl $124, failure_code(%rip)
 	call check_initial_shstk
 	test %eax, %eax
@@ -2916,6 +3052,14 @@ check_cpu_profile:
 	movl $0, avx512cd_available(%rip)
 	movl $0, avx512bw_available(%rip)
 	movl $0, avx512vl_available(%rip)
+	movl $0, avx512vbmi_available(%rip)
+	movl $0, avx512vbmi2_available(%rip)
+	movl $0, gfni_available(%rip)
+	movl $0, vaes_available(%rip)
+	movl $0, vpclmulqdq_available(%rip)
+	movl $0, avx512vnni_available(%rip)
+	movl $0, avx512bitalg_available(%rip)
+	movl $0, avx512vpopcntdq_available(%rip)
 	movl $0, pku_available(%rip)
 	movl $0, lam_available(%rip)
 	movl $0, shstk_available(%rip)
@@ -3111,8 +3255,50 @@ check_cpu_profile:
 	mov $0x18, %r13d
 .Lcpu_leaf7_shstk:
 	cmpl $0, shstk_available(%rip)
-	je .Lcpu_leaf7_ecx
+	je .Lcpu_leaf7_avx512vbmi
 	or $0x80, %r13d
+.Lcpu_leaf7_avx512vbmi:
+	cmpl $0, avx512_available(%rip)
+	je .Lcpu_leaf7_ecx
+	test $0x2, %ecx
+	jz .Lcpu_leaf7_avx512vbmi2
+	movl $1, avx512vbmi_available(%rip)
+	or $0x2, %r13d
+.Lcpu_leaf7_avx512vbmi2:
+	test $0x40, %ecx
+	jz .Lcpu_leaf7_gfni
+	movl $1, avx512vbmi2_available(%rip)
+	or $0x40, %r13d
+.Lcpu_leaf7_gfni:
+	test $0x100, %ecx
+	jz .Lcpu_leaf7_vaes
+	movl $1, gfni_available(%rip)
+	or $0x100, %r13d
+.Lcpu_leaf7_vaes:
+	test $0x200, %ecx
+	jz .Lcpu_leaf7_vpclmulqdq
+	movl $1, vaes_available(%rip)
+	or $0x200, %r13d
+.Lcpu_leaf7_vpclmulqdq:
+	test $0x400, %ecx
+	jz .Lcpu_leaf7_avx512vnni
+	movl $1, vpclmulqdq_available(%rip)
+	or $0x400, %r13d
+.Lcpu_leaf7_avx512vnni:
+	test $0x800, %ecx
+	jz .Lcpu_leaf7_avx512bitalg
+	movl $1, avx512vnni_available(%rip)
+	or $0x800, %r13d
+.Lcpu_leaf7_avx512bitalg:
+	test $0x1000, %ecx
+	jz .Lcpu_leaf7_avx512vpopcntdq
+	movl $1, avx512bitalg_available(%rip)
+	or $0x1000, %r13d
+.Lcpu_leaf7_avx512vpopcntdq:
+	test $0x4000, %ecx
+	jz .Lcpu_leaf7_ecx
+	movl $1, avx512vpopcntdq_available(%rip)
+	or $0x4000, %r13d
 .Lcpu_leaf7_ecx:
 	cmp %r13d, %ecx
 	jne 2f
@@ -3652,10 +3838,42 @@ check_cpu_profile:
 	vpaddb %zmm0, %zmm0, %zmm0
 .Lcpu_instruction_avx512vl:
 	cmpl $0, avx512vl_available(%rip)
-	je .Lcpu_instructions_done
+	je .Lcpu_instruction_avx512vbmi
 	vpxord %zmm0, %zmm0, %zmm0
 	kxnorw %k1, %k1, %k1
 	vaddps %ymm0, %ymm0, %ymm0{%k1}
+.Lcpu_instruction_avx512vbmi:
+	cmpl $0, avx512vbmi_available(%rip)
+	je .Lcpu_instruction_avx512vbmi2
+	vpermb %zmm0, %zmm0, %zmm0
+.Lcpu_instruction_avx512vbmi2:
+	cmpl $0, avx512vbmi2_available(%rip)
+	je .Lcpu_instruction_gfni
+	vpshldvd %zmm0, %zmm0, %zmm0
+.Lcpu_instruction_gfni:
+	cmpl $0, gfni_available(%rip)
+	je .Lcpu_instruction_vaes
+	vgf2p8mulb %ymm0, %ymm0, %ymm0
+.Lcpu_instruction_vaes:
+	cmpl $0, vaes_available(%rip)
+	je .Lcpu_instruction_vpclmulqdq
+	vaesenc %ymm0, %ymm0, %ymm0
+.Lcpu_instruction_vpclmulqdq:
+	cmpl $0, vpclmulqdq_available(%rip)
+	je .Lcpu_instruction_avx512vnni
+	vpclmulqdq $0, %ymm0, %ymm0, %ymm0
+.Lcpu_instruction_avx512vnni:
+	cmpl $0, avx512vnni_available(%rip)
+	je .Lcpu_instruction_avx512bitalg
+	vpdpbusd %zmm0, %zmm0, %zmm0
+.Lcpu_instruction_avx512bitalg:
+	cmpl $0, avx512bitalg_available(%rip)
+	je .Lcpu_instruction_avx512vpopcntdq
+	vpshufbitqmb %zmm0, %zmm0, %k1
+.Lcpu_instruction_avx512vpopcntdq:
+	cmpl $0, avx512vpopcntdq_available(%rip)
+	je .Lcpu_instructions_done
+	vpopcntd %zmm0, %zmm0
 .Lcpu_instructions_done:
 	xor %eax, %eax
 	pop %r13

@@ -92,6 +92,14 @@ struct protected_avx_features {
 	bool avx512cd;
 	bool avx512bw;
 	bool avx512vl;
+	bool avx512vbmi;
+	bool avx512vbmi2;
+	bool gfni;
+	bool vaes;
+	bool vpclmulqdq;
+	bool avx512vnni;
+	bool avx512bitalg;
+	bool avx512vpopcntdq;
 };
 
 static bool kvm_supported_xstate_component(
@@ -140,6 +148,14 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avx512cd = entry->ebx & (1U << 28);
 			features.avx512bw = entry->ebx & (1U << 30);
 			features.avx512vl = entry->ebx & (1U << 31);
+			features.avx512vbmi = entry->ecx & (1U << 1);
+			features.avx512vbmi2 = entry->ecx & (1U << 6);
+			features.gfni = entry->ecx & (1U << 8);
+			features.vaes = entry->ecx & (1U << 9);
+			features.vpclmulqdq = entry->ecx & (1U << 10);
+			features.avx512vnni = entry->ecx & (1U << 11);
+			features.avx512bitalg = entry->ecx & (1U << 12);
+			features.avx512vpopcntdq = entry->ecx & (1U << 14);
 		} else if (entry->function == 0xd && !entry->index) {
 			ymm = entry->eax & (1U << 2);
 			avx512_xstate = (entry->eax & (0xe0U)) == 0xe0U;
@@ -170,7 +186,11 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		features.avx512dq = features.avx512ifma =
 			features.avx512pf = features.avx512er =
 			features.avx512cd = features.avx512bw =
-			features.avx512vl = false;
+			features.avx512vl = features.avx512vbmi =
+			features.avx512vbmi2 = features.gfni =
+			features.vaes = features.vpclmulqdq =
+			features.avx512vnni = features.avx512bitalg =
+			features.avx512vpopcntdq = false;
 
 	return features;
 }
@@ -227,6 +247,30 @@ static void append_expected_avx_profile(
 	if (features->avx512vl)
 		append_expected_output(output, output_size, length,
 				       "protected task avx512vl\n");
+	if (features->avx512vbmi)
+		append_expected_output(output, output_size, length,
+				       "protected task avx512vbmi\n");
+	if (features->avx512vbmi2)
+		append_expected_output(output, output_size, length,
+				       "protected task avx512vbmi2\n");
+	if (features->gfni)
+		append_expected_output(output, output_size, length,
+				       "protected task gfni\n");
+	if (features->vaes)
+		append_expected_output(output, output_size, length,
+				       "protected task vaes\n");
+	if (features->vpclmulqdq)
+		append_expected_output(output, output_size, length,
+				       "protected task vpclmulqdq\n");
+	if (features->avx512vnni)
+		append_expected_output(output, output_size, length,
+				       "protected task avx512vnni\n");
+	if (features->avx512bitalg)
+		append_expected_output(output, output_size, length,
+				       "protected task avx512bitalg\n");
+	if (features->avx512vpopcntdq)
+		append_expected_output(output, output_size, length,
+				       "protected task avx512vpopcntdq\n");
 }
 
 static void test_create_validation(int kvm_fd)
