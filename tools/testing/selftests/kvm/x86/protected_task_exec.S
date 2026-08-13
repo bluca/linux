@@ -144,6 +144,9 @@ avx512bitalg_message:
 avx512vpopcntdq_message:
 	.ascii "protected task avx512vpopcntdq\n"
 .set avx512vpopcntdq_message_length, . - avx512vpopcntdq_message
+avx512bf16_message:
+	.ascii "protected task avx512bf16\n"
+.set avx512bf16_message_length, . - avx512bf16_message
 
 	.balign 64
 initial_zmm15:
@@ -377,6 +380,12 @@ avx512bitalg_available:
 	.long 0
 	.balign 4
 avx512vpopcntdq_available:
+	.long 0
+	.balign 4
+avx512bf16_available:
+	.long 0
+	.balign 4
+leaf7_max_subleaf:
 	.long 0
 	.balign 4
 lam_available:
@@ -683,6 +692,17 @@ _start:
 	cmp $avx512vpopcntdq_message_length, %rax
 	jne 1f
 .Lcpu_profile_avx512vpopcntdq_reported:
+	cmpl $0, avx512bf16_available(%rip)
+	je .Lcpu_profile_avx512bf16_reported
+	movl $155, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx512bf16_message(%rip), %rsi
+	mov $avx512bf16_message_length, %edx
+	syscall
+	cmp $avx512bf16_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx512bf16_reported:
 	movl $124, failure_code(%rip)
 	call check_initial_shstk
 	test %eax, %eax
@@ -3060,6 +3080,8 @@ check_cpu_profile:
 	movl $0, avx512vnni_available(%rip)
 	movl $0, avx512bitalg_available(%rip)
 	movl $0, avx512vpopcntdq_available(%rip)
+	movl $0, avx512bf16_available(%rip)
+	movl $0, leaf7_max_subleaf(%rip)
 	movl $0, pku_available(%rip)
 	movl $0, lam_available(%rip)
 	movl $0, shstk_available(%rip)
@@ -3128,10 +3150,11 @@ check_cpu_profile:
 	jne 2f
 	test %edx, %edx
 	jne 2f
-	test %eax, %eax
-	je .Lcpu_profile_features_done
-	cmp $0x4000000, %eax
+	mov %eax, %r13d
+	and $~0x4000020, %r13d
 	jne 2f
+	test $0x4000000, %eax
+	jz .Lcpu_profile_features_done
 	movl $1, lam_available(%rip)
 .Lcpu_profile_features_done:
 	mov $1, %r13d
@@ -3197,9 +3220,7 @@ check_cpu_profile:
 	mov $7, %eax
 	xor %ecx, %ecx
 	cpuid
-	mov lam_available(%rip), %r12d
-	cmp %r12d, %eax
-	jne 2f
+	mov %eax, leaf7_max_subleaf(%rip)
 	xor %r13d, %r13d
 	cmpl $0, avx_available(%rip)
 	je .Lcpu_leaf7_ebx
@@ -3310,14 +3331,33 @@ check_cpu_profile:
 	mov $7, %eax
 	mov $1, %ecx
 	cpuid
-	mov lam_available(%rip), %r12d
-	shl $26, %r12d
-	cmp %r12d, %eax
+	xor %r13d, %r13d
+	cmpl $0, avx512_available(%rip)
+	je .Lcpu_leaf7_1_lam
+	test $0x20, %eax
+	jz .Lcpu_leaf7_1_lam
+	movl $1, avx512bf16_available(%rip)
+	or $0x20, %r13d
+.Lcpu_leaf7_1_lam:
+	cmpl $0, lam_available(%rip)
+	je .Lcpu_leaf7_1_eax
+	or $0x4000000, %r13d
+.Lcpu_leaf7_1_eax:
+	cmp %r13d, %eax
 	jne 2f
+	mov $156, %r11d
+	xor %r12d, %r12d
+	test %r13d, %r13d
+	setne %r12b
+	cmp %r12d, leaf7_max_subleaf(%rip)
+	jne 2f
+	mov $157, %r11d
 	test %ebx, %ebx
 	jne 2f
+	mov $158, %r11d
 	test %ecx, %ecx
 	jne 2f
+	mov $159, %r11d
 	test %edx, %edx
 	jne 2f
 	cmpl $0, avx_available(%rip)
@@ -3872,8 +3912,12 @@ check_cpu_profile:
 	vpshufbitqmb %zmm0, %zmm0, %k1
 .Lcpu_instruction_avx512vpopcntdq:
 	cmpl $0, avx512vpopcntdq_available(%rip)
-	je .Lcpu_instructions_done
+	je .Lcpu_instruction_avx512bf16
 	vpopcntd %zmm0, %zmm0
+.Lcpu_instruction_avx512bf16:
+	cmpl $0, avx512bf16_available(%rip)
+	je .Lcpu_instructions_done
+	vdpbf16ps %zmm0, %zmm0, %zmm0
 .Lcpu_instructions_done:
 	xor %eax, %eax
 	pop %r13
