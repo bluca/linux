@@ -139,6 +139,12 @@ struct protected_avx_features {
 	bool sha512;
 	bool sm3;
 	bool sm4;
+	bool pku;
+	__u32 ymm_offset;
+	__u32 opmask_offset;
+	__u32 zmm_hi256_offset;
+	__u32 hi16_zmm_offset;
+	__u32 pkru_offset;
 };
 
 static bool kvm_supported_xstate_component(
@@ -161,7 +167,9 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 	struct protected_avx_features features = {};
 	bool avx = false, avx512 = false, avx512_xstate = false;
 	bool hi16_zmm = false, opmask = false, ymm = false;
+	bool pku = false, pkru_component = false, xsave = false;
 	bool ymm_component = false, zmm_hi256 = false;
+	__u32 xfeatures = 0;
 	__u32 hi16_zmm_end = 0, opmask_end = 0, ymm_end = 0;
 	__u32 zmm_hi256_end = 0;
 	unsigned int i;
@@ -182,6 +190,7 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.popcnt = entry->ecx & (1U << 23);
 			features.aes = entry->ecx & (1U << 25);
 			features.rdrand = entry->ecx & (1U << 30);
+			xsave = entry->ecx & (1U << 26);
 			avx = (entry->ecx & ((1U << 26) | (1U << 28))) ==
 				((1U << 26) | (1U << 28));
 			features.fma = entry->ecx & (1U << 12);
@@ -212,6 +221,7 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avx512bitalg = entry->ecx & (1U << 12);
 			features.avx512vpopcntdq = entry->ecx & (1U << 14);
 			features.rdpid = entry->ecx & (1U << 22);
+			pku = entry->ecx & (1U << 3);
 			features.avx5124vnniw = entry->edx & (1U << 2);
 			features.avx5124fmaps = entry->edx & (1U << 3);
 			features.avx512vp2intersect = entry->edx & (1U << 8);
@@ -233,20 +243,28 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		} else if (entry->function == 0x80000008) {
 			features.clzero = entry->ebx & (1U << 0);
 		} else if (entry->function == 0xd && !entry->index) {
+			xfeatures = entry->eax;
 			ymm = entry->eax & (1U << 2);
 			avx512_xstate = (entry->eax & (0xe0U)) == 0xe0U;
 		} else if (entry->function == 0xd && entry->index == 2) {
 			ymm_component = kvm_supported_xstate_component(entry, 256,
 								 &ymm_end);
+			features.ymm_offset = entry->ebx;
 		} else if (entry->function == 0xd && entry->index == 5) {
 			opmask = kvm_supported_xstate_component(entry, 64,
 							       &opmask_end);
+			features.opmask_offset = entry->ebx;
 		} else if (entry->function == 0xd && entry->index == 6) {
 			zmm_hi256 = kvm_supported_xstate_component(entry, 512,
 								  &zmm_hi256_end);
+			features.zmm_hi256_offset = entry->ebx;
 		} else if (entry->function == 0xd && entry->index == 7) {
 			hi16_zmm = kvm_supported_xstate_component(entry, 1024,
 								 &hi16_zmm_end);
+			features.hi16_zmm_offset = entry->ebx;
+		} else if (entry->function == 0xd && entry->index == 9) {
+			pkru_component = entry->eax && entry->ebx >= 576;
+			features.pkru_offset = entry->ebx;
 		}
 	}
 
@@ -256,6 +274,8 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		opmask_end - 64 >= ymm_end &&
 		zmm_hi256_end - 512 >= opmask_end &&
 		hi16_zmm_end - 1024 >= zmm_hi256_end;
+	features.pku = xsave && pku && (xfeatures & (1U << 9)) &&
+		pkru_component;
 	if (!features.avx)
 		features.fma = features.f16c = features.avx2 =
 			features.gfni = features.vaes = features.vpclmulqdq =
@@ -825,7 +845,8 @@ static void test_hidden_mapping_ptrace(pid_t child, unsigned long address)
 }
 
 static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
-					    int address_fd)
+					    int address_fd,
+					    const struct protected_avx_features *features)
 {
 	const unsigned long sentinel = 0x0123456789abcdef;
 	const unsigned char xmm_sentinel[16] = {
@@ -835,12 +856,16 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	const size_t xstate_bv_offset = 512;
 	const size_t xmm15_offset =
 		offsetof(struct user_fpregs_struct, xmm_space) + 15 * 16;
+	const size_t mxcsr_offset = offsetof(struct user_fpregs_struct, mxcsr);
 	unsigned int eax, ebx, xstate_capacity, edx;
 	struct user_regs_struct regs;
 	struct ptrace_syscall_info syscall_info;
-	unsigned char *expected_xstate, *xstate;
+	unsigned char *expected_xstate, *original_xstate, *xstate;
 	unsigned long breakpoint_rip, event_child;
+	__u64 opmask = 0x5aa5;
 	__u64 xstate_bv;
+	__u32 mxcsr = 0x5f80, pkru = 3U << 30;
+	__u16 fcw = 0x077f;
 	struct iovec iov;
 	size_t xstate_size;
 	siginfo_t siginfo;
@@ -852,7 +877,9 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		    "Invalid xstate buffer size: %u", xstate_capacity);
 	xstate = malloc(xstate_capacity);
 	expected_xstate = malloc(xstate_capacity);
-	TEST_ASSERT(xstate && expected_xstate, "Failed to allocate xstate buffers");
+	original_xstate = malloc(xstate_capacity);
+	TEST_ASSERT(xstate && expected_xstate && original_xstate,
+		    "Failed to allocate xstate buffers");
 
 	TEST_ASSERT(ptrace(PTRACE_ATTACH, child, NULL, NULL) == 0,
 		    "PTRACE_ATTACH failed: %d", errno);
@@ -880,10 +907,39 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		    "NT_X86_XSTATE is too short: %zu", xstate_size);
 	TEST_ASSERT(xstate_size >= xstate_bv_offset + sizeof(xstate_bv),
 		    "NT_X86_XSTATE has no header: %zu", xstate_size);
+	memcpy(original_xstate, xstate, xstate_size);
 	memcpy(&xstate_bv, xstate + xstate_bv_offset, sizeof(xstate_bv));
-	xstate_bv |= 1ULL << 1;
+	xstate_bv |= 3;
 	memcpy(xstate + xstate_bv_offset, &xstate_bv, sizeof(xstate_bv));
+	memcpy(xstate, &fcw, sizeof(fcw));
+	memcpy(xstate + mxcsr_offset, &mxcsr, sizeof(mxcsr));
 	memcpy(xstate + xmm15_offset, xmm_sentinel, sizeof(xmm_sentinel));
+	if (features->avx) {
+		TEST_ASSERT(xstate_size >= features->ymm_offset + 256,
+			    "NT_X86_XSTATE has no YMM component: %zu", xstate_size);
+		xstate_bv |= 1ULL << 2;
+		memset(xstate + features->ymm_offset + 15 * 16, 0xa5, 16);
+	}
+	if (features->avx512) {
+		TEST_ASSERT(xstate_size >= features->opmask_offset + 64 &&
+			    xstate_size >= features->zmm_hi256_offset + 512 &&
+			    xstate_size >= features->hi16_zmm_offset + 1024,
+			    "NT_X86_XSTATE has incomplete AVX-512 state: %zu",
+			    xstate_size);
+		xstate_bv |= 0xe0;
+		memcpy(xstate + features->opmask_offset + 7 * 8,
+		       &opmask, sizeof(opmask));
+		memset(xstate + features->zmm_hi256_offset + 15 * 32, 0x3c, 32);
+		memset(xstate + features->hi16_zmm_offset + 15 * 64, 0xc3, 64);
+	}
+	if (features->pku) {
+		TEST_ASSERT(xstate_size >= features->pkru_offset + sizeof(pkru),
+			    "NT_X86_XSTATE has no PKRU component: %zu", xstate_size);
+		xstate_bv |= 1ULL << 9;
+		memcpy(xstate + features->pkru_offset, &pkru, sizeof(pkru));
+	}
+	memcpy(xstate + xstate_bv_offset, &xstate_bv, sizeof(xstate_bv));
+	memcpy(expected_xstate, xstate, xstate_size);
 	TEST_ASSERT(ptrace(PTRACE_SETREGSET, child, (void *)NT_X86_XSTATE,
 			   &iov) == 0,
 		    "PTRACE_SETREGSET NT_X86_XSTATE failed: %d", errno);
@@ -894,9 +950,8 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	TEST_ASSERT(iov.iov_len == xstate_size,
 		    "NT_X86_XSTATE size changed from %zu to %zu",
 		    xstate_size, iov.iov_len);
-	TEST_ASSERT(!memcmp(xstate + xmm15_offset, xmm_sentinel,
-			    sizeof(xmm_sentinel)),
-		    "PTRACE_SETREGSET did not update XMM15");
+	TEST_ASSERT(!memcmp(xstate, expected_xstate, xstate_size),
+		    "PTRACE_SETREGSET did not update complete xstate");
 	memcpy(expected_xstate, xstate, xstate_size);
 	breakpoint_rip = regs.rip;
 	regs.r15 = sentinel;
@@ -988,6 +1043,19 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		    "NT_X86_XSTATE size changed after single-step: %zu", iov.iov_len);
 	TEST_ASSERT(!memcmp(xstate, expected_xstate, xstate_size),
 		    "NT_X86_XSTATE changed after single-step");
+	iov.iov_base = original_xstate;
+	iov.iov_len = xstate_size;
+	TEST_ASSERT(ptrace(PTRACE_SETREGSET, child, (void *)NT_X86_XSTATE,
+			   &iov) == 0,
+		    "PTRACE_SETREGSET xstate restore failed: %d", errno);
+	iov.iov_base = xstate;
+	iov.iov_len = xstate_capacity;
+	TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_XSTATE,
+			   &iov) == 0,
+		    "PTRACE_GETREGSET after xstate restore failed: %d", errno);
+	TEST_ASSERT(iov.iov_len == xstate_size &&
+		    !memcmp(xstate, original_xstate, xstate_size),
+		    "PTRACE_SETREGSET did not restore complete xstate");
 	TEST_ASSERT(ptrace(PTRACE_SYSCALL, child, NULL, NULL) == 0,
 		    "PTRACE_SYSCALL to entry failed: %d", errno);
 	TEST_ASSERT(waitpid(child, &status, 0) == child,
@@ -1065,6 +1133,7 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	TEST_ASSERT(ptrace(PTRACE_DETACH, child, NULL, NULL) == 0,
 		    "PTRACE_DETACH failed: %d", errno);
 	free(expected_xstate);
+	free(original_xstate);
 	free(xstate);
 }
 
@@ -1220,7 +1289,7 @@ static void test_protected_exec(int kvm_fd)
 		}
 		if (stage == 0)
 			test_hardware_breakpoint_ptrace(target, address,
-						 address_pipe[1]);
+						 address_pipe[1], &features);
 		else if (i == 5)
 			test_exec_event_ptrace(target, address, address_pipe[1]);
 		else {
