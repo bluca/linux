@@ -53,7 +53,7 @@
 #define KVM_PT_CPUID_7_ECX_SHSTK BIT(7)
 #define KVM_PT_CPUID_7_EDX_AVX512 (BIT(2) | BIT(3) | BIT(8) | BIT(23))
 #define KVM_PT_CPUID_7_EDX_AMX_TILE BIT(24)
-#define KVM_PT_CPUID_7_1_EAX_AVX (BIT(4) | BIT(23))
+#define KVM_PT_CPUID_7_1_EAX_YMM (BIT(0) | BIT(1) | BIT(2) | BIT(4) | BIT(23))
 #define KVM_PT_CPUID_7_1_EAX_AVX512_BF16 BIT(5)
 #define KVM_PT_CPUID_7_1_EAX_LAM BIT(26)
 #define KVM_PT_CPUID_7_1_EDX_AVX (BIT(4) | BIT(5) | BIT(10))
@@ -102,7 +102,7 @@ static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_7_0_edx = {
 };
 
 static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_7_1_eax = {
-	.ymm = KVM_PT_CPUID_7_1_EAX_AVX,
+	.ymm = KVM_PT_CPUID_7_1_EAX_YMM,
 	.zmm = KVM_PT_CPUID_7_1_EAX_AVX512_BF16,
 };
 
