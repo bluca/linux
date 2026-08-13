@@ -246,6 +246,27 @@ sm3_message:
 sm4_message:
 	.ascii "protected task sm4\n"
 .set sm4_message_length, . - sm4_message
+avx10_v1_message:
+	.ascii "protected task avx10_v1\n"
+.set avx10_v1_message_length, . - avx10_v1_message
+avx10_v2_message:
+	.ascii "protected task avx10_v2\n"
+.set avx10_v2_message_length, . - avx10_v2_message
+avx10_vnni_int_message:
+	.ascii "protected task avx10_vnni_int\n"
+.set avx10_vnni_int_message_length, . - avx10_vnni_int_message
+amx_bf16_message:
+	.ascii "protected task amx_bf16\n"
+.set amx_bf16_message_length, . - amx_bf16_message
+amx_int8_message:
+	.ascii "protected task amx_int8\n"
+.set amx_int8_message_length, . - amx_int8_message
+amx_fp16_message:
+	.ascii "protected task amx_fp16\n"
+.set amx_fp16_message_length, . - amx_fp16_message
+amx_complex_message:
+	.ascii "protected task amx_complex\n"
+.set amx_complex_message_length, . - amx_complex_message
 
 	.balign 64
 initial_zmm15:
@@ -594,6 +615,27 @@ sm3_available:
 	.long 0
 	.balign 4
 sm4_available:
+	.long 0
+	.balign 4
+avx10_available:
+	.long 0
+	.balign 4
+avx10_version:
+	.long 0
+	.balign 4
+avx10_vnni_int_available:
+	.long 0
+	.balign 4
+amx_bf16_available:
+	.long 0
+	.balign 4
+amx_int8_available:
+	.long 0
+	.balign 4
+amx_fp16_available:
+	.long 0
+	.balign 4
+amx_complex_available:
 	.long 0
 	.balign 4
 leaf7_max_subleaf:
@@ -1277,6 +1319,83 @@ _start:
 	cmp $sm4_message_length, %rax
 	jne 1f
 .Lcpu_profile_sm4_reported:
+	cmpl $1, avx10_version(%rip)
+	jne .Lcpu_profile_avx10_v1_reported
+	movl $207, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx10_v1_message(%rip), %rsi
+	mov $avx10_v1_message_length, %edx
+	syscall
+	cmp $avx10_v1_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx10_v1_reported:
+	cmpl $2, avx10_version(%rip)
+	jne .Lcpu_profile_avx10_v2_reported
+	movl $208, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx10_v2_message(%rip), %rsi
+	mov $avx10_v2_message_length, %edx
+	syscall
+	cmp $avx10_v2_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx10_v2_reported:
+	cmpl $0, avx10_vnni_int_available(%rip)
+	je .Lcpu_profile_avx10_vnni_int_reported
+	movl $209, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx10_vnni_int_message(%rip), %rsi
+	mov $avx10_vnni_int_message_length, %edx
+	syscall
+	cmp $avx10_vnni_int_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx10_vnni_int_reported:
+	cmpl $0, amx_bf16_available(%rip)
+	je .Lcpu_profile_amx_bf16_reported
+	movl $210, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea amx_bf16_message(%rip), %rsi
+	mov $amx_bf16_message_length, %edx
+	syscall
+	cmp $amx_bf16_message_length, %rax
+	jne 1f
+.Lcpu_profile_amx_bf16_reported:
+	cmpl $0, amx_int8_available(%rip)
+	je .Lcpu_profile_amx_int8_reported
+	movl $211, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea amx_int8_message(%rip), %rsi
+	mov $amx_int8_message_length, %edx
+	syscall
+	cmp $amx_int8_message_length, %rax
+	jne 1f
+.Lcpu_profile_amx_int8_reported:
+	cmpl $0, amx_fp16_available(%rip)
+	je .Lcpu_profile_amx_fp16_reported
+	movl $212, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea amx_fp16_message(%rip), %rsi
+	mov $amx_fp16_message_length, %edx
+	syscall
+	cmp $amx_fp16_message_length, %rax
+	jne 1f
+.Lcpu_profile_amx_fp16_reported:
+	cmpl $0, amx_complex_available(%rip)
+	je .Lcpu_profile_amx_complex_reported
+	movl $213, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea amx_complex_message(%rip), %rsi
+	mov $amx_complex_message_length, %edx
+	syscall
+	cmp $amx_complex_message_length, %rax
+	jne 1f
+.Lcpu_profile_amx_complex_reported:
 	movl $124, failure_code(%rip)
 	call check_initial_shstk
 	test %eax, %eax
@@ -2628,6 +2747,10 @@ check_amx_tiledata:
 	mov $128, %ecx
 	repe cmpsq
 	jne .Lamx_tiledata_fail
+	mov %r8, %rdi
+	call check_amx_compute
+	test %eax, %eax
+	jne .Lamx_tiledata_fail
 .Lamx_tiledata_success:
 	xor %eax, %eax
 	ret
@@ -2635,6 +2758,49 @@ check_amx_tiledata:
 	mov $1, %eax
 	ret
 	.size check_amx_tiledata, . - check_amx_tiledata
+
+	.type check_amx_compute, @function
+check_amx_compute:
+	cmpl $0, amx_bf16_available(%rip)
+	jne .Lamx_compute
+	cmpl $0, amx_int8_available(%rip)
+	jne .Lamx_compute
+	cmpl $0, amx_fp16_available(%rip)
+	jne .Lamx_compute
+	cmpl $0, amx_complex_available(%rip)
+	je .Lamx_compute_success
+.Lamx_compute:
+	push %r12
+	mov %rdi, %r12
+	mov %r12, %rax
+	mov $64, %edx
+	tileloadd (%rax,%rdx,1), %tmm1
+	tileloadd (%rax,%rdx,1), %tmm2
+	cmpl $0, amx_bf16_available(%rip)
+	je .Lamx_compute_int8
+	tdpbf16ps %tmm1, %tmm2, %tmm0
+.Lamx_compute_int8:
+	cmpl $0, amx_int8_available(%rip)
+	je .Lamx_compute_fp16
+	tdpbssd %tmm1, %tmm2, %tmm0
+.Lamx_compute_fp16:
+	cmpl $0, amx_fp16_available(%rip)
+	je .Lamx_compute_complex
+	tdpfp16ps %tmm1, %tmm2, %tmm0
+.Lamx_compute_complex:
+	cmpl $0, amx_complex_available(%rip)
+	je .Lamx_compute_restore
+	tcmmimfp16ps %tmm1, %tmm2, %tmm0
+.Lamx_compute_restore:
+	mov %r12, %rax
+	tileloadd (%rax,%rdx,1), %tmm0
+	tilezero %tmm1
+	tilezero %tmm2
+	pop %r12
+.Lamx_compute_success:
+	xor %eax, %eax
+	ret
+	.size check_amx_compute, . - check_amx_compute
 
 	.type check_amx_caller_saved, @function
 check_amx_caller_saved:
@@ -3869,6 +4035,13 @@ check_cpu_profile:
 	movl $0, sha512_available(%rip)
 	movl $0, sm3_available(%rip)
 	movl $0, sm4_available(%rip)
+	movl $0, avx10_available(%rip)
+	movl $0, avx10_version(%rip)
+	movl $0, avx10_vnni_int_available(%rip)
+	movl $0, amx_bf16_available(%rip)
+	movl $0, amx_int8_available(%rip)
+	movl $0, amx_fp16_available(%rip)
+	movl $0, amx_complex_available(%rip)
 	movl $0, leaf7_max_subleaf(%rip)
 	movl $0, pku_available(%rip)
 	movl $0, lam_available(%rip)
@@ -3946,6 +4119,10 @@ check_cpu_profile:
 	cmp $7, %eax
 	je .Lcpu_detect_extended_features
 	cmp $0xd, %eax
+	je .Lcpu_detect_extended_features
+	cmp $0x1e, %eax
+	je .Lcpu_detect_extended_features
+	cmp $0x24, %eax
 	jne 2f
 .Lcpu_detect_extended_features:
 	mov $105, %r11d
@@ -3964,9 +4141,17 @@ check_cpu_profile:
 	jz .Lcpu_detect_amx
 	movl $1, shstk_available(%rip)
 .Lcpu_detect_amx:
+	test $0x400000, %edx
+	jz .Lcpu_detect_amx_tile
+	movl $1, amx_bf16_available(%rip)
+.Lcpu_detect_amx_tile:
 	test $0x1000000, %edx
-	jz .Lcpu_detect_lam
+	jz .Lcpu_detect_amx_int8
 	movl $1, amx_available(%rip)
+.Lcpu_detect_amx_int8:
+	test $0x2000000, %edx
+	jz .Lcpu_detect_lam
+	movl $1, amx_int8_available(%rip)
 .Lcpu_detect_lam:
 	mov $108, %r11d
 	mov $7, %eax
@@ -3976,20 +4161,37 @@ check_cpu_profile:
 	jne 2f
 	test %ecx, %ecx
 	jne 2f
+	test $0x100, %edx
+	jz .Lcpu_detect_avx10
+	movl $1, amx_complex_available(%rip)
+.Lcpu_detect_avx10:
+	test $0x80000, %edx
+	jz .Lcpu_detect_leaf7_1_edx
+	movl $1, avx10_available(%rip)
+.Lcpu_detect_leaf7_1_edx:
 	mov %edx, %r13d
-	and $~0x430, %r13d
+	and $~0x80530, %r13d
 	jne 2f
+	test $0x200000, %eax
+	jz .Lcpu_detect_leaf7_1_eax
+	movl $1, amx_fp16_available(%rip)
+.Lcpu_detect_leaf7_1_eax:
 	mov %eax, %r13d
-	and $~0x4800037, %r13d
+	and $~0x4a00037, %r13d
 	jne 2f
 	test $0x4000000, %eax
 	jz .Lcpu_profile_features_done
 	movl $1, lam_available(%rip)
 .Lcpu_profile_features_done:
 	mov $1, %r13d
+	cmpl $0, avx10_available(%rip)
+	je .Lcpu_profile_no_avx10
+	mov $0x24, %r13d
+	jmp .Lcpu_profile_check_max
+.Lcpu_profile_no_avx10:
 	cmpl $0, amx_available(%rip)
 	je .Lcpu_profile_no_amx
-	mov $0x1d, %r13d
+	mov $0x1e, %r13d
 	jmp .Lcpu_profile_check_max
 .Lcpu_profile_no_amx:
 	cmpl $0, avx_available(%rip)
@@ -4273,6 +4475,13 @@ check_cpu_profile:
 	cmpl $0, amx_available(%rip)
 	je .Lcpu_leaf7_edx
 	or $0x1000000, %r13d
+	cmpl $0, amx_bf16_available(%rip)
+	je .Lcpu_leaf7_amx_int8
+	or $0x400000, %r13d
+.Lcpu_leaf7_amx_int8:
+	cmpl $0, amx_int8_available(%rip)
+	je .Lcpu_leaf7_edx
+	or $0x2000000, %r13d
 .Lcpu_leaf7_edx:
 	cmp %r13d, %edx
 	jne 2f
@@ -4331,6 +4540,10 @@ check_cpu_profile:
 	movl $1, avx512bf16_available(%rip)
 	or $0x20, %r13d
 .Lcpu_leaf7_1_lam:
+	cmpl $0, amx_fp16_available(%rip)
+	je .Lcpu_leaf7_1_lam_check
+	or $0x200000, %r13d
+.Lcpu_leaf7_1_lam_check:
 	cmpl $0, lam_available(%rip)
 	je .Lcpu_leaf7_1_eax
 	or $0x4000000, %r13d
@@ -4351,6 +4564,14 @@ check_cpu_profile:
 	test %ecx, %ecx
 	jne 2f
 	mov $159, %r11d
+	cmpl $0, amx_complex_available(%rip)
+	je .Lcpu_leaf7_1_avx10
+	or $0x100, %r10d
+.Lcpu_leaf7_1_avx10:
+	cmpl $0, avx10_available(%rip)
+	je .Lcpu_leaf7_1_edx
+	or $0x80000, %r10d
+.Lcpu_leaf7_1_edx:
 	cmp %r10d, %edx
 	jne 2f
 	cmpl $0, avx_available(%rip)
@@ -4673,7 +4894,7 @@ check_cpu_profile:
 	jne 2f
 .Lcpu_check_amx_palette:
 	cmpl $0, amx_available(%rip)
-	je .Lcpu_extended
+	je .Lcpu_check_avx10
 	mov $127, %r11d
 	mov $0x1d, %eax
 	xor %ecx, %ecx
@@ -4705,6 +4926,101 @@ check_cpu_profile:
 	test %ebx, %ebx
 	jne 2f
 	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov $214, %r11d
+	mov $0x1e, %eax
+	xor %ecx, %ecx
+	cpuid
+	cmp $1, %eax
+	ja 2f
+	mov %eax, %r12d
+	cmp $0x4010, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov $0x1e, %eax
+	mov $1, %ecx
+	cpuid
+	xor %r13d, %r13d
+	test %r12d, %r12d
+	jz .Lcpu_check_amx_aliases
+	cmpl $0, amx_int8_available(%rip)
+	je .Lcpu_check_amx_alias_bf16
+	or $0x1, %r13d
+.Lcpu_check_amx_alias_bf16:
+	cmpl $0, amx_bf16_available(%rip)
+	je .Lcpu_check_amx_alias_complex
+	or $0x2, %r13d
+.Lcpu_check_amx_alias_complex:
+	cmpl $0, amx_complex_available(%rip)
+	je .Lcpu_check_amx_alias_fp16
+	or $0x4, %r13d
+.Lcpu_check_amx_alias_fp16:
+	cmpl $0, amx_fp16_available(%rip)
+	je .Lcpu_check_amx_aliases
+	or $0x8, %r13d
+.Lcpu_check_amx_aliases:
+	cmp %r13d, %eax
+	jne 2f
+	test %ebx, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+
+.Lcpu_check_avx10:
+	cmpl $0, avx10_available(%rip)
+	je .Lcpu_extended
+	mov $215, %r11d
+	mov $0x24, %eax
+	xor %ecx, %ecx
+	cpuid
+	cmp $1, %eax
+	ja 2f
+	mov %eax, %r12d
+	mov %ebx, %r13d
+	and $0xff, %r13d
+	cmp $1, %r13d
+	jb 2f
+	cmp $2, %r13d
+	ja 2f
+	cmp $2, %r13d
+	jne .Lcpu_avx10_version_ready
+	cmp $1, %r12d
+	jne 2f
+.Lcpu_avx10_version_ready:
+	mov %r13d, avx10_version(%rip)
+	or $0x70000, %r13d
+	cmp %r13d, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov $0x24, %eax
+	mov $1, %ecx
+	cpuid
+	test %r12d, %r12d
+	jz .Lcpu_avx10_no_subleaf
+	mov %ecx, %r13d
+	and $~0x4, %r13d
+	jne 2f
+	test $0x4, %ecx
+	jz .Lcpu_avx10_subleaf_regs
+	movl $1, avx10_vnni_int_available(%rip)
+	jmp .Lcpu_avx10_subleaf_regs
+.Lcpu_avx10_no_subleaf:
+	test %ecx, %ecx
+	jne 2f
+.Lcpu_avx10_subleaf_regs:
+	test %eax, %eax
+	jne 2f
+	test %ebx, %ebx
 	jne 2f
 	test %edx, %edx
 	jne 2f
@@ -4996,8 +5312,18 @@ check_cpu_profile:
 	vsm3msg1 %xmm0, %xmm0, %xmm0
 .Lcpu_instruction_sm4:
 	cmpl $0, sm4_available(%rip)
-	je .Lcpu_instruction_sse3
+	je .Lcpu_instruction_avx10
 	{vex} vsm4rnds4 %ymm0, %ymm0, %ymm0
+.Lcpu_instruction_avx10:
+	cmpl $0, avx10_available(%rip)
+	je .Lcpu_instruction_sse3
+	kxnorw %k1, %k1, %k1
+	vaddps %xmm0, %xmm0, %xmm0{%k1}
+	vaddps %ymm0, %ymm0, %ymm0{%k1}
+	vaddps %zmm0, %zmm0, %zmm0{%k1}
+	cmpl $0, avx10_vnni_int_available(%rip)
+	je .Lcpu_instruction_sse3
+	vpdpbsud %zmm0, %zmm0, %zmm0
 .Lcpu_instruction_sse3:
 	cmpl $0, sse3_available(%rip)
 	je .Lcpu_instruction_pclmulqdq

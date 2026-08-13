@@ -140,9 +140,16 @@ struct protected_avx_features {
 	bool sha512;
 	bool sm3;
 	bool sm4;
+	bool avx10;
+	bool avx10_vnni_int;
+	bool amx_bf16;
+	bool amx_int8;
+	bool amx_fp16;
+	bool amx_complex;
 	bool pku;
 	bool amx;
 	bool shstk;
+	__u8 avx10_version;
 	__u32 ymm_offset;
 	__u32 opmask_offset;
 	__u32 zmm_hi256_offset;
@@ -171,9 +178,11 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		.nent = 256,
 	};
 	struct protected_avx_features features = {};
+	struct kvm_cpuid_entry2 avx10_0 = {}, avx10_1 = {};
 	bool avx = false, avx512 = false, avx512_xstate = false;
+	bool avx10 = false, have_avx10_0 = false, have_avx10_1 = false;
 	bool amx_controls = false, amx_palette0 = false, amx_palette1 = false;
-	bool amx_tile = false, tilecfg = false, tiledata = false;
+	bool amx_tile = false, amx_tmul = false, tilecfg = false, tiledata = false;
 	bool hi16_zmm = false, opmask = false, ymm = false;
 	bool pku = false, pkru_component = false, xsave = false;
 	bool shstk = false, shstk_component = false, shstk_controls = false;
@@ -236,7 +245,9 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avx5124fmaps = entry->edx & (1U << 3);
 			features.avx512vp2intersect = entry->edx & (1U << 8);
 			features.avx512fp16 = entry->edx & (1U << 23);
+			features.amx_bf16 = entry->edx & (1U << 22);
 			amx_tile = entry->edx & (1U << 24);
+			features.amx_int8 = entry->edx & (1U << 25);
 		} else if (entry->function == 7 && entry->index == 1) {
 			features.sha512 = entry->eax & (1U << 0);
 			features.sm3 = entry->eax & (1U << 1);
@@ -244,9 +255,12 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avxvnni = entry->eax & (1U << 4);
 			features.avx512bf16 = entry->eax & (1U << 5);
 			features.avxifma = entry->eax & (1U << 23);
+			features.amx_fp16 = entry->eax & (1U << 21);
 			features.avxvnniint8 = entry->edx & (1U << 4);
 			features.avxneconvert = entry->edx & (1U << 5);
+			features.amx_complex = entry->edx & (1U << 8);
 			features.avxvnniint16 = entry->edx & (1U << 10);
+			avx10 = entry->edx & (1U << 19);
 		} else if (entry->function == 0x80000001) {
 			features.lahf = entry->ecx & (1U << 0);
 			features.abm = entry->ecx & (1U << 5);
@@ -297,6 +311,15 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			amx_palette1 = entry->eax == 0x04002000 &&
 				entry->ebx == 0x00080040 && entry->ecx == 16 &&
 				!entry->edx;
+		} else if (entry->function == 0x1e && !entry->index) {
+			amx_tmul = entry->eax <= 1 && entry->ebx == 0x4010 &&
+				!entry->ecx && !entry->edx;
+		} else if (entry->function == 0x24 && !entry->index) {
+			avx10_0 = *entry;
+			have_avx10_0 = true;
+		} else if (entry->function == 0x24 && entry->index == 1) {
+			avx10_1 = *entry;
+			have_avx10_1 = true;
 		}
 	}
 
@@ -311,7 +334,27 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 	features.amx = amx_tile &&
 		(xfeatures & 0x60000U) == 0x60000U && amx_controls &&
 		tilecfg && tiledata && features.tiledata_offset >= tilecfg_end &&
-		amx_palette0 && amx_palette1;
+		amx_palette0 && amx_palette1 && amx_tmul;
+	if (features.avx512 && avx10 && have_avx10_0) {
+		__u8 version = avx10_0.ebx & 0xff;
+
+		features.avx10 = version >= 1 && version <= 2 &&
+			(avx10_0.ebx & 0x70000U) == 0x70000U &&
+			!(avx10_0.ebx & ~(0x70000U | 0xffU)) &&
+			avx10_0.eax <= 1 && !avx10_0.ecx && !avx10_0.edx &&
+			(version < 2 || avx10_0.eax == 1) &&
+			(!avx10_0.eax ||
+			 (have_avx10_1 && !avx10_1.eax && !avx10_1.ebx &&
+			  !(avx10_1.ecx & ~4U) && !avx10_1.edx));
+		if (features.avx10) {
+			features.avx10_version = version;
+			features.avx10_vnni_int = avx10_0.eax &&
+				(avx10_1.ecx & 4U);
+		}
+	}
+	if (!features.amx)
+		features.amx_bf16 = features.amx_int8 =
+			features.amx_fp16 = features.amx_complex = false;
 	if (shstk && shstk_controls && shstk_component) {
 		unsigned long status;
 
@@ -517,6 +560,27 @@ static void append_expected_avx_profile(
 	if (features->sm4)
 		append_expected_output(output, output_size, length,
 				       "protected task sm4\n");
+	if (features->avx10_version == 1)
+		append_expected_output(output, output_size, length,
+				       "protected task avx10_v1\n");
+	else if (features->avx10_version == 2)
+		append_expected_output(output, output_size, length,
+				       "protected task avx10_v2\n");
+	if (features->avx10_vnni_int)
+		append_expected_output(output, output_size, length,
+				       "protected task avx10_vnni_int\n");
+	if (features->amx_bf16)
+		append_expected_output(output, output_size, length,
+				       "protected task amx_bf16\n");
+	if (features->amx_int8)
+		append_expected_output(output, output_size, length,
+				       "protected task amx_int8\n");
+	if (features->amx_fp16)
+		append_expected_output(output, output_size, length,
+				       "protected task amx_fp16\n");
+	if (features->amx_complex)
+		append_expected_output(output, output_size, length,
+				       "protected task amx_complex\n");
 }
 
 static void test_create_validation(int kvm_fd)
