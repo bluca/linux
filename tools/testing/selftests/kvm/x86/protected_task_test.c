@@ -100,6 +100,10 @@ struct protected_avx_features {
 	bool avx512vnni;
 	bool avx512bitalg;
 	bool avx512vpopcntdq;
+	bool avx5124vnniw;
+	bool avx5124fmaps;
+	bool avx512vp2intersect;
+	bool avx512fp16;
 	bool avx512bf16;
 };
 
@@ -157,6 +161,10 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avx512vnni = entry->ecx & (1U << 11);
 			features.avx512bitalg = entry->ecx & (1U << 12);
 			features.avx512vpopcntdq = entry->ecx & (1U << 14);
+			features.avx5124vnniw = entry->edx & (1U << 2);
+			features.avx5124fmaps = entry->edx & (1U << 3);
+			features.avx512vp2intersect = entry->edx & (1U << 8);
+			features.avx512fp16 = entry->edx & (1U << 23);
 		} else if (entry->function == 7 && entry->index == 1) {
 			features.avx512bf16 = entry->eax & (1U << 5);
 		} else if (entry->function == 0xd && !entry->index) {
@@ -193,7 +201,9 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avx512vbmi2 = features.gfni =
 			features.vaes = features.vpclmulqdq =
 			features.avx512vnni = features.avx512bitalg =
-			features.avx512vpopcntdq = features.avx512bf16 = false;
+			features.avx512vpopcntdq = features.avx5124vnniw =
+			features.avx5124fmaps = features.avx512vp2intersect =
+			features.avx512fp16 = features.avx512bf16 = false;
 
 	return features;
 }
@@ -274,6 +284,18 @@ static void append_expected_avx_profile(
 	if (features->avx512vpopcntdq)
 		append_expected_output(output, output_size, length,
 				       "protected task avx512vpopcntdq\n");
+	if (features->avx5124vnniw)
+		append_expected_output(output, output_size, length,
+				       "protected task avx5124vnniw\n");
+	if (features->avx5124fmaps)
+		append_expected_output(output, output_size, length,
+				       "protected task avx5124fmaps\n");
+	if (features->avx512vp2intersect)
+		append_expected_output(output, output_size, length,
+				       "protected task avx512vp2intersect\n");
+	if (features->avx512fp16)
+		append_expected_output(output, output_size, length,
+				       "protected task avx512fp16\n");
 	if (features->avx512bf16)
 		append_expected_output(output, output_size, length,
 				       "protected task avx512bf16\n");

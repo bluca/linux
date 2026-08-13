@@ -144,6 +144,18 @@ avx512bitalg_message:
 avx512vpopcntdq_message:
 	.ascii "protected task avx512vpopcntdq\n"
 .set avx512vpopcntdq_message_length, . - avx512vpopcntdq_message
+avx5124vnniw_message:
+	.ascii "protected task avx5124vnniw\n"
+.set avx5124vnniw_message_length, . - avx5124vnniw_message
+avx5124fmaps_message:
+	.ascii "protected task avx5124fmaps\n"
+.set avx5124fmaps_message_length, . - avx5124fmaps_message
+avx512vp2intersect_message:
+	.ascii "protected task avx512vp2intersect\n"
+.set avx512vp2intersect_message_length, . - avx512vp2intersect_message
+avx512fp16_message:
+	.ascii "protected task avx512fp16\n"
+.set avx512fp16_message_length, . - avx512fp16_message
 avx512bf16_message:
 	.ascii "protected task avx512bf16\n"
 .set avx512bf16_message_length, . - avx512bf16_message
@@ -380,6 +392,18 @@ avx512bitalg_available:
 	.long 0
 	.balign 4
 avx512vpopcntdq_available:
+	.long 0
+	.balign 4
+avx5124vnniw_available:
+	.long 0
+	.balign 4
+avx5124fmaps_available:
+	.long 0
+	.balign 4
+avx512vp2intersect_available:
+	.long 0
+	.balign 4
+avx512fp16_available:
 	.long 0
 	.balign 4
 avx512bf16_available:
@@ -692,6 +716,50 @@ _start:
 	cmp $avx512vpopcntdq_message_length, %rax
 	jne 1f
 .Lcpu_profile_avx512vpopcntdq_reported:
+	cmpl $0, avx5124vnniw_available(%rip)
+	je .Lcpu_profile_avx5124vnniw_reported
+	movl $160, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx5124vnniw_message(%rip), %rsi
+	mov $avx5124vnniw_message_length, %edx
+	syscall
+	cmp $avx5124vnniw_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx5124vnniw_reported:
+	cmpl $0, avx5124fmaps_available(%rip)
+	je .Lcpu_profile_avx5124fmaps_reported
+	movl $161, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx5124fmaps_message(%rip), %rsi
+	mov $avx5124fmaps_message_length, %edx
+	syscall
+	cmp $avx5124fmaps_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx5124fmaps_reported:
+	cmpl $0, avx512vp2intersect_available(%rip)
+	je .Lcpu_profile_avx512vp2intersect_reported
+	movl $162, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx512vp2intersect_message(%rip), %rsi
+	mov $avx512vp2intersect_message_length, %edx
+	syscall
+	cmp $avx512vp2intersect_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx512vp2intersect_reported:
+	cmpl $0, avx512fp16_available(%rip)
+	je .Lcpu_profile_avx512fp16_reported
+	movl $163, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx512fp16_message(%rip), %rsi
+	mov $avx512fp16_message_length, %edx
+	syscall
+	cmp $avx512fp16_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx512fp16_reported:
 	cmpl $0, avx512bf16_available(%rip)
 	je .Lcpu_profile_avx512bf16_reported
 	movl $155, failure_code(%rip)
@@ -3080,6 +3148,10 @@ check_cpu_profile:
 	movl $0, avx512vnni_available(%rip)
 	movl $0, avx512bitalg_available(%rip)
 	movl $0, avx512vpopcntdq_available(%rip)
+	movl $0, avx5124vnniw_available(%rip)
+	movl $0, avx5124fmaps_available(%rip)
+	movl $0, avx512vp2intersect_available(%rip)
+	movl $0, avx512fp16_available(%rip)
 	movl $0, avx512bf16_available(%rip)
 	movl $0, leaf7_max_subleaf(%rip)
 	movl $0, pku_available(%rip)
@@ -3323,8 +3395,33 @@ check_cpu_profile:
 .Lcpu_leaf7_ecx:
 	cmp %r13d, %ecx
 	jne 2f
-	mov amx_available(%rip), %r13d
-	shl $24, %r13d
+	xor %r13d, %r13d
+	cmpl $0, avx512_available(%rip)
+	je .Lcpu_leaf7_amx
+	test $0x4, %edx
+	jz .Lcpu_leaf7_avx5124fmaps
+	movl $1, avx5124vnniw_available(%rip)
+	or $0x4, %r13d
+.Lcpu_leaf7_avx5124fmaps:
+	test $0x8, %edx
+	jz .Lcpu_leaf7_avx512vp2intersect
+	movl $1, avx5124fmaps_available(%rip)
+	or $0x8, %r13d
+.Lcpu_leaf7_avx512vp2intersect:
+	test $0x100, %edx
+	jz .Lcpu_leaf7_avx512fp16
+	movl $1, avx512vp2intersect_available(%rip)
+	or $0x100, %r13d
+.Lcpu_leaf7_avx512fp16:
+	test $0x800000, %edx
+	jz .Lcpu_leaf7_amx
+	movl $1, avx512fp16_available(%rip)
+	or $0x800000, %r13d
+.Lcpu_leaf7_amx:
+	cmpl $0, amx_available(%rip)
+	je .Lcpu_leaf7_edx
+	or $0x1000000, %r13d
+.Lcpu_leaf7_edx:
 	cmp %r13d, %edx
 	jne 2f
 	mov $108, %r11d
@@ -3912,8 +4009,24 @@ check_cpu_profile:
 	vpshufbitqmb %zmm0, %zmm0, %k1
 .Lcpu_instruction_avx512vpopcntdq:
 	cmpl $0, avx512vpopcntdq_available(%rip)
-	je .Lcpu_instruction_avx512bf16
+	je .Lcpu_instruction_avx5124vnniw
 	vpopcntd %zmm0, %zmm0
+.Lcpu_instruction_avx5124vnniw:
+	cmpl $0, avx5124vnniw_available(%rip)
+	je .Lcpu_instruction_avx5124fmaps
+	vp4dpwssd initial_zmm15(%rip), %zmm0, %zmm4
+.Lcpu_instruction_avx5124fmaps:
+	cmpl $0, avx5124fmaps_available(%rip)
+	je .Lcpu_instruction_avx512vp2intersect
+	v4fmaddps initial_zmm15(%rip), %zmm0, %zmm4
+.Lcpu_instruction_avx512vp2intersect:
+	cmpl $0, avx512vp2intersect_available(%rip)
+	je .Lcpu_instruction_avx512fp16
+	vp2intersectd %zmm0, %zmm0, %k1
+.Lcpu_instruction_avx512fp16:
+	cmpl $0, avx512fp16_available(%rip)
+	je .Lcpu_instruction_avx512bf16
+	vaddph %zmm0, %zmm0, %zmm0
 .Lcpu_instruction_avx512bf16:
 	cmpl $0, avx512bf16_available(%rip)
 	je .Lcpu_instructions_done
