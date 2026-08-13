@@ -822,7 +822,9 @@ static void test_hidden_mapping_ptrace(pid_t child, unsigned long address)
 static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 					    int address_fd)
 {
+	const unsigned long sentinel = 0x0123456789abcdef;
 	struct user_regs_struct regs;
+	unsigned long breakpoint_rip;
 	siginfo_t siginfo;
 	long dr6, value;
 	int status;
@@ -840,6 +842,10 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		    value, errno, EIO);
 	TEST_ASSERT(ptrace(PTRACE_GETREGS, child, NULL, &regs) == 0,
 		    "PTRACE_GETREGS failed: %d", errno);
+	breakpoint_rip = regs.rip;
+	regs.r15 = sentinel;
+	TEST_ASSERT(ptrace(PTRACE_SETREGS, child, NULL, &regs) == 0,
+		    "PTRACE_SETREGS failed: %d", errno);
 	TEST_ASSERT(ptrace(PTRACE_POKEUSER, child,
 			   (void *)offsetof(struct user, u_debugreg[0]),
 			   regs.rip) == 0,
@@ -871,6 +877,24 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	TEST_ASSERT(ptrace(PTRACE_POKEUSER, child,
 			   (void *)offsetof(struct user, u_debugreg[0]), 0) == 0,
 		    "Clearing DR0 failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_SINGLESTEP, child, NULL, NULL) == 0,
+		    "PTRACE_SINGLESTEP failed: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() after single-step failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP,
+		    "Single-step produced unexpected status: %#x", status);
+	TEST_ASSERT(ptrace(PTRACE_GETSIGINFO, child, NULL, &siginfo) == 0,
+		    "PTRACE_GETSIGINFO after single-step failed: %d", errno);
+	TEST_ASSERT(siginfo.si_signo == SIGTRAP && siginfo.si_code == TRAP_TRACE,
+		    "Single-step produced signal %d/%d",
+		    siginfo.si_signo, siginfo.si_code);
+	TEST_ASSERT(ptrace(PTRACE_GETREGS, child, NULL, &regs) == 0,
+		    "PTRACE_GETREGS after single-step failed: %d", errno);
+	TEST_ASSERT(regs.rip != breakpoint_rip,
+		    "Single-step did not advance RIP from %#lx", breakpoint_rip);
+	TEST_ASSERT(regs.r15 == sentinel,
+		    "PTRACE_SETREGS value was not preserved: %#llx",
+		    regs.r15);
 	TEST_ASSERT(ptrace(PTRACE_DETACH, child, NULL, NULL) == 0,
 		    "PTRACE_DETACH failed: %d", errno);
 }
