@@ -80,6 +80,14 @@ static struct kvm_protected_task_info get_info(int fd)
 }
 
 struct protected_avx_features {
+	bool sse3;
+	bool pclmulqdq;
+	bool ssse3;
+	bool sse41;
+	bool sse42;
+	bool popcnt;
+	bool aes;
+	bool shani;
 	bool avx;
 	bool fma;
 	bool f16c;
@@ -147,11 +155,19 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		struct kvm_cpuid_entry2 *entry = &cpuid.entries[i];
 
 		if (entry->function == 1 && !entry->index) {
+			features.sse3 = entry->ecx & (1U << 0);
+			features.pclmulqdq = entry->ecx & (1U << 1);
+			features.ssse3 = entry->ecx & (1U << 9);
+			features.sse41 = entry->ecx & (1U << 19);
+			features.sse42 = entry->ecx & (1U << 20);
+			features.popcnt = entry->ecx & (1U << 23);
+			features.aes = entry->ecx & (1U << 25);
 			avx = (entry->ecx & ((1U << 26) | (1U << 28))) ==
 				((1U << 26) | (1U << 28));
 			features.fma = entry->ecx & (1U << 12);
 			features.f16c = entry->ecx & (1U << 29);
 		} else if (entry->function == 7 && !entry->index) {
+			features.shani = entry->ebx & (1U << 29);
 			features.avx2 = entry->ebx & (1U << 5);
 			avx512 = entry->ebx & (1U << 16);
 			features.avx512dq = entry->ebx & (1U << 17);
@@ -244,6 +260,30 @@ static void append_expected_avx_profile(
 		char *output, size_t output_size, size_t *length,
 		const struct protected_avx_features *features)
 {
+	if (features->sse3)
+		append_expected_output(output, output_size, length,
+				       "protected task sse3\n");
+	if (features->pclmulqdq)
+		append_expected_output(output, output_size, length,
+				       "protected task pclmulqdq\n");
+	if (features->ssse3)
+		append_expected_output(output, output_size, length,
+				       "protected task ssse3\n");
+	if (features->sse41)
+		append_expected_output(output, output_size, length,
+				       "protected task sse4_1\n");
+	if (features->sse42)
+		append_expected_output(output, output_size, length,
+				       "protected task sse4_2\n");
+	if (features->popcnt)
+		append_expected_output(output, output_size, length,
+				       "protected task popcnt\n");
+	if (features->aes)
+		append_expected_output(output, output_size, length,
+				       "protected task aes\n");
+	if (features->shani)
+		append_expected_output(output, output_size, length,
+				       "protected task sha_ni\n");
 	if (features->avx)
 		append_expected_output(output, output_size, length,
 				       "protected task avx\n");
@@ -779,7 +819,7 @@ static void test_protected_exec(int kvm_fd)
 		.size = sizeof(arm),
 	};
 	struct protected_avx_features features;
-	char expected_output[1024] = {}, output[sizeof(expected_output)] = {};
+	char expected_output[4096] = {}, output[sizeof(expected_output)] = {};
 	char helper[PATH_MAX];
 	unsigned long main_address = 0;
 	size_t expected_length = 0, nread = 0;

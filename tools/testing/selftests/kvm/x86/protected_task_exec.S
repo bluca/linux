@@ -84,6 +84,30 @@
 message:
 	.ascii "protected task exec\n"
 .set message_length, . - message
+sse3_message:
+	.ascii "protected task sse3\n"
+.set sse3_message_length, . - sse3_message
+pclmulqdq_message:
+	.ascii "protected task pclmulqdq\n"
+.set pclmulqdq_message_length, . - pclmulqdq_message
+ssse3_message:
+	.ascii "protected task ssse3\n"
+.set ssse3_message_length, . - ssse3_message
+sse41_message:
+	.ascii "protected task sse4_1\n"
+.set sse41_message_length, . - sse41_message
+sse42_message:
+	.ascii "protected task sse4_2\n"
+.set sse42_message_length, . - sse42_message
+popcnt_message:
+	.ascii "protected task popcnt\n"
+.set popcnt_message_length, . - popcnt_message
+aes_message:
+	.ascii "protected task aes\n"
+.set aes_message_length, . - aes_message
+shani_message:
+	.ascii "protected task sha_ni\n"
+.set shani_message_length, . - shani_message
 avx_message:
 	.ascii "protected task avx\n"
 .set avx_message_length, . - avx_message
@@ -358,6 +382,30 @@ thread_shstk_address:
 pku_available:
 	.long 0
 	.balign 4
+sse3_available:
+	.long 0
+	.balign 4
+pclmulqdq_available:
+	.long 0
+	.balign 4
+ssse3_available:
+	.long 0
+	.balign 4
+sse41_available:
+	.long 0
+	.balign 4
+sse42_available:
+	.long 0
+	.balign 4
+popcnt_available:
+	.long 0
+	.balign 4
+aes_available:
+	.long 0
+	.balign 4
+shani_available:
+	.long 0
+	.balign 4
 avx_available:
 	.long 0
 	.balign 4
@@ -544,6 +592,94 @@ _start:
 	mov %eax, failure_code(%rip)
 	jmp 1f
 .Lcpu_profile_ok:
+	cmpl $0, sse3_available(%rip)
+	je .Lcpu_profile_sse3_reported
+	movl $172, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea sse3_message(%rip), %rsi
+	mov $sse3_message_length, %edx
+	syscall
+	cmp $sse3_message_length, %rax
+	jne 1f
+.Lcpu_profile_sse3_reported:
+	cmpl $0, pclmulqdq_available(%rip)
+	je .Lcpu_profile_pclmulqdq_reported
+	movl $173, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea pclmulqdq_message(%rip), %rsi
+	mov $pclmulqdq_message_length, %edx
+	syscall
+	cmp $pclmulqdq_message_length, %rax
+	jne 1f
+.Lcpu_profile_pclmulqdq_reported:
+	cmpl $0, ssse3_available(%rip)
+	je .Lcpu_profile_ssse3_reported
+	movl $174, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea ssse3_message(%rip), %rsi
+	mov $ssse3_message_length, %edx
+	syscall
+	cmp $ssse3_message_length, %rax
+	jne 1f
+.Lcpu_profile_ssse3_reported:
+	cmpl $0, sse41_available(%rip)
+	je .Lcpu_profile_sse41_reported
+	movl $175, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea sse41_message(%rip), %rsi
+	mov $sse41_message_length, %edx
+	syscall
+	cmp $sse41_message_length, %rax
+	jne 1f
+.Lcpu_profile_sse41_reported:
+	cmpl $0, sse42_available(%rip)
+	je .Lcpu_profile_sse42_reported
+	movl $176, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea sse42_message(%rip), %rsi
+	mov $sse42_message_length, %edx
+	syscall
+	cmp $sse42_message_length, %rax
+	jne 1f
+.Lcpu_profile_sse42_reported:
+	cmpl $0, popcnt_available(%rip)
+	je .Lcpu_profile_popcnt_reported
+	movl $177, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea popcnt_message(%rip), %rsi
+	mov $popcnt_message_length, %edx
+	syscall
+	cmp $popcnt_message_length, %rax
+	jne 1f
+.Lcpu_profile_popcnt_reported:
+	cmpl $0, aes_available(%rip)
+	je .Lcpu_profile_aes_reported
+	movl $178, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea aes_message(%rip), %rsi
+	mov $aes_message_length, %edx
+	syscall
+	cmp $aes_message_length, %rax
+	jne 1f
+.Lcpu_profile_aes_reported:
+	cmpl $0, shani_available(%rip)
+	je .Lcpu_profile_shani_reported
+	movl $179, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea shani_message(%rip), %rsi
+	mov $shani_message_length, %edx
+	syscall
+	cmp $shani_message_length, %rax
+	jne 1f
+.Lcpu_profile_shani_reported:
 	cmpl $0, avx_available(%rip)
 	je .Lcpu_profile_avx_reported
 	movl $133, failure_code(%rip)
@@ -3264,6 +3400,14 @@ check_cpu_profile:
 	push %rbx
 	push %r12
 	push %r13
+	movl $0, sse3_available(%rip)
+	movl $0, pclmulqdq_available(%rip)
+	movl $0, ssse3_available(%rip)
+	movl $0, sse41_available(%rip)
+	movl $0, sse42_available(%rip)
+	movl $0, popcnt_available(%rip)
+	movl $0, aes_available(%rip)
+	movl $0, shani_available(%rip)
 	movl $0, avx_available(%rip)
 	movl $0, fma_available(%rip)
 	movl $0, f16c_available(%rip)
@@ -3321,6 +3465,34 @@ check_cpu_profile:
 	mov $1, %eax
 	xor %ecx, %ecx
 	cpuid
+	test $0x1, %ecx
+	jz .Lcpu_detect_pclmulqdq
+	movl $1, sse3_available(%rip)
+.Lcpu_detect_pclmulqdq:
+	test $0x2, %ecx
+	jz .Lcpu_detect_ssse3
+	movl $1, pclmulqdq_available(%rip)
+.Lcpu_detect_ssse3:
+	test $0x200, %ecx
+	jz .Lcpu_detect_sse41
+	movl $1, ssse3_available(%rip)
+.Lcpu_detect_sse41:
+	test $0x80000, %ecx
+	jz .Lcpu_detect_sse42
+	movl $1, sse41_available(%rip)
+.Lcpu_detect_sse42:
+	test $0x100000, %ecx
+	jz .Lcpu_detect_popcnt
+	movl $1, sse42_available(%rip)
+.Lcpu_detect_popcnt:
+	test $0x800000, %ecx
+	jz .Lcpu_detect_aes
+	movl $1, popcnt_available(%rip)
+.Lcpu_detect_aes:
+	test $0x2000000, %ecx
+	jz .Lcpu_detect_avx
+	movl $1, aes_available(%rip)
+.Lcpu_detect_avx:
 	test $0x10000000, %ecx
 	jz .Lcpu_detect_extended_max
 	movl $1, avx_available(%rip)
@@ -3387,7 +3559,10 @@ check_cpu_profile:
 	cmpl $0, shstk_available(%rip)
 	jne .Lcpu_profile_xstate_max
 	cmpl $0, lam_available(%rip)
+	jne .Lcpu_profile_leaf7_max
+	cmpl $0, shani_available(%rip)
 	je .Lcpu_profile_check_max
+.Lcpu_profile_leaf7_max:
 	mov $7, %r13d
 	jmp .Lcpu_profile_check_max
 .Lcpu_profile_xstate_max:
@@ -3404,6 +3579,34 @@ check_cpu_profile:
 	cmp $ELF_HWCAP, %edx
 	jne 2f
 	xor %r13d, %r13d
+	cmpl $0, sse3_available(%rip)
+	je .Lcpu_leaf1_pclmulqdq
+	or $0x1, %r13d
+.Lcpu_leaf1_pclmulqdq:
+	cmpl $0, pclmulqdq_available(%rip)
+	je .Lcpu_leaf1_ssse3
+	or $0x2, %r13d
+.Lcpu_leaf1_ssse3:
+	cmpl $0, ssse3_available(%rip)
+	je .Lcpu_leaf1_sse41
+	or $0x200, %r13d
+.Lcpu_leaf1_sse41:
+	cmpl $0, sse41_available(%rip)
+	je .Lcpu_leaf1_sse42
+	or $0x80000, %r13d
+.Lcpu_leaf1_sse42:
+	cmpl $0, sse42_available(%rip)
+	je .Lcpu_leaf1_popcnt
+	or $0x100000, %r13d
+.Lcpu_leaf1_popcnt:
+	cmpl $0, popcnt_available(%rip)
+	je .Lcpu_leaf1_aes
+	or $0x800000, %r13d
+.Lcpu_leaf1_aes:
+	cmpl $0, aes_available(%rip)
+	je .Lcpu_leaf1_extended_state
+	or $0x2000000, %r13d
+.Lcpu_leaf1_extended_state:
 	cmpl $0, avx_available(%rip)
 	jne .Lcpu_leaf1_xsave
 	cmpl $0, pku_available(%rip)
@@ -3413,7 +3616,7 @@ check_cpu_profile:
 	cmpl $0, amx_available(%rip)
 	je .Lcpu_leaf1_ecx
 .Lcpu_leaf1_xsave:
-	mov $0xc000000, %r13d
+	or $0xc000000, %r13d
 .Lcpu_leaf1_ecx:
 	cmpl $0, avx_available(%rip)
 	je .Lcpu_leaf1_expected
@@ -3439,12 +3642,17 @@ check_cpu_profile:
 	cpuid
 	mov %eax, leaf7_max_subleaf(%rip)
 	xor %r13d, %r13d
+	test $0x20000000, %ebx
+	jz .Lcpu_leaf7_avx
+	movl $1, shani_available(%rip)
+	or $0x20000000, %r13d
+.Lcpu_leaf7_avx:
 	cmpl $0, avx_available(%rip)
 	je .Lcpu_leaf7_ebx
 	test $0x20, %ebx
 	jz .Lcpu_leaf7_avx512
 	movl $1, avx2_available(%rip)
-	mov $0x20, %r13d
+	or $0x20, %r13d
 .Lcpu_leaf7_avx512:
 	test $0x10000, %ebx
 	jz .Lcpu_leaf7_ebx
@@ -4252,8 +4460,40 @@ check_cpu_profile:
 	vsm3msg1 %xmm0, %xmm0, %xmm0
 .Lcpu_instruction_sm4:
 	cmpl $0, sm4_available(%rip)
-	je .Lcpu_instructions_done
+	je .Lcpu_instruction_sse3
 	{vex} vsm4rnds4 %ymm0, %ymm0, %ymm0
+.Lcpu_instruction_sse3:
+	cmpl $0, sse3_available(%rip)
+	je .Lcpu_instruction_pclmulqdq
+	addsubps %xmm0, %xmm0
+.Lcpu_instruction_pclmulqdq:
+	cmpl $0, pclmulqdq_available(%rip)
+	je .Lcpu_instruction_ssse3
+	pclmulqdq $0, %xmm0, %xmm0
+.Lcpu_instruction_ssse3:
+	cmpl $0, ssse3_available(%rip)
+	je .Lcpu_instruction_sse41
+	pshufb %xmm0, %xmm0
+.Lcpu_instruction_sse41:
+	cmpl $0, sse41_available(%rip)
+	je .Lcpu_instruction_sse42
+	pmuldq %xmm0, %xmm0
+.Lcpu_instruction_sse42:
+	cmpl $0, sse42_available(%rip)
+	je .Lcpu_instruction_popcnt
+	pcmpgtq %xmm0, %xmm0
+.Lcpu_instruction_popcnt:
+	cmpl $0, popcnt_available(%rip)
+	je .Lcpu_instruction_aes
+	popcnt %rax, %rax
+.Lcpu_instruction_aes:
+	cmpl $0, aes_available(%rip)
+	je .Lcpu_instruction_shani
+	aesenc %xmm0, %xmm0
+.Lcpu_instruction_shani:
+	cmpl $0, shani_available(%rip)
+	je .Lcpu_instructions_done
+	sha1msg1 %xmm0, %xmm0
 .Lcpu_instructions_done:
 	xor %eax, %eax
 	pop %r13
