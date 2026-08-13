@@ -132,6 +132,12 @@ lahf_message:
 abm_message:
 	.ascii "protected task abm\n"
 .set abm_message_length, . - abm_message
+rdpid_message:
+	.ascii "protected task rdpid\n"
+.set rdpid_message_length, . - rdpid_message
+rdtscp_message:
+	.ascii "protected task rdtscp\n"
+.set rdtscp_message_length, . - rdtscp_message
 clflushopt_message:
 	.ascii "protected task clflushopt\n"
 .set clflushopt_message_length, . - clflushopt_message
@@ -399,6 +405,16 @@ initial_stack:
 	.balign 64
 cache_line:
 	.zero 64
+	.balign 8
+affinity_mask:
+	.zero 1024
+single_cpu_mask:
+	.zero 1024
+	.balign 4
+getcpu_cpu:
+	.long 0
+getcpu_node:
+	.long 0
 	.balign 4
 thread_tid:
 	.long 0
@@ -464,6 +480,12 @@ lahf_available:
 	.long 0
 	.balign 4
 abm_available:
+	.long 0
+	.balign 4
+rdpid_available:
+	.long 0
+	.balign 4
+rdtscp_available:
 	.long 0
 	.balign 4
 clflushopt_available:
@@ -837,6 +859,28 @@ _start:
 	cmp $abm_message_length, %rax
 	jne 1f
 .Lcpu_profile_abm_reported:
+	cmpl $0, rdpid_available(%rip)
+	je .Lcpu_profile_rdpid_reported
+	movl $205, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea rdpid_message(%rip), %rsi
+	mov $rdpid_message_length, %edx
+	syscall
+	cmp $rdpid_message_length, %rax
+	jne 1f
+.Lcpu_profile_rdpid_reported:
+	cmpl $0, rdtscp_available(%rip)
+	je .Lcpu_profile_rdtscp_reported
+	movl $206, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea rdtscp_message(%rip), %rsi
+	mov $rdtscp_message_length, %edx
+	syscall
+	cmp $rdtscp_message_length, %rax
+	jne 1f
+.Lcpu_profile_rdtscp_reported:
 	cmpl $0, clflushopt_available(%rip)
 	je .Lcpu_profile_clflushopt_reported
 	movl $190, failure_code(%rip)
@@ -3585,6 +3629,187 @@ check_speculation_control:
 	ret
 	.size check_speculation_control, . - check_speculation_control
 
+	.type check_current_cpu_identity, @function
+check_current_cpu_identity:
+	push %rbx
+	push %r12
+	push %r13
+	movl $0, getcpu_cpu(%rip)
+	movl $0, getcpu_node(%rip)
+	mov $309, %eax
+	lea getcpu_cpu(%rip), %rdi
+	lea getcpu_node(%rip), %rsi
+	xor %edx, %edx
+	syscall
+	test %rax, %rax
+	jne .Lcpu_identity_getcpu_fail
+	mov getcpu_node(%rip), %r12d
+	shl $12, %r12d
+	or getcpu_cpu(%rip), %r12d
+	cmpl $0, rdpid_available(%rip)
+	je .Lcpu_identity_rdtscp
+	rdpid %rax
+	cmp %r12d, %eax
+	jne .Lcpu_identity_rdpid_fail
+.Lcpu_identity_rdtscp:
+	cmpl $0, rdtscp_available(%rip)
+	je .Lcpu_identity_success
+	lfence
+	rdtsc
+	shl $32, %rdx
+	or %rdx, %rax
+	mov %rax, %r13
+	rdtscp
+	cmp %r12d, %ecx
+	jne .Lcpu_identity_rdtscp_fail
+	shl $32, %rdx
+	or %rdx, %rax
+	cmp %r13, %rax
+	jb .Lcpu_identity_order_fail
+	mov %rax, %r13
+	lfence
+	rdtsc
+	shl $32, %rdx
+	or %rdx, %rax
+	cmp %r13, %rax
+	jb .Lcpu_identity_order_fail
+.Lcpu_identity_success:
+	xor %eax, %eax
+	jmp .Lcpu_identity_done
+.Lcpu_identity_getcpu_fail:
+	mov $200, %eax
+	jmp .Lcpu_identity_done
+.Lcpu_identity_rdpid_fail:
+	mov $201, %eax
+	jmp .Lcpu_identity_done
+.Lcpu_identity_rdtscp_fail:
+	mov $202, %eax
+	jmp .Lcpu_identity_done
+.Lcpu_identity_order_fail:
+	mov $203, %eax
+.Lcpu_identity_done:
+	pop %r13
+	pop %r12
+	pop %rbx
+	ret
+	.size check_current_cpu_identity, . - check_current_cpu_identity
+
+	.type check_cpu_identity_on, @function
+check_cpu_identity_on:
+	push %r12
+	push %r13
+	sub $8, %rsp
+	mov %edi, %r12d
+	mov %esi, %r13d
+	lea single_cpu_mask(%rip), %rdi
+	mov %r13, %rcx
+	xor %eax, %eax
+	rep stosb
+	lea single_cpu_mask(%rip), %rax
+	btsq %r12, (%rax)
+	mov $203, %eax
+	xor %edi, %edi
+	mov %r13d, %esi
+	lea single_cpu_mask(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jne .Lcpu_identity_affinity_set_fail
+	call check_current_cpu_identity
+	jmp .Lcpu_identity_on_done
+.Lcpu_identity_affinity_set_fail:
+	mov $199, %eax
+.Lcpu_identity_on_done:
+	add $8, %rsp
+	pop %r13
+	pop %r12
+	ret
+	.size check_cpu_identity_on, . - check_cpu_identity_on
+
+	.type check_cpu_identity, @function
+check_cpu_identity:
+	cmpl $0, rdpid_available(%rip)
+	jne .Lcpu_identity_check
+	cmpl $0, rdtscp_available(%rip)
+	jne .Lcpu_identity_check
+	xor %eax, %eax
+	ret
+.Lcpu_identity_check:
+	push %rbx
+	push %r12
+	push %r13
+	push %r14
+	push %r15
+	mov $204, %eax
+	xor %edi, %edi
+	mov $1024, %esi
+	lea affinity_mask(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jle .Lcpu_identity_affinity_get_fail
+	cmp $1024, %rax
+	ja .Lcpu_identity_affinity_get_fail
+	mov %rax, %r12
+	mov %rax, %r15
+	shl $3, %r15
+	mov $-1, %r13d
+	mov $-1, %r14d
+	xor %ebx, %ebx
+.Lcpu_identity_find_cpu:
+	cmp %r15, %rbx
+	jae .Lcpu_identity_cpus_found
+	lea affinity_mask(%rip), %rax
+	btq %rbx, (%rax)
+	jnc .Lcpu_identity_next_cpu
+	cmpl $-1, %r13d
+	jne .Lcpu_identity_second_cpu
+	mov %ebx, %r13d
+	jmp .Lcpu_identity_next_cpu
+.Lcpu_identity_second_cpu:
+	mov %ebx, %r14d
+	jmp .Lcpu_identity_cpus_found
+.Lcpu_identity_next_cpu:
+	inc %rbx
+	jmp .Lcpu_identity_find_cpu
+.Lcpu_identity_cpus_found:
+	cmpl $-1, %r13d
+	je .Lcpu_identity_affinity_get_fail
+	mov %r13d, %edi
+	mov %r12d, %esi
+	call check_cpu_identity_on
+	mov %eax, %ebx
+	test %ebx, %ebx
+	jne .Lcpu_identity_restore_affinity
+	cmpl $-1, %r14d
+	je .Lcpu_identity_restore_affinity
+	mov %r14d, %edi
+	mov %r12d, %esi
+	call check_cpu_identity_on
+	mov %eax, %ebx
+.Lcpu_identity_restore_affinity:
+	mov $203, %eax
+	xor %edi, %edi
+	mov %r12d, %esi
+	lea affinity_mask(%rip), %rdx
+	syscall
+	test %rax, %rax
+	je .Lcpu_identity_restored
+	test %ebx, %ebx
+	jne .Lcpu_identity_restored
+	mov $204, %ebx
+.Lcpu_identity_restored:
+	mov %ebx, %eax
+	jmp .Lcpu_identity_check_done
+.Lcpu_identity_affinity_get_fail:
+	mov $198, %eax
+.Lcpu_identity_check_done:
+	pop %r15
+	pop %r14
+	pop %r13
+	pop %r12
+	pop %rbx
+	ret
+	.size check_cpu_identity, . - check_cpu_identity
+
 	.type check_cpu_profile, @function
 check_cpu_profile:
 	push %rbx
@@ -3606,6 +3831,8 @@ check_cpu_profile:
 	movl $0, adx_available(%rip)
 	movl $0, lahf_available(%rip)
 	movl $0, abm_available(%rip)
+	movl $0, rdpid_available(%rip)
+	movl $0, rdtscp_available(%rip)
 	movl $0, clflushopt_available(%rip)
 	movl $0, clwb_available(%rip)
 	movl $0, clzero_available(%rip)
@@ -3726,8 +3953,12 @@ check_cpu_profile:
 	xor %ecx, %ecx
 	cpuid
 	test $0x8, %ecx
-	jz .Lcpu_detect_shstk
+	jz .Lcpu_detect_rdpid
 	movl $1, pku_available(%rip)
+.Lcpu_detect_rdpid:
+	test $0x400000, %ecx
+	jz .Lcpu_detect_shstk
+	movl $1, rdpid_available(%rip)
 .Lcpu_detect_shstk:
 	test $0x80, %ecx
 	jz .Lcpu_detect_amx
@@ -3782,6 +4013,8 @@ check_cpu_profile:
 	cmpl $0, clflushopt_available(%rip)
 	jne .Lcpu_profile_leaf7_max
 	cmpl $0, clwb_available(%rip)
+	jne .Lcpu_profile_leaf7_max
+	cmpl $0, rdpid_available(%rip)
 	je .Lcpu_profile_check_max
 .Lcpu_profile_leaf7_max:
 	mov $7, %r13d
@@ -4003,9 +4236,14 @@ check_cpu_profile:
 	or $0x1000, %r13d
 .Lcpu_leaf7_avx512vpopcntdq:
 	test $0x4000, %ecx
-	jz .Lcpu_leaf7_ecx
+	jz .Lcpu_leaf7_rdpid
 	movl $1, avx512vpopcntdq_available(%rip)
 	or $0x4000, %r13d
+.Lcpu_leaf7_rdpid:
+	test $0x400000, %ecx
+	jz .Lcpu_leaf7_ecx
+	movl $1, rdpid_available(%rip)
+	or $0x400000, %r13d
 .Lcpu_leaf7_ecx:
 	cmp %r13d, %ecx
 	jne 2f
@@ -4496,7 +4734,13 @@ check_cpu_profile:
 .Lcpu_extended_ecx:
 	cmp %r13d, %ecx
 	jne 2f
-	cmp $0x20100800, %edx
+	mov $0x20100800, %r13d
+	test $0x8000000, %edx
+	jz .Lcpu_extended_edx
+	movl $1, rdtscp_available(%rip)
+	or $0x8000000, %r13d
+.Lcpu_extended_edx:
+	cmp %r13d, %edx
 	jne 2f
 	mov $193, %r11d
 	mov $0x80000008, %eax
@@ -4613,6 +4857,12 @@ check_cpu_profile:
 	test %r12d, %eax
 	jne 2f
 .Lcpu_profile_done:
+	call check_cpu_identity
+	test %eax, %eax
+	je .Lcpu_profile_identity_done
+	mov %eax, %r11d
+	jmp 2f
+.Lcpu_profile_identity_done:
 	mov $134, %r11d
 	cmpl $0, fma_available(%rip)
 	je .Lcpu_instruction_f16c
@@ -5198,6 +5448,12 @@ signal_handler:
 	movdqu %xmm0, FPSTATE_XMM15(%r8)
 	movl $0x5f80, FPSTATE_MXCSR(%r8)
 	movw $0x037f, FPSTATE_FCW(%r8)
+	call check_cpu_identity
+	test %eax, %eax
+	je .Lsignal_handler_identity_ok
+	mov %eax, failure_code(%rip)
+	jmp 3f
+.Lsignal_handler_identity_ok:
 	movl $1, signal_seen(%rip)
 3:
 	ret

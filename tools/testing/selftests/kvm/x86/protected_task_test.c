@@ -96,6 +96,8 @@ struct protected_avx_features {
 	bool adx;
 	bool lahf;
 	bool abm;
+	bool rdpid;
+	bool rdtscp;
 	bool clflushopt;
 	bool clwb;
 	bool clzero;
@@ -204,6 +206,7 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avx512vnni = entry->ecx & (1U << 11);
 			features.avx512bitalg = entry->ecx & (1U << 12);
 			features.avx512vpopcntdq = entry->ecx & (1U << 14);
+			features.rdpid = entry->ecx & (1U << 22);
 			features.avx5124vnniw = entry->edx & (1U << 2);
 			features.avx5124fmaps = entry->edx & (1U << 3);
 			features.avx512vp2intersect = entry->edx & (1U << 8);
@@ -221,6 +224,7 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		} else if (entry->function == 0x80000001) {
 			features.lahf = entry->ecx & (1U << 0);
 			features.abm = entry->ecx & (1U << 5);
+			features.rdtscp = entry->edx & (1U << 27);
 		} else if (entry->function == 0x80000008) {
 			features.clzero = entry->ebx & (1U << 0);
 		} else if (entry->function == 0xd && !entry->index) {
@@ -332,6 +336,12 @@ static void append_expected_avx_profile(
 	if (features->abm)
 		append_expected_output(output, output_size, length,
 				       "protected task abm\n");
+	if (features->rdpid)
+		append_expected_output(output, output_size, length,
+				       "protected task rdpid\n");
+	if (features->rdtscp)
+		append_expected_output(output, output_size, length,
+				       "protected task rdtscp\n");
 	if (features->clflushopt)
 		append_expected_output(output, output_size, length,
 				       "protected task clflushopt\n");
