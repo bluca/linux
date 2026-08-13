@@ -51,6 +51,7 @@
 #define KVM_PT_CPUID_7_EBX_AVX512 (KVM_PT_CPUID_7_EBX_AVX512F | BIT(17) | \
 				   BIT(21) | BIT(26) | BIT(27) | BIT(28) | \
 				   BIT(30) | BIT(31))
+#define KVM_PT_CPUID_7_ECX_BASELINE BIT(22)
 #define KVM_PT_CPUID_7_ECX_YMM (BIT(8) | BIT(9) | BIT(10))
 #define KVM_PT_CPUID_7_ECX_ZMM (BIT(1) | BIT(6) | BIT(11) | BIT(12) | BIT(14))
 #define KVM_PT_CPUID_7_ECX_PKU	BIT(3)
@@ -65,7 +66,7 @@
 #define KVM_PT_CPUID_D_1_EAX_XSAVES BIT(3)
 #define KVM_PT_CPUID_D_1_EAX_XFD BIT(4)
 #define KVM_PT_CPUID_80000001_ECX (BIT(0) | BIT(5))
-#define KVM_PT_CPUID_80000001_EDX (BIT(11) | BIT(20) | BIT(29))
+#define KVM_PT_CPUID_80000001_EDX (BIT(11) | BIT(20) | BIT(27) | BIT(29))
 #define KVM_PT_CPUID_80000008_EBX BIT(0)
 #define KVM_PT_AMX_TILE_BYTES	8192
 #define KVM_PT_AMX_BYTES_PER_TILE 1024
@@ -101,6 +102,7 @@ static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_7_0_ebx = {
 };
 
 static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_7_0_ecx = {
+	.baseline = KVM_PT_CPUID_7_ECX_BASELINE,
 	.ymm = KVM_PT_CPUID_7_ECX_YMM,
 	.zmm = KVM_PT_CPUID_7_ECX_ZMM,
 };

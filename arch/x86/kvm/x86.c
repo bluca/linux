@@ -61,6 +61,7 @@
 #include <linux/mem_encrypt.h>
 #include <linux/suspend.h>
 #include <linux/smp.h>
+#include <linux/topology.h>
 
 #include <trace/events/ipi.h>
 #include <trace/events/kvm.h>
@@ -70,6 +71,7 @@
 #include <asm/desc.h>
 #include <asm/mce.h>
 #include <asm/pkru.h>
+#include <asm/segment.h>
 #include <linux/kernel_stat.h>
 #include <asm/fpu/api.h>
 #include <asm/fpu/xcr.h>
@@ -5160,6 +5162,12 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 	}
 
 	kvm_x86_call(vcpu_load)(vcpu, cpu);
+
+	if (vcpu->kvm->protected_task &&
+	    (kvm_cpu_cap_has(X86_FEATURE_RDPID) ||
+	     kvm_cpu_cap_has(X86_FEATURE_RDTSCP)))
+		WARN_ON_ONCE(kvm_msr_write(vcpu, MSR_TSC_AUX,
+				vdso_encode_cpunode(cpu, cpu_to_node(cpu))));
 
 	if (vcpu != per_cpu(last_vcpu, cpu)) {
 		/*
