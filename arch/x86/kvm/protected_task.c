@@ -37,11 +37,14 @@
 #define KVM_PT_VA_LIMIT		BIT_ULL(47)
 #define KVM_PT_NONLEAF_FLAGS	(_PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_ACCESSED)
 #define KVM_PT_SYSCALL_PORT	0xec
+#define KVM_PT_CPUID_1_ECX_BASELINE (BIT(0) | BIT(1) | BIT(9) | BIT(19) | \
+				     BIT(20) | BIT(23) | BIT(25))
 #define KVM_PT_CPUID_1_ECX_XSAVE BIT(26)
 #define KVM_PT_CPUID_1_ECX_AVX BIT(28)
 #define KVM_PT_CPUID_1_ECX_YMM (BIT(12) | KVM_PT_CPUID_1_ECX_AVX | BIT(29))
 #define KVM_PT_CPUID_1_EDX	(BIT(0) | BIT(8) | BIT(15) | BIT(23) | \
 				 BIT(24) | BIT(25) | BIT(26))
+#define KVM_PT_CPUID_7_EBX_BASELINE BIT(29)
 #define KVM_PT_CPUID_7_EBX_AVX2 BIT(5)
 #define KVM_PT_CPUID_7_EBX_AVX512F BIT(16)
 #define KVM_PT_CPUID_7_EBX_AVX512 (KVM_PT_CPUID_7_EBX_AVX512F | BIT(17) | \
@@ -80,6 +83,7 @@ struct kvm_pt_cpuid_classes {
 };
 
 static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_1_ecx = {
+	.baseline = KVM_PT_CPUID_1_ECX_BASELINE,
 	.ymm = KVM_PT_CPUID_1_ECX_YMM,
 };
 
@@ -88,6 +92,7 @@ static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_1_edx = {
 };
 
 static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_7_0_ebx = {
+	.baseline = KVM_PT_CPUID_7_EBX_BASELINE,
 	.ymm = KVM_PT_CPUID_7_EBX_AVX2,
 	.zmm = KVM_PT_CPUID_7_EBX_AVX512,
 };
@@ -193,6 +198,7 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 	unsigned int hi16_zmm_end = 0, opmask_end = 0, tilecfg_end = 0;
 	unsigned int tiledata_end = 0, ymm_end = 0, zmm_hi256_end = 0;
 	u32 leaf7_1_eax, leaf7_1_edx;
+	bool leaf7_enabled;
 	u64 xcr0;
 	int i;
 
@@ -290,6 +296,14 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 	leaf7_1_edx = kvm_protected_task_cpuid_class_mask(state,
 							 &kvm_pt_cpuid_7_1_edx);
 	leaf7_1_edx &= leaf71 ? leaf71->edx : 0;
+	leaf7_enabled = leaf7_1_eax || leaf7_1_edx ||
+		(leaf7 &&
+		 ((leaf7->ebx & kvm_protected_task_cpuid_class_mask(
+					state, &kvm_pt_cpuid_7_0_ebx)) ||
+		  (leaf7->ecx & kvm_protected_task_cpuid_class_mask(
+					state, &kvm_pt_cpuid_7_0_ecx)) ||
+		  (leaf7->edx & kvm_protected_task_cpuid_class_mask(
+					state, &kvm_pt_cpuid_7_0_edx))));
 
 	for (i = 0; i < vcpu->arch.cpuid_nent; i++) {
 		struct kvm_cpuid_entry2 *entry = &vcpu->arch.cpuid_entries[i];
@@ -299,7 +313,7 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 			entry->eax = min(entry->eax,
 					 state->amx ? 0x1dU :
 					 state->avx || state->pku || state->shstk ? 0xdU :
-					 state->lam ? 7U : 1U);
+					 leaf7_enabled ? 7U : 1U);
 			break;
 		case 1:
 			entry->ecx &= kvm_protected_task_cpuid_class_mask(
