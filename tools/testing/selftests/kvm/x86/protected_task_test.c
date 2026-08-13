@@ -841,7 +841,7 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	struct iovec iov;
 	size_t xstate_size;
 	siginfo_t siginfo;
-	long dr6, value;
+	long dr6, instruction, value;
 	int status;
 
 	__cpuid_count(0xd, 0, eax, ebx, xstate_capacity, edx);
@@ -896,17 +896,46 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	regs.r15 = sentinel;
 	TEST_ASSERT(ptrace(PTRACE_SETREGS, child, NULL, &regs) == 0,
 		    "PTRACE_SETREGS failed: %d", errno);
+	errno = 0;
+	instruction = ptrace(PTRACE_PEEKTEXT, child, (void *)breakpoint_rip, NULL);
+	TEST_ASSERT(instruction != -1 || !errno,
+		    "PTRACE_PEEKTEXT failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_POKETEXT, child, (void *)breakpoint_rip,
+			   (void *)((instruction & ~0xffUL) | 0xcc)) == 0,
+		    "PTRACE_POKETEXT breakpoint failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL, NULL) == 0,
+		    "PTRACE_CONT to software breakpoint failed: %d", errno);
+	TEST_ASSERT(write(address_fd, &address, sizeof(address)) == sizeof(address),
+		    "Failed to release software-breakpoint target: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() after software breakpoint failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP,
+		    "Software breakpoint produced unexpected status: %#x", status);
+	TEST_ASSERT(ptrace(PTRACE_GETSIGINFO, child, NULL, &siginfo) == 0,
+		    "PTRACE_GETSIGINFO after software breakpoint failed: %d", errno);
+	TEST_ASSERT(siginfo.si_signo == SIGTRAP && siginfo.si_code == SI_KERNEL,
+		    "Software breakpoint produced signal %d/%d",
+		    siginfo.si_signo, siginfo.si_code);
+	TEST_ASSERT(ptrace(PTRACE_GETREGS, child, NULL, &regs) == 0,
+		    "PTRACE_GETREGS after software breakpoint failed: %d", errno);
+	TEST_ASSERT(regs.rip == breakpoint_rip + 1,
+		    "Software breakpoint produced RIP %#llx, expected %#lx",
+		    regs.rip, breakpoint_rip + 1);
+	TEST_ASSERT(ptrace(PTRACE_POKETEXT, child, (void *)breakpoint_rip,
+			   (void *)instruction) == 0,
+		    "PTRACE_POKETEXT restore failed: %d", errno);
+	regs.rip = breakpoint_rip;
+	TEST_ASSERT(ptrace(PTRACE_SETREGS, child, NULL, &regs) == 0,
+		    "PTRACE_SETREGS after software breakpoint failed: %d", errno);
 	TEST_ASSERT(ptrace(PTRACE_POKEUSER, child,
 			   (void *)offsetof(struct user, u_debugreg[0]),
-			   regs.rip) == 0,
+			   breakpoint_rip) == 0,
 		    "PTRACE_POKEUSER DR0 failed: %d", errno);
 	TEST_ASSERT(ptrace(PTRACE_POKEUSER, child,
 			   (void *)offsetof(struct user, u_debugreg[7]), 1) == 0,
 		    "PTRACE_POKEUSER DR7 failed: %d", errno);
 	TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL, NULL) == 0,
 		    "PTRACE_CONT failed: %d", errno);
-	TEST_ASSERT(write(address_fd, &address, sizeof(address)) == sizeof(address),
-		    "Failed to release hardware-breakpoint target: %d", errno);
 	TEST_ASSERT(waitpid(child, &status, 0) == child,
 		    "waitpid() after hardware breakpoint failed: %d", errno);
 	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP,
