@@ -88,6 +88,14 @@ struct protected_avx_features {
 	bool popcnt;
 	bool aes;
 	bool shani;
+	bool movbe;
+	bool rdrand;
+	bool bmi1;
+	bool bmi2;
+	bool rdseed;
+	bool adx;
+	bool lahf;
+	bool abm;
 	bool avx;
 	bool fma;
 	bool f16c;
@@ -160,13 +168,19 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.ssse3 = entry->ecx & (1U << 9);
 			features.sse41 = entry->ecx & (1U << 19);
 			features.sse42 = entry->ecx & (1U << 20);
+			features.movbe = entry->ecx & (1U << 22);
 			features.popcnt = entry->ecx & (1U << 23);
 			features.aes = entry->ecx & (1U << 25);
+			features.rdrand = entry->ecx & (1U << 30);
 			avx = (entry->ecx & ((1U << 26) | (1U << 28))) ==
 				((1U << 26) | (1U << 28));
 			features.fma = entry->ecx & (1U << 12);
 			features.f16c = entry->ecx & (1U << 29);
 		} else if (entry->function == 7 && !entry->index) {
+			features.bmi1 = entry->ebx & (1U << 3);
+			features.bmi2 = entry->ebx & (1U << 8);
+			features.rdseed = entry->ebx & (1U << 18);
+			features.adx = entry->ebx & (1U << 19);
 			features.shani = entry->ebx & (1U << 29);
 			features.avx2 = entry->ebx & (1U << 5);
 			avx512 = entry->ebx & (1U << 16);
@@ -199,6 +213,9 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avxvnniint8 = entry->edx & (1U << 4);
 			features.avxneconvert = entry->edx & (1U << 5);
 			features.avxvnniint16 = entry->edx & (1U << 10);
+		} else if (entry->function == 0x80000001) {
+			features.lahf = entry->ecx & (1U << 0);
+			features.abm = entry->ecx & (1U << 5);
 		} else if (entry->function == 0xd && !entry->index) {
 			ymm = entry->eax & (1U << 2);
 			avx512_xstate = (entry->eax & (0xe0U)) == 0xe0U;
@@ -284,6 +301,30 @@ static void append_expected_avx_profile(
 	if (features->shani)
 		append_expected_output(output, output_size, length,
 				       "protected task sha_ni\n");
+	if (features->movbe)
+		append_expected_output(output, output_size, length,
+				       "protected task movbe\n");
+	if (features->rdrand)
+		append_expected_output(output, output_size, length,
+				       "protected task rdrand\n");
+	if (features->bmi1)
+		append_expected_output(output, output_size, length,
+				       "protected task bmi1\n");
+	if (features->bmi2)
+		append_expected_output(output, output_size, length,
+				       "protected task bmi2\n");
+	if (features->rdseed)
+		append_expected_output(output, output_size, length,
+				       "protected task rdseed\n");
+	if (features->adx)
+		append_expected_output(output, output_size, length,
+				       "protected task adx\n");
+	if (features->lahf)
+		append_expected_output(output, output_size, length,
+				       "protected task lahf\n");
+	if (features->abm)
+		append_expected_output(output, output_size, length,
+				       "protected task abm\n");
 	if (features->avx)
 		append_expected_output(output, output_size, length,
 				       "protected task avx\n");
