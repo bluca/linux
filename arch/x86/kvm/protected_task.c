@@ -1288,6 +1288,9 @@ int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *arch_state,
 	struct kvm_protected_task_x86 *state = arch_state;
 	int ret;
 
+	/* Only x86-64 is supported, reject x32/i*86 */
+	if (test_thread_flag(TIF_ADDR32))
+		return -EOPNOTSUPP;
 	if (WARN_ON_ONCE(current->mm != vcpu->kvm->mm))
 		return -EIO;
 
