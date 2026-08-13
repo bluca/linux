@@ -38,13 +38,14 @@
 #define KVM_PT_NONLEAF_FLAGS	(_PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_ACCESSED)
 #define KVM_PT_SYSCALL_PORT	0xec
 #define KVM_PT_CPUID_1_ECX_BASELINE (BIT(0) | BIT(1) | BIT(9) | BIT(19) | \
-				     BIT(20) | BIT(23) | BIT(25))
+				     BIT(20) | BIT(22) | BIT(23) | BIT(25) | BIT(30))
 #define KVM_PT_CPUID_1_ECX_XSAVE BIT(26)
 #define KVM_PT_CPUID_1_ECX_AVX BIT(28)
 #define KVM_PT_CPUID_1_ECX_YMM (BIT(12) | KVM_PT_CPUID_1_ECX_AVX | BIT(29))
 #define KVM_PT_CPUID_1_EDX	(BIT(0) | BIT(8) | BIT(15) | BIT(23) | \
 				 BIT(24) | BIT(25) | BIT(26))
-#define KVM_PT_CPUID_7_EBX_BASELINE BIT(29)
+#define KVM_PT_CPUID_7_EBX_BASELINE (BIT(3) | BIT(8) | BIT(18) | BIT(19) | \
+				     BIT(29))
 #define KVM_PT_CPUID_7_EBX_AVX2 BIT(5)
 #define KVM_PT_CPUID_7_EBX_AVX512F BIT(16)
 #define KVM_PT_CPUID_7_EBX_AVX512 (KVM_PT_CPUID_7_EBX_AVX512F | BIT(17) | \
@@ -63,6 +64,7 @@
 #define KVM_PT_CPUID_D_1_EAX_XGETBV1 BIT(2)
 #define KVM_PT_CPUID_D_1_EAX_XSAVES BIT(3)
 #define KVM_PT_CPUID_D_1_EAX_XFD BIT(4)
+#define KVM_PT_CPUID_80000001_ECX (BIT(0) | BIT(5))
 #define KVM_PT_CPUID_80000001_EDX (BIT(11) | BIT(20) | BIT(29))
 #define KVM_PT_AMX_TILE_BYTES	8192
 #define KVM_PT_AMX_BYTES_PER_TILE 1024
@@ -114,6 +116,10 @@ static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_7_1_eax = {
 
 static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_7_1_edx = {
 	.ymm = KVM_PT_CPUID_7_1_EDX_AVX,
+};
+
+static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_80000001_ecx = {
+	.baseline = KVM_PT_CPUID_80000001_ECX,
 };
 
 static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_80000001_edx = {
@@ -430,7 +436,8 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 			entry->eax = min(entry->eax, 0x80000008U);
 			break;
 		case 0x80000001:
-			entry->ecx = 0;
+			entry->ecx &= kvm_protected_task_cpuid_class_mask(
+						state, &kvm_pt_cpuid_80000001_ecx);
 			entry->edx &= kvm_protected_task_cpuid_class_mask(
 						state, &kvm_pt_cpuid_80000001_edx);
 			break;
