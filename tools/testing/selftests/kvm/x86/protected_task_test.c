@@ -209,6 +209,7 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		hi16_zmm_end - 1024 >= zmm_hi256_end;
 	if (!features.avx)
 		features.fma = features.f16c = features.avx2 =
+			features.gfni = features.vaes = features.vpclmulqdq =
 			features.avxvnni = features.avxifma =
 			features.avxvnniint8 = features.avxneconvert =
 			features.avxvnniint16 = features.sha512 =
@@ -218,8 +219,7 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avx512pf = features.avx512er =
 			features.avx512cd = features.avx512bw =
 			features.avx512vl = features.avx512vbmi =
-			features.avx512vbmi2 = features.gfni =
-			features.vaes = features.vpclmulqdq =
+			features.avx512vbmi2 =
 			features.avx512vnni = features.avx512bitalg =
 			features.avx512vpopcntdq = features.avx5124vnniw =
 			features.avx5124fmaps = features.avx512vp2intersect =

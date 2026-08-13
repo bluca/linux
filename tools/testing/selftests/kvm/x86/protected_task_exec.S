@@ -3493,21 +3493,11 @@ check_cpu_profile:
 	mov $0x18, %r13d
 .Lcpu_leaf7_shstk:
 	cmpl $0, shstk_available(%rip)
-	je .Lcpu_leaf7_avx512vbmi
+	je .Lcpu_leaf7_gfni
 	or $0x80, %r13d
-.Lcpu_leaf7_avx512vbmi:
-	cmpl $0, avx512_available(%rip)
-	je .Lcpu_leaf7_ecx
-	test $0x2, %ecx
-	jz .Lcpu_leaf7_avx512vbmi2
-	movl $1, avx512vbmi_available(%rip)
-	or $0x2, %r13d
-.Lcpu_leaf7_avx512vbmi2:
-	test $0x40, %ecx
-	jz .Lcpu_leaf7_gfni
-	movl $1, avx512vbmi2_available(%rip)
-	or $0x40, %r13d
 .Lcpu_leaf7_gfni:
+	cmpl $0, avx_available(%rip)
+	je .Lcpu_leaf7_avx512vbmi
 	test $0x100, %ecx
 	jz .Lcpu_leaf7_vaes
 	movl $1, gfni_available(%rip)
@@ -3519,9 +3509,21 @@ check_cpu_profile:
 	or $0x200, %r13d
 .Lcpu_leaf7_vpclmulqdq:
 	test $0x400, %ecx
-	jz .Lcpu_leaf7_avx512vnni
+	jz .Lcpu_leaf7_avx512vbmi
 	movl $1, vpclmulqdq_available(%rip)
 	or $0x400, %r13d
+.Lcpu_leaf7_avx512vbmi:
+	cmpl $0, avx512_available(%rip)
+	je .Lcpu_leaf7_ecx
+	test $0x2, %ecx
+	jz .Lcpu_leaf7_avx512vbmi2
+	movl $1, avx512vbmi_available(%rip)
+	or $0x2, %r13d
+.Lcpu_leaf7_avx512vbmi2:
+	test $0x40, %ecx
+	jz .Lcpu_leaf7_avx512vnni
+	movl $1, avx512vbmi2_available(%rip)
+	or $0x40, %r13d
 .Lcpu_leaf7_avx512vnni:
 	test $0x800, %ecx
 	jz .Lcpu_leaf7_avx512bitalg
