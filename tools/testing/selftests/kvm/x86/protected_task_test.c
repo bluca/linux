@@ -140,18 +140,22 @@ struct protected_avx_features {
 	bool sm3;
 	bool sm4;
 	bool pku;
+	bool amx;
 	__u32 ymm_offset;
 	__u32 opmask_offset;
 	__u32 zmm_hi256_offset;
 	__u32 hi16_zmm_offset;
 	__u32 pkru_offset;
+	__u32 tilecfg_offset;
+	__u32 tiledata_offset;
 };
 
 static bool kvm_supported_xstate_component(
-		const struct kvm_cpuid_entry2 *entry, __u32 size, __u32 *end)
+		const struct kvm_cpuid_entry2 *entry, __u32 size, bool xfd,
+		__u32 *end)
 {
 	return entry->eax == size && entry->ebx >= 576 &&
-		!(entry->ecx & ((1U << 0) | (1U << 2))) &&
+		!(entry->ecx & (1U << 0)) && !!(entry->ecx & (1U << 2)) == xfd &&
 		!__builtin_add_overflow(entry->ebx, entry->eax, end);
 }
 
@@ -166,12 +170,14 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 	};
 	struct protected_avx_features features = {};
 	bool avx = false, avx512 = false, avx512_xstate = false;
+	bool amx_controls = false, amx_palette0 = false, amx_palette1 = false;
+	bool amx_tile = false, tilecfg = false, tiledata = false;
 	bool hi16_zmm = false, opmask = false, ymm = false;
 	bool pku = false, pkru_component = false, xsave = false;
 	bool ymm_component = false, zmm_hi256 = false;
 	__u32 xfeatures = 0;
 	__u32 hi16_zmm_end = 0, opmask_end = 0, ymm_end = 0;
-	__u32 zmm_hi256_end = 0;
+	__u32 tilecfg_end = 0, tiledata_end = 0, zmm_hi256_end = 0;
 	unsigned int i;
 	int ret;
 
@@ -226,6 +232,7 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avx5124fmaps = entry->edx & (1U << 3);
 			features.avx512vp2intersect = entry->edx & (1U << 8);
 			features.avx512fp16 = entry->edx & (1U << 23);
+			amx_tile = entry->edx & (1U << 24);
 		} else if (entry->function == 7 && entry->index == 1) {
 			features.sha512 = entry->eax & (1U << 0);
 			features.sm3 = entry->eax & (1U << 1);
@@ -247,24 +254,40 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			ymm = entry->eax & (1U << 2);
 			avx512_xstate = (entry->eax & (0xe0U)) == 0xe0U;
 		} else if (entry->function == 0xd && entry->index == 2) {
-			ymm_component = kvm_supported_xstate_component(entry, 256,
+			ymm_component = kvm_supported_xstate_component(entry, 256, false,
 								 &ymm_end);
 			features.ymm_offset = entry->ebx;
 		} else if (entry->function == 0xd && entry->index == 5) {
-			opmask = kvm_supported_xstate_component(entry, 64,
+			opmask = kvm_supported_xstate_component(entry, 64, false,
 							       &opmask_end);
 			features.opmask_offset = entry->ebx;
 		} else if (entry->function == 0xd && entry->index == 6) {
-			zmm_hi256 = kvm_supported_xstate_component(entry, 512,
+			zmm_hi256 = kvm_supported_xstate_component(entry, 512, false,
 								  &zmm_hi256_end);
 			features.zmm_hi256_offset = entry->ebx;
 		} else if (entry->function == 0xd && entry->index == 7) {
-			hi16_zmm = kvm_supported_xstate_component(entry, 1024,
+			hi16_zmm = kvm_supported_xstate_component(entry, 1024, false,
 								 &hi16_zmm_end);
 			features.hi16_zmm_offset = entry->ebx;
 		} else if (entry->function == 0xd && entry->index == 9) {
 			pkru_component = entry->eax && entry->ebx >= 576;
 			features.pkru_offset = entry->ebx;
+		} else if (entry->function == 0xd && entry->index == 1) {
+			amx_controls = (entry->eax & 0x1cU) == 0x1cU;
+		} else if (entry->function == 0xd && entry->index == 17) {
+			tilecfg = kvm_supported_xstate_component(entry, 64, false,
+								 &tilecfg_end);
+			features.tilecfg_offset = entry->ebx;
+		} else if (entry->function == 0xd && entry->index == 18) {
+			tiledata = kvm_supported_xstate_component(entry, 8192, true,
+								  &tiledata_end);
+			features.tiledata_offset = entry->ebx;
+		} else if (entry->function == 0x1d && !entry->index) {
+			amx_palette0 = entry->eax >= 1;
+		} else if (entry->function == 0x1d && entry->index == 1) {
+			amx_palette1 = entry->eax == 0x04002000 &&
+				entry->ebx == 0x00080040 && entry->ecx == 16 &&
+				!entry->edx;
 		}
 	}
 
@@ -276,6 +299,10 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		hi16_zmm_end - 1024 >= zmm_hi256_end;
 	features.pku = xsave && pku && (xfeatures & (1U << 9)) &&
 		pkru_component;
+	features.amx = amx_tile &&
+		(xfeatures & 0x60000U) == 0x60000U && amx_controls &&
+		tilecfg && tiledata && features.tiledata_offset >= tilecfg_end &&
+		amx_palette0 && amx_palette1;
 	if (!features.avx)
 		features.fma = features.f16c = features.avx2 =
 			features.gfni = features.vaes = features.vpclmulqdq =
@@ -1184,7 +1211,8 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 }
 
 static void test_exec_event_ptrace(pid_t child, unsigned long address,
-				    int address_fd)
+				    int address_fd,
+				    const struct protected_avx_features *features)
 {
 	struct user_regs_struct regs;
 	unsigned long event_msg;
@@ -1202,6 +1230,85 @@ static void test_exec_event_ptrace(pid_t child, unsigned long address,
 	TEST_ASSERT(value == -1 && errno == EIO,
 		    "PTRACE_PEEKDATA before exec returned %ld/%d, expected -1/%d",
 		    value, errno, EIO);
+	if (features->amx) {
+		unsigned char *expected_xstate, *original_xstate, *xstate;
+		unsigned int eax, ebx, xstate_capacity, edx;
+		const size_t xstate_bv_offset = 512;
+		__u64 xstate_bv;
+		struct iovec iov;
+		siginfo_t siginfo;
+		size_t xstate_size;
+		unsigned int i;
+
+		__cpuid_count(0xd, 0, eax, ebx, xstate_capacity, edx);
+		xstate = malloc(xstate_capacity);
+		expected_xstate = malloc(xstate_capacity);
+		original_xstate = malloc(xstate_capacity);
+		TEST_ASSERT(xstate && expected_xstate && original_xstate,
+			    "Failed to allocate AMX xstate buffers");
+		iov.iov_base = xstate;
+		iov.iov_len = xstate_capacity;
+		TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_XSTATE,
+				   &iov) == 0,
+			    "PTRACE_GETREGSET before AMX write failed: %d", errno);
+		xstate_size = iov.iov_len;
+		TEST_ASSERT(xstate_size >= features->tilecfg_offset + 64 &&
+			    xstate_size >= features->tiledata_offset + 8192,
+			    "NT_X86_XSTATE has incomplete AMX state: %zu", xstate_size);
+		memcpy(original_xstate, xstate, xstate_size);
+		memset(xstate + features->tilecfg_offset, 0, 64);
+		xstate[features->tilecfg_offset] = 1;
+		for (i = 0; i < 8; i++) {
+			__u16 colsb = 64;
+
+			memcpy(xstate + features->tilecfg_offset + 16 + i * 2,
+			       &colsb, sizeof(colsb));
+			xstate[features->tilecfg_offset + 48 + i] = 16;
+		}
+		memset(xstate + features->tiledata_offset, 0xa5, 8192);
+		memcpy(&xstate_bv, xstate + xstate_bv_offset, sizeof(xstate_bv));
+		xstate_bv |= 0x60000;
+		memcpy(xstate + xstate_bv_offset, &xstate_bv, sizeof(xstate_bv));
+		memcpy(expected_xstate, xstate, xstate_size);
+		iov.iov_len = xstate_size;
+		TEST_ASSERT(ptrace(PTRACE_SETREGSET, child, (void *)NT_X86_XSTATE,
+				   &iov) == 0,
+			    "PTRACE_SETREGSET AMX write failed: %d", errno);
+		iov.iov_len = xstate_capacity;
+		TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_XSTATE,
+				   &iov) == 0 && iov.iov_len == xstate_size &&
+			    !memcmp(xstate, expected_xstate, xstate_size),
+			    "PTRACE_SETREGSET did not update complete AMX state");
+		TEST_ASSERT(ptrace(PTRACE_SINGLESTEP, child, NULL, NULL) == 0,
+			    "PTRACE_SINGLESTEP with AMX state failed: %d", errno);
+		TEST_ASSERT(waitpid(child, &status, 0) == child,
+			    "waitpid() after AMX single-step failed: %d", errno);
+		TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP,
+			    "AMX single-step produced unexpected status: %#x", status);
+		TEST_ASSERT(ptrace(PTRACE_GETSIGINFO, child, NULL, &siginfo) == 0 &&
+			    siginfo.si_code == TRAP_TRACE,
+			    "AMX single-step produced unexpected siginfo: %d/%d",
+			    siginfo.si_signo, siginfo.si_code);
+		iov.iov_len = xstate_capacity;
+		TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_XSTATE,
+				   &iov) == 0 && iov.iov_len == xstate_size &&
+			    !memcmp(xstate, expected_xstate, xstate_size),
+			    "Complete AMX state changed after single-step");
+		iov.iov_base = original_xstate;
+		iov.iov_len = xstate_size;
+		TEST_ASSERT(ptrace(PTRACE_SETREGSET, child, (void *)NT_X86_XSTATE,
+				   &iov) == 0,
+			    "PTRACE_SETREGSET AMX restore failed: %d", errno);
+		iov.iov_base = xstate;
+		iov.iov_len = xstate_capacity;
+		TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_XSTATE,
+				   &iov) == 0 && iov.iov_len == xstate_size &&
+			    !memcmp(xstate, original_xstate, xstate_size),
+			    "PTRACE_SETREGSET did not restore complete AMX state");
+		free(original_xstate);
+		free(expected_xstate);
+		free(xstate);
+	}
 	TEST_ASSERT(ptrace(PTRACE_SETOPTIONS, child, NULL,
 			   PTRACE_O_TRACEEXEC) == 0,
 		    "PTRACE_SETOPTIONS before exec failed: %d", errno);
@@ -1337,7 +1444,8 @@ static void test_protected_exec(int kvm_fd)
 			test_hardware_breakpoint_ptrace(target, address,
 						 address_pipe[1], &features);
 		else if (i == 5)
-			test_exec_event_ptrace(target, address, address_pipe[1]);
+			test_exec_event_ptrace(target, address, address_pipe[1],
+					       &features);
 		else {
 			test_hidden_mapping_ptrace(target, address);
 			TEST_ASSERT(write(address_pipe[1], &address, sizeof(address)) == sizeof(address),
