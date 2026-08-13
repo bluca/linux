@@ -37,10 +37,13 @@
 #define KVM_PT_VA_LIMIT		BIT_ULL(47)
 #define KVM_PT_NONLEAF_FLAGS	(_PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_ACCESSED)
 #define KVM_PT_SYSCALL_PORT	0xec
+#define KVM_PT_CPUID_1_ECX_FMA BIT(12)
 #define KVM_PT_CPUID_1_ECX_XSAVE BIT(26)
 #define KVM_PT_CPUID_1_ECX_AVX BIT(28)
+#define KVM_PT_CPUID_1_ECX_F16C BIT(29)
 #define KVM_PT_CPUID_1_EDX	(BIT(0) | BIT(8) | BIT(15) | BIT(23) | \
 				 BIT(24) | BIT(25) | BIT(26))
+#define KVM_PT_CPUID_7_EBX_AVX2 BIT(5)
 #define KVM_PT_CPUID_7_ECX_PKU	BIT(3)
 #define KVM_PT_CPUID_7_ECX_SHSTK BIT(7)
 #define KVM_PT_CPUID_7_EDX_AMX_TILE BIT(24)
@@ -199,7 +202,9 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 			break;
 		case 1:
 			entry->ecx &=
-				(state->avx ? KVM_PT_CPUID_1_ECX_AVX : 0) |
+				(state->avx ? KVM_PT_CPUID_1_ECX_FMA |
+					      KVM_PT_CPUID_1_ECX_AVX |
+					      KVM_PT_CPUID_1_ECX_F16C : 0) |
 				(state->avx || state->pku || state->shstk || state->amx ?
 				 KVM_PT_CPUID_1_ECX_XSAVE : 0);
 			entry->edx &= KVM_PT_CPUID_1_EDX;
@@ -207,7 +212,7 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 		case 7:
 			if (!entry->index) {
 				entry->eax = state->lam ? 1 : 0;
-				entry->ebx = 0;
+				entry->ebx &= state->avx ? KVM_PT_CPUID_7_EBX_AVX2 : 0;
 				entry->ecx &=
 					(state->pku ? KVM_PT_CPUID_7_ECX_PKU : 0) |
 					(state->shstk ? KVM_PT_CPUID_7_ECX_SHSTK : 0);
