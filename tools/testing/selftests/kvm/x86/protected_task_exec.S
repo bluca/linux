@@ -132,6 +132,15 @@ lahf_message:
 abm_message:
 	.ascii "protected task abm\n"
 .set abm_message_length, . - abm_message
+clflushopt_message:
+	.ascii "protected task clflushopt\n"
+.set clflushopt_message_length, . - clflushopt_message
+clwb_message:
+	.ascii "protected task clwb\n"
+.set clwb_message_length, . - clwb_message
+clzero_message:
+	.ascii "protected task clzero\n"
+.set clzero_message_length, . - clzero_message
 avx_message:
 	.ascii "protected task avx\n"
 .set avx_message_length, . - avx_message
@@ -387,6 +396,9 @@ failure_code:
 	.balign 8
 initial_stack:
 	.quad 0
+	.balign 64
+cache_line:
+	.zero 64
 	.balign 4
 thread_tid:
 	.long 0
@@ -452,6 +464,15 @@ lahf_available:
 	.long 0
 	.balign 4
 abm_available:
+	.long 0
+	.balign 4
+clflushopt_available:
+	.long 0
+	.balign 4
+clwb_available:
+	.long 0
+	.balign 4
+clzero_available:
 	.long 0
 	.balign 4
 avx_available:
@@ -816,6 +837,39 @@ _start:
 	cmp $abm_message_length, %rax
 	jne 1f
 .Lcpu_profile_abm_reported:
+	cmpl $0, clflushopt_available(%rip)
+	je .Lcpu_profile_clflushopt_reported
+	movl $190, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea clflushopt_message(%rip), %rsi
+	mov $clflushopt_message_length, %edx
+	syscall
+	cmp $clflushopt_message_length, %rax
+	jne 1f
+.Lcpu_profile_clflushopt_reported:
+	cmpl $0, clwb_available(%rip)
+	je .Lcpu_profile_clwb_reported
+	movl $191, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea clwb_message(%rip), %rsi
+	mov $clwb_message_length, %edx
+	syscall
+	cmp $clwb_message_length, %rax
+	jne 1f
+.Lcpu_profile_clwb_reported:
+	cmpl $0, clzero_available(%rip)
+	je .Lcpu_profile_clzero_reported
+	movl $192, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea clzero_message(%rip), %rsi
+	mov $clzero_message_length, %edx
+	syscall
+	cmp $clzero_message_length, %rax
+	jne 1f
+.Lcpu_profile_clzero_reported:
 	cmpl $0, avx_available(%rip)
 	je .Lcpu_profile_avx_reported
 	movl $133, failure_code(%rip)
@@ -3552,6 +3606,9 @@ check_cpu_profile:
 	movl $0, adx_available(%rip)
 	movl $0, lahf_available(%rip)
 	movl $0, abm_available(%rip)
+	movl $0, clflushopt_available(%rip)
+	movl $0, clwb_available(%rip)
+	movl $0, clzero_available(%rip)
 	movl $0, avx_available(%rip)
 	movl $0, fma_available(%rip)
 	movl $0, f16c_available(%rip)
@@ -3721,6 +3778,10 @@ check_cpu_profile:
 	cmpl $0, rdseed_available(%rip)
 	jne .Lcpu_profile_leaf7_max
 	cmpl $0, adx_available(%rip)
+	jne .Lcpu_profile_leaf7_max
+	cmpl $0, clflushopt_available(%rip)
+	jne .Lcpu_profile_leaf7_max
+	cmpl $0, clwb_available(%rip)
 	je .Lcpu_profile_check_max
 .Lcpu_profile_leaf7_max:
 	mov $7, %r13d
@@ -3826,9 +3887,19 @@ check_cpu_profile:
 	or $0x40000, %r13d
 .Lcpu_leaf7_adx:
 	test $0x80000, %ebx
-	jz .Lcpu_leaf7_shani
+	jz .Lcpu_leaf7_clflushopt
 	movl $1, adx_available(%rip)
 	or $0x80000, %r13d
+.Lcpu_leaf7_clflushopt:
+	test $0x800000, %ebx
+	jz .Lcpu_leaf7_clwb
+	movl $1, clflushopt_available(%rip)
+	or $0x800000, %r13d
+.Lcpu_leaf7_clwb:
+	test $0x1000000, %ebx
+	jz .Lcpu_leaf7_shani
+	movl $1, clwb_available(%rip)
+	or $0x1000000, %r13d
 .Lcpu_leaf7_shani:
 	test $0x20000000, %ebx
 	jz .Lcpu_leaf7_avx
@@ -4427,6 +4498,22 @@ check_cpu_profile:
 	jne 2f
 	cmp $0x20100800, %edx
 	jne 2f
+	mov $193, %r11d
+	mov $0x80000008, %eax
+	xor %ecx, %ecx
+	cpuid
+	xor %r13d, %r13d
+	test $0x1, %ebx
+	jz .Lcpu_extended_8_ebx
+	movl $1, clzero_available(%rip)
+	or $0x1, %r13d
+.Lcpu_extended_8_ebx:
+	cmp %r13d, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
 
 	mov (%rdi), %rcx
 	lea 16(%rdi,%rcx,8), %r8
@@ -4724,8 +4811,101 @@ check_cpu_profile:
 	sahf
 .Lcpu_instruction_abm:
 	cmpl $0, abm_available(%rip)
-	je .Lcpu_instructions_done
+	je .Lcpu_instruction_clflushopt
 	lzcnt %rax, %rax
+.Lcpu_instruction_clflushopt:
+	cmpl $0, clflushopt_available(%rip)
+	je .Lcpu_instruction_clwb
+	clflushopt cache_line(%rip)
+	sfence
+.Lcpu_instruction_clwb:
+	cmpl $0, clwb_available(%rip)
+	je .Lcpu_instruction_clzero
+	clwb cache_line(%rip)
+	sfence
+.Lcpu_instruction_clzero:
+	cmpl $0, clzero_available(%rip)
+	je .Lcpu_instruction_clflushopt_fault
+	movabs $0x5a5a5a5a5a5a5a5a, %rdx
+	mov %rdx, cache_line(%rip)
+	mov %rdx, cache_line+8(%rip)
+	mov %rdx, cache_line+16(%rip)
+	mov %rdx, cache_line+24(%rip)
+	mov %rdx, cache_line+32(%rip)
+	mov %rdx, cache_line+40(%rip)
+	mov %rdx, cache_line+48(%rip)
+	mov %rdx, cache_line+56(%rip)
+	lea cache_line(%rip), %rax
+	.byte 0x0f, 0x01, 0xfc
+	mfence
+	mov $194, %r11d
+	cmpq $0, cache_line(%rip)
+	jne 2f
+	cmpq $0, cache_line+8(%rip)
+	jne 2f
+	cmpq $0, cache_line+16(%rip)
+	jne 2f
+	cmpq $0, cache_line+24(%rip)
+	jne 2f
+	cmpq $0, cache_line+32(%rip)
+	jne 2f
+	cmpq $0, cache_line+40(%rip)
+	jne 2f
+	cmpq $0, cache_line+48(%rip)
+	jne 2f
+	cmpq $0, cache_line+56(%rip)
+	jne 2f
+.Lcpu_instruction_clflushopt_fault:
+	cmpl $0, clflushopt_available(%rip)
+	je .Lcpu_instruction_clwb_fault
+	mov $195, %r11d
+	mov $11, %edi
+	mov $1, %esi
+	mov $14, %edx
+	mov $0x1000, %ecx
+	lea .Lcpu_instruction_clflushopt_resume(%rip), %r8
+	mov $0x1000, %r9d
+	call prepare_exception
+	mov $0x1000, %eax
+	clflushopt (%rax)
+.Lcpu_instruction_clflushopt_resume:
+	call check_exception
+	test %eax, %eax
+	jne 2f
+.Lcpu_instruction_clwb_fault:
+	cmpl $0, clwb_available(%rip)
+	je .Lcpu_instruction_clzero_fault
+	mov $196, %r11d
+	mov $11, %edi
+	mov $1, %esi
+	mov $14, %edx
+	mov $0x1000, %ecx
+	lea .Lcpu_instruction_clwb_resume(%rip), %r8
+	mov $0x1000, %r9d
+	call prepare_exception
+	mov $0x1000, %eax
+	clwb (%rax)
+.Lcpu_instruction_clwb_resume:
+	call check_exception
+	test %eax, %eax
+	jne 2f
+.Lcpu_instruction_clzero_fault:
+	cmpl $0, clzero_available(%rip)
+	je .Lcpu_instructions_done
+	mov $197, %r11d
+	mov $11, %edi
+	mov $1, %esi
+	mov $14, %edx
+	mov $0x1000, %ecx
+	lea .Lcpu_instruction_clzero_resume(%rip), %r8
+	mov $0x1000, %r9d
+	call prepare_exception
+	mov $0x1000, %eax
+	.byte 0x0f, 0x01, 0xfc
+.Lcpu_instruction_clzero_resume:
+	call check_exception
+	test %eax, %eax
+	jne 2f
 .Lcpu_instructions_done:
 	xor %eax, %eax
 	pop %r13

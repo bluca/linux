@@ -96,6 +96,9 @@ struct protected_avx_features {
 	bool adx;
 	bool lahf;
 	bool abm;
+	bool clflushopt;
+	bool clwb;
+	bool clzero;
 	bool avx;
 	bool fma;
 	bool f16c;
@@ -181,6 +184,8 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.bmi2 = entry->ebx & (1U << 8);
 			features.rdseed = entry->ebx & (1U << 18);
 			features.adx = entry->ebx & (1U << 19);
+			features.clflushopt = entry->ebx & (1U << 23);
+			features.clwb = entry->ebx & (1U << 24);
 			features.shani = entry->ebx & (1U << 29);
 			features.avx2 = entry->ebx & (1U << 5);
 			avx512 = entry->ebx & (1U << 16);
@@ -216,6 +221,8 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		} else if (entry->function == 0x80000001) {
 			features.lahf = entry->ecx & (1U << 0);
 			features.abm = entry->ecx & (1U << 5);
+		} else if (entry->function == 0x80000008) {
+			features.clzero = entry->ebx & (1U << 0);
 		} else if (entry->function == 0xd && !entry->index) {
 			ymm = entry->eax & (1U << 2);
 			avx512_xstate = (entry->eax & (0xe0U)) == 0xe0U;
@@ -325,6 +332,15 @@ static void append_expected_avx_profile(
 	if (features->abm)
 		append_expected_output(output, output_size, length,
 				       "protected task abm\n");
+	if (features->clflushopt)
+		append_expected_output(output, output_size, length,
+				       "protected task clflushopt\n");
+	if (features->clwb)
+		append_expected_output(output, output_size, length,
+				       "protected task clwb\n");
+	if (features->clzero)
+		append_expected_output(output, output_size, length,
+				       "protected task clzero\n");
 	if (features->avx)
 		append_expected_output(output, output_size, length,
 				       "protected task avx\n");
