@@ -45,7 +45,7 @@
 #define KVM_PT_CPUID_1_EDX	(BIT(0) | BIT(8) | BIT(15) | BIT(23) | \
 				 BIT(24) | BIT(25) | BIT(26))
 #define KVM_PT_CPUID_7_EBX_BASELINE (BIT(3) | BIT(8) | BIT(18) | BIT(19) | \
-				     BIT(29))
+				     BIT(23) | BIT(24) | BIT(29))
 #define KVM_PT_CPUID_7_EBX_AVX2 BIT(5)
 #define KVM_PT_CPUID_7_EBX_AVX512F BIT(16)
 #define KVM_PT_CPUID_7_EBX_AVX512 (KVM_PT_CPUID_7_EBX_AVX512F | BIT(17) | \
@@ -66,6 +66,7 @@
 #define KVM_PT_CPUID_D_1_EAX_XFD BIT(4)
 #define KVM_PT_CPUID_80000001_ECX (BIT(0) | BIT(5))
 #define KVM_PT_CPUID_80000001_EDX (BIT(11) | BIT(20) | BIT(29))
+#define KVM_PT_CPUID_80000008_EBX BIT(0)
 #define KVM_PT_AMX_TILE_BYTES	8192
 #define KVM_PT_AMX_BYTES_PER_TILE 1024
 #define KVM_PT_AMX_BYTES_PER_ROW	64
@@ -124,6 +125,10 @@ static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_80000001_ecx = {
 
 static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_80000001_edx = {
 	.baseline = KVM_PT_CPUID_80000001_EDX,
+};
+
+static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_80000008_ebx = {
+	.baseline = KVM_PT_CPUID_80000008_EBX,
 };
 
 struct kvm_protected_task_x86 {
@@ -442,7 +447,8 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 						state, &kvm_pt_cpuid_80000001_edx);
 			break;
 		case 0x80000008:
-			entry->ebx = 0;
+			entry->ebx &= kvm_protected_task_cpuid_class_mask(
+						state, &kvm_pt_cpuid_80000008_ebx);
 			entry->ecx = 0;
 			entry->edx = 0;
 			break;
