@@ -80,6 +80,15 @@ message:
 avx_message:
 	.ascii "protected task avx\n"
 .set avx_message_length, . - avx_message
+fma_message:
+	.ascii "protected task fma\n"
+.set fma_message_length, . - fma_message
+f16c_message:
+	.ascii "protected task f16c\n"
+.set f16c_message_length, . - f16c_message
+avx2_message:
+	.ascii "protected task avx2\n"
+.set avx2_message_length, . - avx2_message
 
 	.balign 32
 initial_ymm:
@@ -232,6 +241,15 @@ pku_available:
 avx_available:
 	.long 0
 	.balign 4
+fma_available:
+	.long 0
+	.balign 4
+f16c_available:
+	.long 0
+	.balign 4
+avx2_available:
+	.long 0
+	.balign 4
 lam_available:
 	.long 0
 	.balign 4
@@ -318,6 +336,39 @@ _start:
 	cmp $avx_message_length, %rax
 	jne 1f
 .Lcpu_profile_avx_reported:
+	cmpl $0, fma_available(%rip)
+	je .Lcpu_profile_fma_reported
+	movl $135, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea fma_message(%rip), %rsi
+	mov $fma_message_length, %edx
+	syscall
+	cmp $fma_message_length, %rax
+	jne 1f
+.Lcpu_profile_fma_reported:
+	cmpl $0, f16c_available(%rip)
+	je .Lcpu_profile_f16c_reported
+	movl $136, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea f16c_message(%rip), %rsi
+	mov $f16c_message_length, %edx
+	syscall
+	cmp $f16c_message_length, %rax
+	jne 1f
+.Lcpu_profile_f16c_reported:
+	cmpl $0, avx2_available(%rip)
+	je .Lcpu_profile_avx2_reported
+	movl $137, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx2_message(%rip), %rsi
+	mov $avx2_message_length, %edx
+	syscall
+	cmp $avx2_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx2_reported:
 	movl $124, failure_code(%rip)
 	call check_initial_shstk
 	test %eax, %eax
@@ -2676,6 +2727,9 @@ check_cpu_profile:
 	push %r12
 	push %r13
 	movl $0, avx_available(%rip)
+	movl $0, fma_available(%rip)
+	movl $0, f16c_available(%rip)
+	movl $0, avx2_available(%rip)
 	movl $0, pku_available(%rip)
 	movl $0, lam_available(%rip)
 	movl $0, shstk_available(%rip)
@@ -2699,6 +2753,13 @@ check_cpu_profile:
 	test $0x10000000, %ecx
 	jz .Lcpu_detect_extended_max
 	movl $1, avx_available(%rip)
+	test $0x1000, %ecx
+	jz .Lcpu_detect_f16c
+	movl $1, fma_available(%rip)
+.Lcpu_detect_f16c:
+	test $0x20000000, %ecx
+	jz .Lcpu_detect_extended_max
+	movl $1, f16c_available(%rip)
 .Lcpu_detect_extended_max:
 	mov %r12d, %eax
 	cmp $1, %eax
@@ -2784,6 +2845,13 @@ check_cpu_profile:
 	cmpl $0, avx_available(%rip)
 	je .Lcpu_leaf1_expected
 	or $0x10000000, %r13d
+	cmpl $0, fma_available(%rip)
+	je .Lcpu_leaf1_f16c
+	or $0x1000, %r13d
+.Lcpu_leaf1_f16c:
+	cmpl $0, f16c_available(%rip)
+	je .Lcpu_leaf1_expected
+	or $0x20000000, %r13d
 .Lcpu_leaf1_expected:
 	cmp %r13d, %ecx
 	jne 2f
@@ -2799,7 +2867,15 @@ check_cpu_profile:
 	mov lam_available(%rip), %r12d
 	cmp %r12d, %eax
 	jne 2f
-	test %ebx, %ebx
+	xor %r13d, %r13d
+	cmpl $0, avx_available(%rip)
+	je .Lcpu_leaf7_ebx
+	test $0x20, %ebx
+	jz .Lcpu_leaf7_ebx
+	movl $1, avx2_available(%rip)
+	mov $0x20, %r13d
+.Lcpu_leaf7_ebx:
+	cmp %r13d, %ebx
 	jne 2f
 	xor %r13d, %r13d
 	cmpl $0, pku_available(%rip)
@@ -3213,6 +3289,22 @@ check_cpu_profile:
 	test %r12d, %eax
 	jne 2f
 .Lcpu_profile_done:
+	mov $134, %r11d
+	cmpl $0, fma_available(%rip)
+	je .Lcpu_instruction_f16c
+	vxorps %ymm0, %ymm0, %ymm0
+	vfmadd132ps %ymm0, %ymm0, %ymm0
+.Lcpu_instruction_f16c:
+	cmpl $0, f16c_available(%rip)
+	je .Lcpu_instruction_avx2
+	vxorps %xmm0, %xmm0, %xmm0
+	vcvtps2ph $0, %xmm0, %xmm1
+.Lcpu_instruction_avx2:
+	cmpl $0, avx2_available(%rip)
+	je .Lcpu_instructions_done
+	vxorps %xmm0, %xmm0, %xmm0
+	vpbroadcastd %xmm0, %ymm1
+.Lcpu_instructions_done:
 	xor %eax, %eax
 	pop %r13
 	pop %r12

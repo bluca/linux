@@ -79,7 +79,14 @@ static struct kvm_protected_task_info get_info(int fd)
 	return info;
 }
 
-static bool kvm_supported_cpuid_has_avx(int kvm_fd)
+struct protected_avx_features {
+	bool avx;
+	bool fma;
+	bool f16c;
+	bool avx2;
+};
+
+static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 {
 	struct {
 		__u32 nent;
@@ -88,6 +95,7 @@ static bool kvm_supported_cpuid_has_avx(int kvm_fd)
 	} cpuid = {
 		.nent = 256,
 	};
+	struct protected_avx_features features = {};
 	bool avx = false, ymm = false, ymm_component = false;
 	unsigned int i;
 	int ret;
@@ -97,9 +105,13 @@ static bool kvm_supported_cpuid_has_avx(int kvm_fd)
 	for (i = 0; i < cpuid.nent; i++) {
 		struct kvm_cpuid_entry2 *entry = &cpuid.entries[i];
 
-		if (entry->function == 1 && !entry->index)
+		if (entry->function == 1 && !entry->index) {
 			avx = (entry->ecx & ((1U << 26) | (1U << 28))) ==
 				((1U << 26) | (1U << 28));
+			features.fma = entry->ecx & (1U << 12);
+			features.f16c = entry->ecx & (1U << 29);
+		} else if (entry->function == 7 && !entry->index)
+			features.avx2 = entry->ebx & (1U << 5);
 		else if (entry->function == 0xd && !entry->index)
 			ymm = entry->eax & (1U << 2);
 		else if (entry->function == 0xd && entry->index == 2)
@@ -107,7 +119,41 @@ static bool kvm_supported_cpuid_has_avx(int kvm_fd)
 				!(entry->ecx & ((1U << 0) | (1U << 2)));
 	}
 
-	return avx && ymm && ymm_component;
+	features.avx = avx && ymm && ymm_component;
+	if (!features.avx)
+		features.fma = features.f16c = features.avx2 = false;
+
+	return features;
+}
+
+static void append_expected_output(
+		char *output, size_t output_size, size_t *length,
+		const char *message)
+{
+	size_t message_length = strlen(message);
+
+	TEST_ASSERT(message_length <= output_size - *length,
+		    "Protected-task expected output is too long");
+	memcpy(output + *length, message, message_length);
+	*length += message_length;
+}
+
+static void append_expected_avx_profile(
+		char *output, size_t output_size, size_t *length,
+		const struct protected_avx_features *features)
+{
+	if (features->avx)
+		append_expected_output(output, output_size, length,
+				       "protected task avx\n");
+	if (features->fma)
+		append_expected_output(output, output_size, length,
+				       "protected task fma\n");
+	if (features->f16c)
+		append_expected_output(output, output_size, length,
+				       "protected task f16c\n");
+	if (features->avx2)
+		append_expected_output(output, output_size, length,
+				       "protected task avx2\n");
 }
 
 static void test_create_validation(int kvm_fd)
@@ -540,23 +586,25 @@ static void test_protected_exec(int kvm_fd)
 		READY_FD = 101,
 		CONTROL_FD = 102,
 	};
-	static const char expected[] = "protected task exec\n";
-	static const char expected_avx[] =
-		"protected task avx\nprotected task exec\nprotected task avx\n";
 	struct kvm_protected_task_arm arm = {
 		.size = sizeof(arm),
 	};
-	const char *expected_output;
-	size_t expected_length;
-	char helper[PATH_MAX], output[sizeof(expected_avx)] = {};
+	struct protected_avx_features features;
+	char expected_output[256] = {}, output[sizeof(expected_output)] = {};
+	char helper[PATH_MAX];
 	unsigned long main_address = 0;
-	size_t nread = 0;
+	size_t expected_length = 0, nread = 0;
 	int address_pipe[2], pipefd[2], ready_pipe[2];
 	int status;
 	pid_t child;
 
-	expected_output = kvm_supported_cpuid_has_avx(kvm_fd) ? expected_avx : expected;
-	expected_length = strlen(expected_output);
+	features = get_kvm_supported_avx_features(kvm_fd);
+	append_expected_avx_profile(expected_output, sizeof(expected_output),
+				    &expected_length, &features);
+	append_expected_output(expected_output, sizeof(expected_output),
+			       &expected_length, "protected task exec\n");
+	append_expected_avx_profile(expected_output, sizeof(expected_output),
+				    &expected_length, &features);
 	get_exec_helper_path(helper);
 	TEST_ASSERT(pipe(pipefd) == 0, "pipe() failed: %d", errno);
 	TEST_ASSERT(pipe(address_pipe) == 0, "pipe() failed: %d", errno);
