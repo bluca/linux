@@ -84,7 +84,16 @@ struct protected_avx_features {
 	bool fma;
 	bool f16c;
 	bool avx2;
+	bool avx512;
 };
+
+static bool kvm_supported_xstate_component(
+		const struct kvm_cpuid_entry2 *entry, __u32 size, __u32 *end)
+{
+	return entry->eax == size && entry->ebx >= 576 &&
+		!(entry->ecx & ((1U << 0) | (1U << 2))) &&
+		!__builtin_add_overflow(entry->ebx, entry->eax, end);
+}
 
 static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 {
@@ -96,7 +105,11 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		.nent = 256,
 	};
 	struct protected_avx_features features = {};
-	bool avx = false, ymm = false, ymm_component = false;
+	bool avx = false, avx512 = false, avx512_xstate = false;
+	bool hi16_zmm = false, opmask = false, ymm = false;
+	bool ymm_component = false, zmm_hi256 = false;
+	__u32 hi16_zmm_end = 0, opmask_end = 0, ymm_end = 0;
+	__u32 zmm_hi256_end = 0;
 	unsigned int i;
 	int ret;
 
@@ -110,18 +123,36 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 				((1U << 26) | (1U << 28));
 			features.fma = entry->ecx & (1U << 12);
 			features.f16c = entry->ecx & (1U << 29);
-		} else if (entry->function == 7 && !entry->index)
+		} else if (entry->function == 7 && !entry->index) {
 			features.avx2 = entry->ebx & (1U << 5);
-		else if (entry->function == 0xd && !entry->index)
+			avx512 = entry->ebx & (1U << 16);
+		} else if (entry->function == 0xd && !entry->index) {
 			ymm = entry->eax & (1U << 2);
-		else if (entry->function == 0xd && entry->index == 2)
-			ymm_component = entry->eax == 256 && entry->ebx >= 576 &&
-				!(entry->ecx & ((1U << 0) | (1U << 2)));
+			avx512_xstate = (entry->eax & (0xe0U)) == 0xe0U;
+		} else if (entry->function == 0xd && entry->index == 2) {
+			ymm_component = kvm_supported_xstate_component(entry, 256,
+								 &ymm_end);
+		} else if (entry->function == 0xd && entry->index == 5) {
+			opmask = kvm_supported_xstate_component(entry, 64,
+							       &opmask_end);
+		} else if (entry->function == 0xd && entry->index == 6) {
+			zmm_hi256 = kvm_supported_xstate_component(entry, 512,
+								  &zmm_hi256_end);
+		} else if (entry->function == 0xd && entry->index == 7) {
+			hi16_zmm = kvm_supported_xstate_component(entry, 1024,
+								 &hi16_zmm_end);
+		}
 	}
 
 	features.avx = avx && ymm && ymm_component;
+	features.avx512 = features.avx && avx512 && avx512_xstate &&
+		opmask && zmm_hi256 && hi16_zmm &&
+		opmask_end - 64 >= ymm_end &&
+		zmm_hi256_end - 512 >= opmask_end &&
+		hi16_zmm_end - 1024 >= zmm_hi256_end;
 	if (!features.avx)
-		features.fma = features.f16c = features.avx2 = false;
+		features.fma = features.f16c = features.avx2 =
+			features.avx512 = false;
 
 	return features;
 }
@@ -154,6 +185,9 @@ static void append_expected_avx_profile(
 	if (features->avx2)
 		append_expected_output(output, output_size, length,
 				       "protected task avx2\n");
+	if (features->avx512)
+		append_expected_output(output, output_size, length,
+				       "protected task avx512\n");
 }
 
 static void test_create_validation(int kvm_fd)

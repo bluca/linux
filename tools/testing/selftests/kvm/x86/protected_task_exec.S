@@ -11,17 +11,24 @@
 .set FPSTATE_XFEATURES, 512
 .set FPSTATE_MAGIC2, 576
 .set YMMH15_OFFSET, 240
+.set OPMASK7_OFFSET, 56
+.set ZMM_HI256_15_OFFSET, 480
+.set HI16_ZMM31_OFFSET, 960
 .set FP_XSTATE_MAGIC1, 0x46505853
 .set FP_XSTATE_MAGIC2, 0x46505845
 .set FP_XSTATE_SIZE, 576
 .set FP_XSTATE_EXTENDED_SIZE, 580
 .set XFEATURE_MASK_FPSSE, 3
 .set XFEATURE_MASK_YMM, 4
+.set XFEATURE_MASK_AVX512, 0xe0
 .set XFEATURE_MASK_PKU, 0x203
 .set XFEATURE_MASK_CET_USER, 0x800
 .set XFEATURE_MASK_XTILE_CFG, 0x20000
 .set XFEATURE_MASK_XTILE_DATA, 0x40000
 .set XFEATURE_MASK_XTILE, 0x60000
+.set AVX512_OPMASK_SIZE, 64
+.set AVX512_ZMM_HI256_SIZE, 512
+.set AVX512_HI16_ZMM_SIZE, 1024
 .set XTILE_CFG_SIZE, 64
 .set XTILE_DATA_SIZE, 8192
 .set __NR_map_shadow_stack, 453
@@ -89,18 +96,47 @@ f16c_message:
 avx2_message:
 	.ascii "protected task avx2\n"
 .set avx2_message_length, . - avx2_message
+avx512_message:
+	.ascii "protected task avx512\n"
+.set avx512_message_length, . - avx512_message
 
-	.balign 32
+	.balign 64
+initial_zmm15:
 initial_ymm:
 initial_xmm:
 	.quad 0x5566778811223344, 0xddeeff0099aabbcc
 initial_ymmh:
 	.quad 0x0123456789abcdef, 0xfedcba9876543210
+initial_zmm15h:
+	.quad 0x1111222233334444, 0x5555666677778888
+	.quad 0x9999aaaabbbbcccc, 0xddddeeeeffff0000
+	.balign 64
+replacement_zmm15:
 replacement_ymm:
 replacement_xmm:
 	.quad 0x76543210fedcba98, 0xdeadbeef0badcafe
 replacement_ymmh:
 	.quad 0x0f1e2d3c4b5a6978, 0x8796a5b4c3d2e1f0
+replacement_zmm15h:
+	.quad 0x1021324354657687, 0x98a9bacbdcedfe0f
+	.quad 0xf0e0d0c0b0a09080, 0x7060504030201000
+	.balign 64
+initial_zmm31:
+	.quad 0x0011223344556677, 0x8899aabbccddeeff
+	.quad 0x123456789abcdef0, 0x0fedcba987654321
+	.quad 0x13579bdf2468ace0, 0xfdb97531eca86420
+	.quad 0x55aa55aa33cc33cc, 0xaa55aa55cc33cc33
+	.balign 64
+replacement_zmm31:
+	.quad 0xffeeddccbbaa9988, 0x7766554433221100
+	.quad 0xfedcba9876543210, 0x0123456789abcdef
+	.quad 0xeca86420fdb97531, 0x2468ace013579bdf
+	.quad 0xaa55aa55cc33cc33, 0x55aa55aa33cc33cc
+	.balign 8
+initial_opmask:
+	.quad 0xa55a
+replacement_opmask:
+	.quad 0x5aa5
 initial_mxcsr:
 	.long 0x3f80
 initial_fcw:
@@ -250,6 +286,9 @@ f16c_available:
 avx2_available:
 	.long 0
 	.balign 4
+avx512_available:
+	.long 0
+	.balign 4
 lam_available:
 	.long 0
 	.balign 4
@@ -278,6 +317,15 @@ expected_pkru_offset:
 	.long 0
 	.balign 4
 expected_ymm_offset:
+	.long 0
+	.balign 4
+expected_opmask_offset:
+	.long 0
+	.balign 4
+expected_zmm_hi256_offset:
+	.long 0
+	.balign 4
+expected_hi16_zmm_offset:
 	.long 0
 	.balign 4
 expected_dynamic_xstate_size:
@@ -369,6 +417,17 @@ _start:
 	cmp $avx2_message_length, %rax
 	jne 1f
 .Lcpu_profile_avx2_reported:
+	cmpl $0, avx512_available(%rip)
+	je .Lcpu_profile_avx512_reported
+	movl $138, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avx512_message(%rip), %rsi
+	mov $avx512_message_length, %edx
+	syscall
+	cmp $avx512_message_length, %rax
+	jne 1f
+.Lcpu_profile_avx512_reported:
 	movl $124, failure_code(%rip)
 	call check_initial_shstk
 	test %eax, %eax
@@ -2730,6 +2789,7 @@ check_cpu_profile:
 	movl $0, fma_available(%rip)
 	movl $0, f16c_available(%rip)
 	movl $0, avx2_available(%rip)
+	movl $0, avx512_available(%rip)
 	movl $0, pku_available(%rip)
 	movl $0, lam_available(%rip)
 	movl $0, shstk_available(%rip)
@@ -2738,6 +2798,9 @@ check_cpu_profile:
 	movl $FP_XSTATE_EXTENDED_SIZE, expected_xstate_extended_size(%rip)
 	movl $0, expected_pkru_offset(%rip)
 	movl $0, expected_ymm_offset(%rip)
+	movl $0, expected_opmask_offset(%rip)
+	movl $0, expected_zmm_hi256_offset(%rip)
+	movl $0, expected_hi16_zmm_offset(%rip)
 	movl $FP_XSTATE_SIZE, expected_dynamic_xstate_size(%rip)
 	movl $0, expected_tiledata_offset(%rip)
 	movq $XFEATURE_MASK_FPSSE, expected_xfeatures(%rip)
@@ -2871,9 +2934,14 @@ check_cpu_profile:
 	cmpl $0, avx_available(%rip)
 	je .Lcpu_leaf7_ebx
 	test $0x20, %ebx
-	jz .Lcpu_leaf7_ebx
+	jz .Lcpu_leaf7_avx512
 	movl $1, avx2_available(%rip)
 	mov $0x20, %r13d
+.Lcpu_leaf7_avx512:
+	test $0x10000, %ebx
+	jz .Lcpu_leaf7_ebx
+	movl $1, avx512_available(%rip)
+	or $0x10000, %r13d
 .Lcpu_leaf7_ebx:
 	cmp %r13d, %ebx
 	jne 2f
@@ -2920,6 +2988,7 @@ check_cpu_profile:
 	jne 2f
 	test %edx, %edx
 	jne 2f
+	jmp .Lcpu_check_no_avx512_xstate
 .Lcpu_after_avx_xstate:
 	cmpl $0, pku_available(%rip)
 	jne .Lcpu_check_pku_xstate
@@ -2955,6 +3024,85 @@ check_cpu_profile:
 .Lcpu_record_ymm:
 	orq $XFEATURE_MASK_YMM, expected_xfeatures(%rip)
 	orq $XFEATURE_MASK_YMM, expected_xcomp_supported(%rip)
+	cmpl $0, avx512_available(%rip)
+	je .Lcpu_check_no_avx512_xstate
+	jmp .Lcpu_check_avx512_xstate
+
+.Lcpu_check_no_avx512_xstate:
+	mov $139, %r11d
+	mov $5, %r12d
+.Lcpu_check_no_avx512_component:
+	mov $0xd, %eax
+	mov %r12d, %ecx
+	cpuid
+	test %eax, %eax
+	jne 2f
+	test %ebx, %ebx
+	jne 2f
+	test %ecx, %ecx
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	inc %r12d
+	cmp $8, %r12d
+	jne .Lcpu_check_no_avx512_component
+	jmp .Lcpu_after_avx_xstate
+
+.Lcpu_check_avx512_xstate:
+	mov $139, %r11d
+	mov $0xd, %eax
+	mov $5, %ecx
+	cpuid
+	cmp $AVX512_OPMASK_SIZE, %eax
+	jne 2f
+	cmp expected_xstate_size(%rip), %ebx
+	jb 2f
+	mov %ecx, %r12d
+	and $~2, %r12d
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov %ebx, expected_opmask_offset(%rip)
+	add %ebx, %eax
+	jc 2f
+	mov %eax, %r13d
+	mov $0xd, %eax
+	mov $6, %ecx
+	cpuid
+	cmp $AVX512_ZMM_HI256_SIZE, %eax
+	jne 2f
+	cmp %r13d, %ebx
+	jb 2f
+	mov %ecx, %r12d
+	and $~2, %r12d
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov %ebx, expected_zmm_hi256_offset(%rip)
+	add %ebx, %eax
+	jc 2f
+	mov %eax, %r13d
+	mov $0xd, %eax
+	mov $7, %ecx
+	cpuid
+	cmp $AVX512_HI16_ZMM_SIZE, %eax
+	jne 2f
+	cmp %r13d, %ebx
+	jb 2f
+	mov %ecx, %r12d
+	and $~2, %r12d
+	jne 2f
+	test %edx, %edx
+	jne 2f
+	mov %ebx, expected_hi16_zmm_offset(%rip)
+	add %ebx, %eax
+	jc 2f
+	mov %eax, expected_xstate_size(%rip)
+	mov %eax, expected_dynamic_xstate_size(%rip)
+	add $4, %eax
+	mov %eax, expected_xstate_extended_size(%rip)
+	orq $XFEATURE_MASK_AVX512, expected_xfeatures(%rip)
+	orq $XFEATURE_MASK_AVX512, expected_xcomp_supported(%rip)
 	jmp .Lcpu_after_avx_xstate
 
 .Lcpu_check_pku_xstate:
@@ -3059,6 +3207,10 @@ check_cpu_profile:
 	je .Lcpu_user_xfeatures_pku
 	or $XFEATURE_MASK_YMM, %r13d
 .Lcpu_user_xfeatures_pku:
+	cmpl $0, avx512_available(%rip)
+	je .Lcpu_user_xfeatures_pkru
+	or $XFEATURE_MASK_AVX512, %r13d
+.Lcpu_user_xfeatures_pkru:
 	cmpl $0, pku_available(%rip)
 	je .Lcpu_user_xfeatures_amx
 	or $0x200, %r13d
@@ -3266,6 +3418,10 @@ check_cpu_profile:
 	je .Lcpu_xgetbv_pku
 	or $XFEATURE_MASK_YMM, %r12d
 .Lcpu_xgetbv_pku:
+	cmpl $0, avx512_available(%rip)
+	je .Lcpu_xgetbv_pkru
+	or $XFEATURE_MASK_AVX512, %r12d
+.Lcpu_xgetbv_pkru:
 	cmpl $0, pku_available(%rip)
 	je .Lcpu_xgetbv_amx
 	or $0x200, %r12d
@@ -3301,9 +3457,14 @@ check_cpu_profile:
 	vcvtps2ph $0, %xmm0, %xmm1
 .Lcpu_instruction_avx2:
 	cmpl $0, avx2_available(%rip)
-	je .Lcpu_instructions_done
+	je .Lcpu_instruction_avx512
 	vxorps %xmm0, %xmm0, %xmm0
 	vpbroadcastd %xmm0, %ymm1
+.Lcpu_instruction_avx512:
+	cmpl $0, avx512_available(%rip)
+	je .Lcpu_instructions_done
+	vpxord %zmm0, %zmm0, %zmm0
+	kxnorw %k1, %k1, %k1
 .Lcpu_instructions_done:
 	xor %eax, %eax
 	pop %r13
@@ -3360,6 +3521,13 @@ check_signal_roundtrip:
 	push %r12
 	push %r13
 	movl $0, signal_seen(%rip)
+	cmpl $0, avx512_available(%rip)
+	je .Lsignal_roundtrip_no_avx512
+	vmovdqu64 initial_zmm15(%rip), %zmm15
+	vmovdqu64 initial_zmm31(%rip), %zmm31
+	kmovw initial_opmask(%rip), %k7
+	jmp .Lsignal_roundtrip_fpu_ready
+.Lsignal_roundtrip_no_avx512:
 	cmpl $0, avx_available(%rip)
 	je .Lsignal_roundtrip_no_avx
 	vmovdqu initial_ymm(%rip), %ymm15
@@ -3397,6 +3565,9 @@ check_signal_roundtrip:
 	cmp $0xffff, %eax
 	jne .Lsignal_roundtrip_fail
 .Lsignal_roundtrip_no_ymmh:
+	call check_replacement_avx512
+	test %eax, %eax
+	jne .Lsignal_roundtrip_fail
 	stmxcsr -4(%rsp)
 	cmpl $0x5f80, -4(%rsp)
 	jne .Lsignal_roundtrip_fail
@@ -3432,6 +3603,9 @@ check_replacement_fpu:
 	cmp $0xffff, %eax
 	jne 11f
 .Lreplacement_fpu_no_ymmh:
+	call check_replacement_avx512
+	test %eax, %eax
+	jne 11f
 	stmxcsr -4(%rsp)
 	cmpl $0x5f80, -4(%rsp)
 	jne 11f
@@ -3444,6 +3618,29 @@ check_replacement_fpu:
 	mov $1, %eax
 	ret
 	.size check_replacement_fpu, . - check_replacement_fpu
+
+	.type check_replacement_avx512, @function
+check_replacement_avx512:
+	cmpl $0, avx512_available(%rip)
+	je .Lreplacement_avx512_success
+	kmovw %k7, %eax
+	cmpw replacement_opmask(%rip), %ax
+	jne .Lreplacement_avx512_fail
+	vpcmpeqd replacement_zmm15(%rip), %zmm15, %k1
+	kmovw %k1, %eax
+	cmp $0xffff, %eax
+	jne .Lreplacement_avx512_fail
+	vpcmpeqd replacement_zmm31(%rip), %zmm31, %k1
+	kmovw %k1, %eax
+	cmp $0xffff, %eax
+	jne .Lreplacement_avx512_fail
+.Lreplacement_avx512_success:
+	xor %eax, %eax
+	ret
+.Lreplacement_avx512_fail:
+	mov $1, %eax
+	ret
+	.size check_replacement_avx512, . - check_replacement_avx512
 
 	.type signal_handler, @function
 signal_handler:
@@ -3482,6 +3679,42 @@ signal_handler:
 	mov pkey_allowed_pkru(%rip), %ecx
 	movl %ecx, (%r8,%rax)
 4:
+	cmpl $0, avx512_available(%rip)
+	je .Lsignal_handler_no_avx512
+	mov expected_opmask_offset(%rip), %eax
+	add $OPMASK7_OFFSET, %eax
+	mov initial_opmask(%rip), %rcx
+	cmpq %rcx, (%r8,%rax)
+	jne 3f
+	mov replacement_opmask(%rip), %rcx
+	movq %rcx, (%r8,%rax)
+	mov expected_zmm_hi256_offset(%rip), %eax
+	add $ZMM_HI256_15_OFFSET, %eax
+	lea (%r8,%rax), %rdi
+	lea initial_zmm15h(%rip), %rsi
+	mov $4, %ecx
+	repe cmpsq
+	jne 3f
+	mov expected_zmm_hi256_offset(%rip), %eax
+	add $ZMM_HI256_15_OFFSET, %eax
+	lea (%r8,%rax), %rdi
+	lea replacement_zmm15h(%rip), %rsi
+	mov $4, %ecx
+	rep movsq
+	mov expected_hi16_zmm_offset(%rip), %eax
+	add $HI16_ZMM31_OFFSET, %eax
+	lea (%r8,%rax), %rdi
+	lea initial_zmm31(%rip), %rsi
+	mov $8, %ecx
+	repe cmpsq
+	jne 3f
+	mov expected_hi16_zmm_offset(%rip), %eax
+	add $HI16_ZMM31_OFFSET, %eax
+	lea (%r8,%rax), %rdi
+	lea replacement_zmm31(%rip), %rsi
+	mov $8, %ecx
+	rep movsq
+.Lsignal_handler_no_avx512:
 	testq $XFEATURE_MASK_XTILE_DATA, expected_xfeatures(%rip)
 	jz 5f
 	mov expected_tiledata_offset(%rip), %eax
