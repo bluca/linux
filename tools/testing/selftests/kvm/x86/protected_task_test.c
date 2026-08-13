@@ -20,6 +20,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <asm/prctl.h>
 #include <linux/kvm.h>
 #include <linux/ptrace.h>
 
@@ -141,6 +142,7 @@ struct protected_avx_features {
 	bool sm4;
 	bool pku;
 	bool amx;
+	bool shstk;
 	__u32 ymm_offset;
 	__u32 opmask_offset;
 	__u32 zmm_hi256_offset;
@@ -174,6 +176,7 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 	bool amx_tile = false, tilecfg = false, tiledata = false;
 	bool hi16_zmm = false, opmask = false, ymm = false;
 	bool pku = false, pkru_component = false, xsave = false;
+	bool shstk = false, shstk_component = false, shstk_controls = false;
 	bool ymm_component = false, zmm_hi256 = false;
 	__u32 xfeatures = 0;
 	__u32 hi16_zmm_end = 0, opmask_end = 0, ymm_end = 0;
@@ -228,6 +231,7 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avx512vpopcntdq = entry->ecx & (1U << 14);
 			features.rdpid = entry->ecx & (1U << 22);
 			pku = entry->ecx & (1U << 3);
+			shstk = entry->ecx & (1U << 7);
 			features.avx5124vnniw = entry->edx & (1U << 2);
 			features.avx5124fmaps = entry->edx & (1U << 3);
 			features.avx512vp2intersect = entry->edx & (1U << 8);
@@ -274,6 +278,11 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.pkru_offset = entry->ebx;
 		} else if (entry->function == 0xd && entry->index == 1) {
 			amx_controls = (entry->eax & 0x1cU) == 0x1cU;
+			shstk_controls = (entry->eax & (1U << 3)) &&
+				(entry->ecx & (1U << 11));
+		} else if (entry->function == 0xd && entry->index == 11) {
+			shstk_component = entry->eax == 16 &&
+				(entry->ecx & (1U << 0));
 		} else if (entry->function == 0xd && entry->index == 17) {
 			tilecfg = kvm_supported_xstate_component(entry, 64, false,
 								 &tilecfg_end);
@@ -303,6 +312,12 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		(xfeatures & 0x60000U) == 0x60000U && amx_controls &&
 		tilecfg && tiledata && features.tiledata_offset >= tilecfg_end &&
 		amx_palette0 && amx_palette1;
+	if (shstk && shstk_controls && shstk_component) {
+		unsigned long status;
+
+		features.shstk = syscall(SYS_arch_prctl, ARCH_SHSTK_STATUS,
+					 &status) == 0;
+	}
 	if (!features.avx)
 		features.fma = features.f16c = features.avx2 =
 			features.gfni = features.vaes = features.vpclmulqdq =
@@ -1308,6 +1323,53 @@ static void test_exec_event_ptrace(pid_t child, unsigned long address,
 		free(original_xstate);
 		free(expected_xstate);
 		free(xstate);
+	}
+	if (features->shstk) {
+		unsigned long original_ssp, ssp;
+		struct iovec iov = {
+			.iov_base = &original_ssp,
+			.iov_len = sizeof(original_ssp),
+		};
+		siginfo_t siginfo;
+
+		TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_SHSTK,
+				   &iov) == 0 && iov.iov_len == sizeof(original_ssp),
+			    "PTRACE_GETREGSET NT_X86_SHSTK failed: %d", errno);
+		TEST_ASSERT(original_ssp && original_ssp <= ULONG_MAX - 8,
+			    "Invalid protected SSP: %#lx", original_ssp);
+		ssp = original_ssp + 8;
+		iov.iov_base = &ssp;
+		iov.iov_len = sizeof(ssp);
+		TEST_ASSERT(ptrace(PTRACE_SETREGSET, child, (void *)NT_X86_SHSTK,
+				   &iov) == 0,
+			    "PTRACE_SETREGSET NT_X86_SHSTK failed: %d", errno);
+		ssp = 0;
+		TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_SHSTK,
+				   &iov) == 0 && ssp == original_ssp + 8,
+			    "PTRACE_SETREGSET did not update SSP");
+		TEST_ASSERT(ptrace(PTRACE_SINGLESTEP, child, NULL, NULL) == 0,
+			    "PTRACE_SINGLESTEP with edited SSP failed: %d", errno);
+		TEST_ASSERT(waitpid(child, &status, 0) == child,
+			    "waitpid() after SSP single-step failed: %d", errno);
+		TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP,
+			    "SSP single-step produced unexpected status: %#x", status);
+		TEST_ASSERT(ptrace(PTRACE_GETSIGINFO, child, NULL, &siginfo) == 0 &&
+			    siginfo.si_code == TRAP_TRACE,
+			    "SSP single-step produced unexpected siginfo: %d/%d",
+			    siginfo.si_signo, siginfo.si_code);
+		ssp = 0;
+		TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_SHSTK,
+				   &iov) == 0 && ssp == original_ssp + 8,
+			    "Protected SSP changed after single-step");
+		iov.iov_base = &original_ssp;
+		TEST_ASSERT(ptrace(PTRACE_SETREGSET, child, (void *)NT_X86_SHSTK,
+				   &iov) == 0,
+			    "PTRACE_SETREGSET SSP restore failed: %d", errno);
+		ssp = 0;
+		iov.iov_base = &ssp;
+		TEST_ASSERT(ptrace(PTRACE_GETREGSET, child, (void *)NT_X86_SHSTK,
+				   &iov) == 0 && ssp == original_ssp,
+			    "PTRACE_SETREGSET did not restore SSP");
 	}
 	TEST_ASSERT(ptrace(PTRACE_SETOPTIONS, child, NULL,
 			   PTRACE_O_TRACEEXEC) == 0,
