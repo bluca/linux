@@ -45,6 +45,9 @@
 				 BIT(24) | BIT(25) | BIT(26))
 #define KVM_PT_CPUID_7_EBX_AVX2 BIT(5)
 #define KVM_PT_CPUID_7_EBX_AVX512F BIT(16)
+#define KVM_PT_CPUID_7_EBX_AVX512 (KVM_PT_CPUID_7_EBX_AVX512F | BIT(17) | \
+				   BIT(21) | BIT(26) | BIT(27) | BIT(28) | \
+				   BIT(30) | BIT(31))
 #define KVM_PT_CPUID_7_ECX_PKU	BIT(3)
 #define KVM_PT_CPUID_7_ECX_SHSTK BIT(7)
 #define KVM_PT_CPUID_7_EDX_AMX_TILE BIT(24)
@@ -240,7 +243,7 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 				entry->eax = state->lam ? 1 : 0;
 				entry->ebx &=
 					(state->avx ? KVM_PT_CPUID_7_EBX_AVX2 : 0) |
-					(state->avx512 ? KVM_PT_CPUID_7_EBX_AVX512F : 0);
+					(state->avx512 ? KVM_PT_CPUID_7_EBX_AVX512 : 0);
 				entry->ecx &=
 					(state->pku ? KVM_PT_CPUID_7_ECX_PKU : 0) |
 					(state->shstk ? KVM_PT_CPUID_7_ECX_SHSTK : 0);
