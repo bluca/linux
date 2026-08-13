@@ -159,6 +159,21 @@ avx512fp16_message:
 avx512bf16_message:
 	.ascii "protected task avx512bf16\n"
 .set avx512bf16_message_length, . - avx512bf16_message
+avxvnni_message:
+	.ascii "protected task avxvnni\n"
+.set avxvnni_message_length, . - avxvnni_message
+avxifma_message:
+	.ascii "protected task avxifma\n"
+.set avxifma_message_length, . - avxifma_message
+avxvnniint8_message:
+	.ascii "protected task avxvnniint8\n"
+.set avxvnniint8_message_length, . - avxvnniint8_message
+avxneconvert_message:
+	.ascii "protected task avxneconvert\n"
+.set avxneconvert_message_length, . - avxneconvert_message
+avxvnniint16_message:
+	.ascii "protected task avxvnniint16\n"
+.set avxvnniint16_message_length, . - avxvnniint16_message
 
 	.balign 64
 initial_zmm15:
@@ -407,6 +422,21 @@ avx512fp16_available:
 	.long 0
 	.balign 4
 avx512bf16_available:
+	.long 0
+	.balign 4
+avxvnni_available:
+	.long 0
+	.balign 4
+avxifma_available:
+	.long 0
+	.balign 4
+avxvnniint8_available:
+	.long 0
+	.balign 4
+avxneconvert_available:
+	.long 0
+	.balign 4
+avxvnniint16_available:
 	.long 0
 	.balign 4
 leaf7_max_subleaf:
@@ -771,6 +801,61 @@ _start:
 	cmp $avx512bf16_message_length, %rax
 	jne 1f
 .Lcpu_profile_avx512bf16_reported:
+	cmpl $0, avxvnni_available(%rip)
+	je .Lcpu_profile_avxvnni_reported
+	movl $164, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avxvnni_message(%rip), %rsi
+	mov $avxvnni_message_length, %edx
+	syscall
+	cmp $avxvnni_message_length, %rax
+	jne 1f
+.Lcpu_profile_avxvnni_reported:
+	cmpl $0, avxifma_available(%rip)
+	je .Lcpu_profile_avxifma_reported
+	movl $165, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avxifma_message(%rip), %rsi
+	mov $avxifma_message_length, %edx
+	syscall
+	cmp $avxifma_message_length, %rax
+	jne 1f
+.Lcpu_profile_avxifma_reported:
+	cmpl $0, avxvnniint8_available(%rip)
+	je .Lcpu_profile_avxvnniint8_reported
+	movl $166, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avxvnniint8_message(%rip), %rsi
+	mov $avxvnniint8_message_length, %edx
+	syscall
+	cmp $avxvnniint8_message_length, %rax
+	jne 1f
+.Lcpu_profile_avxvnniint8_reported:
+	cmpl $0, avxneconvert_available(%rip)
+	je .Lcpu_profile_avxneconvert_reported
+	movl $167, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avxneconvert_message(%rip), %rsi
+	mov $avxneconvert_message_length, %edx
+	syscall
+	cmp $avxneconvert_message_length, %rax
+	jne 1f
+.Lcpu_profile_avxneconvert_reported:
+	cmpl $0, avxvnniint16_available(%rip)
+	je .Lcpu_profile_avxvnniint16_reported
+	movl $168, failure_code(%rip)
+	mov $1, %eax
+	mov $1, %edi
+	lea avxvnniint16_message(%rip), %rsi
+	mov $avxvnniint16_message_length, %edx
+	syscall
+	cmp $avxvnniint16_message_length, %rax
+	jne 1f
+.Lcpu_profile_avxvnniint16_reported:
 	movl $124, failure_code(%rip)
 	call check_initial_shstk
 	test %eax, %eax
@@ -3153,6 +3238,11 @@ check_cpu_profile:
 	movl $0, avx512vp2intersect_available(%rip)
 	movl $0, avx512fp16_available(%rip)
 	movl $0, avx512bf16_available(%rip)
+	movl $0, avxvnni_available(%rip)
+	movl $0, avxifma_available(%rip)
+	movl $0, avxvnniint8_available(%rip)
+	movl $0, avxneconvert_available(%rip)
+	movl $0, avxvnniint16_available(%rip)
 	movl $0, leaf7_max_subleaf(%rip)
 	movl $0, pku_available(%rip)
 	movl $0, lam_available(%rip)
@@ -3220,10 +3310,11 @@ check_cpu_profile:
 	jne 2f
 	test %ecx, %ecx
 	jne 2f
-	test %edx, %edx
+	mov %edx, %r13d
+	and $~0x430, %r13d
 	jne 2f
 	mov %eax, %r13d
-	and $~0x4000020, %r13d
+	and $~0x4800030, %r13d
 	jne 2f
 	test $0x4000000, %eax
 	jz .Lcpu_profile_features_done
@@ -3429,6 +3520,34 @@ check_cpu_profile:
 	mov $1, %ecx
 	cpuid
 	xor %r13d, %r13d
+	xor %r10d, %r10d
+	cmpl $0, avx_available(%rip)
+	je .Lcpu_leaf7_1_avx512bf16
+	test $0x10, %eax
+	jz .Lcpu_leaf7_1_avxifma
+	movl $1, avxvnni_available(%rip)
+	or $0x10, %r13d
+.Lcpu_leaf7_1_avxifma:
+	test $0x800000, %eax
+	jz .Lcpu_leaf7_1_avxvnniint8
+	movl $1, avxifma_available(%rip)
+	or $0x800000, %r13d
+.Lcpu_leaf7_1_avxvnniint8:
+	test $0x10, %edx
+	jz .Lcpu_leaf7_1_avxneconvert
+	movl $1, avxvnniint8_available(%rip)
+	or $0x10, %r10d
+.Lcpu_leaf7_1_avxneconvert:
+	test $0x20, %edx
+	jz .Lcpu_leaf7_1_avxvnniint16
+	movl $1, avxneconvert_available(%rip)
+	or $0x20, %r10d
+.Lcpu_leaf7_1_avxvnniint16:
+	test $0x400, %edx
+	jz .Lcpu_leaf7_1_avx512bf16
+	movl $1, avxvnniint16_available(%rip)
+	or $0x400, %r10d
+.Lcpu_leaf7_1_avx512bf16:
 	cmpl $0, avx512_available(%rip)
 	je .Lcpu_leaf7_1_lam
 	test $0x20, %eax
@@ -3443,9 +3562,10 @@ check_cpu_profile:
 	cmp %r13d, %eax
 	jne 2f
 	mov $156, %r11d
-	xor %r12d, %r12d
-	test %r13d, %r13d
+	mov %r13d, %r12d
+	or %r10d, %r12d
 	setne %r12b
+	movzbl %r12b, %r12d
 	cmp %r12d, leaf7_max_subleaf(%rip)
 	jne 2f
 	mov $157, %r11d
@@ -3455,7 +3575,7 @@ check_cpu_profile:
 	test %ecx, %ecx
 	jne 2f
 	mov $159, %r11d
-	test %edx, %edx
+	cmp %r10d, %edx
 	jne 2f
 	cmpl $0, avx_available(%rip)
 	jne .Lcpu_check_avx_xstate
@@ -4029,8 +4149,28 @@ check_cpu_profile:
 	vaddph %zmm0, %zmm0, %zmm0
 .Lcpu_instruction_avx512bf16:
 	cmpl $0, avx512bf16_available(%rip)
-	je .Lcpu_instructions_done
+	je .Lcpu_instruction_avxvnni
 	vdpbf16ps %zmm0, %zmm0, %zmm0
+.Lcpu_instruction_avxvnni:
+	cmpl $0, avxvnni_available(%rip)
+	je .Lcpu_instruction_avxifma
+	{vex} vpdpbusd %ymm0, %ymm0, %ymm0
+.Lcpu_instruction_avxifma:
+	cmpl $0, avxifma_available(%rip)
+	je .Lcpu_instruction_avxvnniint8
+	{vex} vpmadd52luq %ymm0, %ymm0, %ymm0
+.Lcpu_instruction_avxvnniint8:
+	cmpl $0, avxvnniint8_available(%rip)
+	je .Lcpu_instruction_avxneconvert
+	vpdpbssd %ymm0, %ymm0, %ymm0
+.Lcpu_instruction_avxneconvert:
+	cmpl $0, avxneconvert_available(%rip)
+	je .Lcpu_instruction_avxvnniint16
+	vbcstnebf162ps initial_xmm(%rip), %ymm0
+.Lcpu_instruction_avxvnniint16:
+	cmpl $0, avxvnniint16_available(%rip)
+	je .Lcpu_instructions_done
+	vpdpwsud %ymm0, %ymm0, %ymm0
 .Lcpu_instructions_done:
 	xor %eax, %eax
 	pop %r13

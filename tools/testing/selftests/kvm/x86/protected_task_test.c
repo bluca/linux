@@ -105,6 +105,11 @@ struct protected_avx_features {
 	bool avx512vp2intersect;
 	bool avx512fp16;
 	bool avx512bf16;
+	bool avxvnni;
+	bool avxifma;
+	bool avxvnniint8;
+	bool avxneconvert;
+	bool avxvnniint16;
 };
 
 static bool kvm_supported_xstate_component(
@@ -166,7 +171,12 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 			features.avx512vp2intersect = entry->edx & (1U << 8);
 			features.avx512fp16 = entry->edx & (1U << 23);
 		} else if (entry->function == 7 && entry->index == 1) {
+			features.avxvnni = entry->eax & (1U << 4);
 			features.avx512bf16 = entry->eax & (1U << 5);
+			features.avxifma = entry->eax & (1U << 23);
+			features.avxvnniint8 = entry->edx & (1U << 4);
+			features.avxneconvert = entry->edx & (1U << 5);
+			features.avxvnniint16 = entry->edx & (1U << 10);
 		} else if (entry->function == 0xd && !entry->index) {
 			ymm = entry->eax & (1U << 2);
 			avx512_xstate = (entry->eax & (0xe0U)) == 0xe0U;
@@ -192,7 +202,10 @@ static struct protected_avx_features get_kvm_supported_avx_features(int kvm_fd)
 		zmm_hi256_end - 512 >= opmask_end &&
 		hi16_zmm_end - 1024 >= zmm_hi256_end;
 	if (!features.avx)
-		features.fma = features.f16c = features.avx2 = false;
+		features.fma = features.f16c = features.avx2 =
+			features.avxvnni = features.avxifma =
+			features.avxvnniint8 = features.avxneconvert =
+			features.avxvnniint16 = false;
 	if (!features.avx512)
 		features.avx512dq = features.avx512ifma =
 			features.avx512pf = features.avx512er =
@@ -299,6 +312,21 @@ static void append_expected_avx_profile(
 	if (features->avx512bf16)
 		append_expected_output(output, output_size, length,
 				       "protected task avx512bf16\n");
+	if (features->avxvnni)
+		append_expected_output(output, output_size, length,
+				       "protected task avxvnni\n");
+	if (features->avxifma)
+		append_expected_output(output, output_size, length,
+				       "protected task avxifma\n");
+	if (features->avxvnniint8)
+		append_expected_output(output, output_size, length,
+				       "protected task avxvnniint8\n");
+	if (features->avxneconvert)
+		append_expected_output(output, output_size, length,
+				       "protected task avxneconvert\n");
+	if (features->avxvnniint16)
+		append_expected_output(output, output_size, length,
+				       "protected task avxvnniint16\n");
 }
 
 static void test_create_validation(int kvm_fd)
