@@ -2164,6 +2164,10 @@ _start:
 	call set_test_arch_bases
 	test %eax, %eax
 	jne 1f
+	movl $246, failure_code(%rip)
+	call check_cow_mapping
+	test %eax, %eax
+	jne 1f
 
 	movl $20, failure_code(%rip)
 	mov $57, %eax
@@ -4176,6 +4180,116 @@ check_la57_mapping:
 	xor %eax, %eax
 	ret
 	.size check_la57_mapping, . - check_la57_mapping
+
+	.type check_cow_mapping, @function
+check_cow_mapping:
+	push %r12
+	push %r13
+	push %r14
+	push %r15
+	movabs $0x200000000000, %r12
+	mov $9, %eax
+	mov %r12, %rdi
+	mov $0x400000, %esi
+	mov $3, %edx
+	mov $MAP_FIXED_NOREPLACE_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp %r12, %rax
+	jne .Lcow_mapping_fail
+	mov %r12, %r14
+	mov $1024, %r13d
+.Lcow_mapping_initialize:
+	mov %r13d, (%r14)
+	add $4096, %r14
+	dec %r13d
+	jne .Lcow_mapping_initialize
+	mov $57, %eax
+	syscall
+	test %rax, %rax
+	jz .Lcow_mapping_child
+	js .Lcow_mapping_cleanup_fail
+	sub $16, %rsp
+	mov %rax, 8(%rsp)
+	mov %rax, %rdi
+	mov %rsp, %rsi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	mov $61, %eax
+	syscall
+	cmp 8(%rsp), %rax
+	jne .Lcow_mapping_wait_fail
+	cmpl $0, (%rsp)
+	jne .Lcow_mapping_wait_fail
+	add $16, %rsp
+	mov %r12, %r14
+	mov $1024, %r13d
+.Lcow_mapping_parent_verify:
+	cmp %r13d, (%r14)
+	jne .Lcow_mapping_cleanup_fail
+	add $4096, %r14
+	dec %r13d
+	jne .Lcow_mapping_parent_verify
+	xor %r15d, %r15d
+	jmp .Lcow_mapping_cleanup
+.Lcow_mapping_wait_fail:
+	add $16, %rsp
+.Lcow_mapping_cleanup_fail:
+	mov $1, %r15d
+.Lcow_mapping_cleanup:
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $0x400000, %esi
+	syscall
+	test %rax, %rax
+	je .Lcow_mapping_done
+	mov $1, %r15d
+.Lcow_mapping_done:
+	mov %r15d, %eax
+	pop %r15
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+.Lcow_mapping_child:
+	mov %r12, %r14
+	mov $1024, %r13d
+.Lcow_mapping_child_write:
+	cmp %r13d, (%r14)
+	jne .Lcow_mapping_child_fail
+	mov %r13d, %eax
+	not %eax
+	mov %eax, (%r14)
+	add $4096, %r14
+	dec %r13d
+	jne .Lcow_mapping_child_write
+	mov %r12, %r14
+	mov $1024, %r13d
+.Lcow_mapping_child_verify:
+	mov %r13d, %eax
+	not %eax
+	cmp %eax, (%r14)
+	jne .Lcow_mapping_child_fail
+	add $4096, %r14
+	dec %r13d
+	jne .Lcow_mapping_child_verify
+	xor %edi, %edi
+	jmp .Lcow_mapping_child_exit
+.Lcow_mapping_child_fail:
+	mov $1, %edi
+.Lcow_mapping_child_exit:
+	mov $60, %eax
+	syscall
+	ud2
+.Lcow_mapping_fail:
+	pop %r15
+	pop %r14
+	pop %r13
+	pop %r12
+	mov $1, %eax
+	ret
+	.size check_cow_mapping, . - check_cow_mapping
 
 	.type check_process_clone, @function
 check_process_clone:
