@@ -79,6 +79,10 @@
 .set ADDRESS_FD, 100
 .set READY_FD, 101
 .set CONTROL_FD, 102
+.set MAP_PRIVATE_ANONYMOUS, 0x22
+.set MAP_GROWSDOWN_PRIVATE_ANONYMOUS, 0x122
+.set MAP_FIXED_NOREPLACE_PRIVATE_ANONYMOUS, 0x100022
+.set MAP_FIXED_NOREPLACE_GROWSDOWN_PRIVATE_ANONYMOUS, 0x100122
 
 	.section .rodata
 message:
@@ -714,6 +718,18 @@ _start:
 	jne 1f
 	mov $11, %edi
 	call install_exception_handler
+	test %eax, %eax
+	jne 1f
+	movl $216, failure_code(%rip)
+	call check_stack_growth
+	test %eax, %eax
+	jne 1f
+	movl $217, failure_code(%rip)
+	call check_growdown_mapping
+	test %eax, %eax
+	jne 1f
+	movl $218, failure_code(%rip)
+	call check_growdown_guard
 	test %eax, %eax
 	jne 1f
 
@@ -2206,6 +2222,10 @@ _start:
 	call check_cpu_profile
 	test %eax, %eax
 	jne 15f
+	movl $220, failure_code(%rip)
+	call check_growdown_mapping
+	test %eax, %eax
+	jne 15f
 	call check_amx_caller_saved
 	test %eax, %eax
 	jne 12f
@@ -2412,6 +2432,145 @@ check_exception:
 	ret
 	.size check_exception, . - check_exception
 
+	.type check_stack_growth, @function
+check_stack_growth:
+	push %rbp
+	mov %rsp, %rbp
+	mov $512, %ecx
+.Lstack_growth:
+	sub $4096, %rsp
+	movb $0, (%rsp)
+	dec %ecx
+	jne .Lstack_growth
+	mov %rbp, %rsp
+	pop %rbp
+	xor %eax, %eax
+	ret
+	.size check_stack_growth, . - check_stack_growth
+
+	.type check_growdown_mapping, @function
+check_growdown_mapping:
+	push %r12
+	push %r13
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $MAP_GROWSDOWN_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Lgrowdown_mapping_fail
+	mov %rax, %r12
+	mov %rax, %r13
+	mov $64, %ecx
+.Lgrowdown_mapping_expand:
+	sub $4096, %r13
+	movb %cl, (%r13)
+	dec %ecx
+	jne .Lgrowdown_mapping_expand
+	mov $11, %eax
+	mov %r13, %rdi
+	mov $266240, %esi
+	syscall
+	test %rax, %rax
+	jne .Lgrowdown_mapping_fail
+	pop %r13
+	pop %r12
+	xor %eax, %eax
+	ret
+.Lgrowdown_mapping_fail:
+	pop %r13
+	pop %r12
+	mov $1, %eax
+	ret
+	.size check_growdown_mapping, . - check_growdown_mapping
+
+	.type check_growdown_guard, @function
+check_growdown_guard:
+	push %r12
+	push %r13
+	push %r14
+	mov $9, %eax
+	xor %edi, %edi
+	mov $16384, %esi
+	xor %edx, %edx
+	mov $MAP_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Lgrowdown_guard_fail
+	mov %rax, %r12
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $16384, %esi
+	syscall
+	test %rax, %rax
+	jne .Lgrowdown_guard_fail
+	mov $9, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $MAP_FIXED_NOREPLACE_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp %r12, %rax
+	jne .Lgrowdown_guard_fail
+	lea 12288(%r12), %r13
+	mov $9, %eax
+	mov %r13, %rdi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $MAP_FIXED_NOREPLACE_GROWSDOWN_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp %r13, %rax
+	jne .Lgrowdown_guard_upper_fail
+	lea 8192(%r12), %r14
+	mov $11, %edi
+	mov $1, %esi
+	mov $14, %edx
+	mov %r14, %rcx
+	lea .Lgrowdown_guard_resume(%rip), %r8
+	mov %r14, %r9
+	call prepare_exception
+	movq $7, expected_error_mask(%rip)
+	movq $4, expected_error(%rip)
+	movb $1, (%r14)
+.Lgrowdown_guard_resume:
+	call check_exception
+	mov %eax, %r14d
+	mov $11, %eax
+	mov %r13, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Lgrowdown_guard_cleanup_lower
+.Lgrowdown_guard_upper_fail:
+	mov $1, %r14d
+.Lgrowdown_guard_cleanup_lower:
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Lgrowdown_guard_done
+	mov $1, %r14d
+.Lgrowdown_guard_done:
+	mov %r14d, %eax
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+.Lgrowdown_guard_fail:
+	mov $1, %r14d
+	jmp .Lgrowdown_guard_done
+	.size check_growdown_guard, . - check_growdown_guard
+
 	.type check_process_clone, @function
 check_process_clone:
 	test %rax, %rax
@@ -2435,6 +2594,13 @@ check_process_clone:
 .Lprocess_child:
 	mov initial_stack(%rip), %rdi
 	call check_cpu_profile
+	test %eax, %eax
+	jne .Lprocess_child_fail
+	movl $219, failure_code(%rip)
+	call check_stack_growth
+	test %eax, %eax
+	jne .Lprocess_child_fail
+	call check_growdown_mapping
 	test %eax, %eax
 	jne .Lprocess_child_fail
 	call check_amx_caller_saved
