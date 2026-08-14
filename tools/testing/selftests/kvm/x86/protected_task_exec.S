@@ -83,6 +83,8 @@
 .set MAP_GROWSDOWN_PRIVATE_ANONYMOUS, 0x122
 .set MAP_FIXED_NOREPLACE_PRIVATE_ANONYMOUS, 0x100022
 .set MAP_FIXED_NOREPLACE_GROWSDOWN_PRIVATE_ANONYMOUS, 0x100122
+.set MREMAP_MAYMOVE_FIXED, 3
+.set MADV_DONTNEED, 4
 
 	.section .rodata
 message:
@@ -3672,6 +3674,99 @@ check_memslot_reuse:
 	ret
 	.size check_memslot_reuse, . - check_memslot_reuse
 
+	.type check_allocator_compaction, @function
+check_allocator_compaction:
+	push %r12
+	push %r13
+	push %r14
+	movabs $0x600000000000, %r12
+	movabs $0x700000000000, %r13
+	mov $4096, %r14d
+.Lallocator_compaction_loop:
+	mov $9, %eax
+	mov %r12, %rdi
+	mov $65536, %esi
+	mov $3, %edx
+	mov $MAP_FIXED_NOREPLACE_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp %r12, %rax
+	jne .Lallocator_compaction_fail
+	mov %r14, (%r12)
+	mov %r14, 65528(%r12)
+	cmp %r14, (%r12)
+	jne .Lallocator_compaction_cleanup_source
+	cmp %r14, 65528(%r12)
+	jne .Lallocator_compaction_cleanup_source
+	mov $28, %eax
+	lea 32768(%r12), %rdi
+	mov $32768, %esi
+	mov $MADV_DONTNEED, %edx
+	syscall
+	test %rax, %rax
+	jne .Lallocator_compaction_cleanup_source
+	cmp %r14, (%r12)
+	jne .Lallocator_compaction_cleanup_source
+	cmpq $0, 65528(%r12)
+	jne .Lallocator_compaction_cleanup_source
+	mov $25, %eax
+	mov %r12, %rdi
+	mov $65536, %esi
+	mov $32768, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	syscall
+	cmp %r12, %rax
+	jne .Lallocator_compaction_cleanup_source
+	mov $25, %eax
+	mov %r12, %rdi
+	mov $32768, %esi
+	mov $32768, %edx
+	mov $MREMAP_MAYMOVE_FIXED, %r10d
+	mov %r13, %r8
+	syscall
+	cmp %r13, %rax
+	jne .Lallocator_compaction_cleanup_source
+	cmp %r14, (%r13)
+	jne .Lallocator_compaction_cleanup_target
+	mov %r14, 32760(%r13)
+	cmp %r14, 32760(%r13)
+	jne .Lallocator_compaction_cleanup_target
+	mov $11, %eax
+	mov %r13, %rdi
+	mov $32768, %esi
+	syscall
+	test %rax, %rax
+	jne .Lallocator_compaction_fail
+	add $0x20000, %r12
+	add $0x20000, %r13
+	dec %r14d
+	jne .Lallocator_compaction_loop
+	pop %r14
+	pop %r13
+	pop %r12
+	xor %eax, %eax
+	ret
+.Lallocator_compaction_cleanup_target:
+	mov $11, %eax
+	mov %r13, %rdi
+	mov $32768, %esi
+	syscall
+	jmp .Lallocator_compaction_fail
+.Lallocator_compaction_cleanup_source:
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $65536, %esi
+	syscall
+.Lallocator_compaction_fail:
+	pop %r14
+	pop %r13
+	pop %r12
+	mov $1, %eax
+	ret
+	.size check_allocator_compaction, . - check_allocator_compaction
+
 	.type check_memslot_compaction, @function
 check_memslot_compaction:
 	push %rbp
@@ -3734,6 +3829,9 @@ check_memslot_compaction:
 	syscall
 	jmp .Lmemslot_compaction_wait_ready
 .Lmemslot_compaction_ready:
+	call check_allocator_compaction
+	test %eax, %eax
+	jne .Lmemslot_compaction_cleanup_fail
 	mov $129, %r15d
 .Lmemslot_compaction_batch:
 	xor %r13d, %r13d
