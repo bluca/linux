@@ -4671,6 +4671,9 @@ static int __kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 {
 	unsigned int foll = fault->write ? FOLL_WRITE : 0;
 
+	if (fault->force_gup)
+		foll |= FOLL_FORCE;
+
 	if (fault->is_private || kvm_memslot_is_gmem_only(fault->slot))
 		return kvm_mmu_faultin_pfn_gmem(vcpu, fault);
 
@@ -4728,7 +4731,7 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 	if (!vma)
 		allowed = false;
 	else {
-		if (vma->vm_flags & VM_READ)
+		if (vma->vm_flags & (VM_READ | VM_WRITE))
 			access |= ACC_READ_MASK;
 		if (vma->vm_flags & VM_WRITE)
 			access |= ACC_WRITE_MASK;
@@ -4744,7 +4747,11 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 		else if (fault->write)
 			allowed = vma->vm_flags & VM_WRITE;
 		else
-			allowed = vma->vm_flags & VM_READ;
+			allowed = vma->vm_flags & (VM_READ | VM_WRITE);
+		fault->force_gup = !(vma->vm_flags & VM_READ) &&
+			((fault->exec && (vma->vm_flags & VM_EXEC)) ||
+			 (!fault->write && !fault->exec &&
+			  (vma->vm_flags & VM_WRITE)));
 
 		fault->max_access = access;
 		fault->max_level = PG_LEVEL_4K;

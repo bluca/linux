@@ -3033,9 +3033,10 @@ out:
 	return npages;
 }
 
-static bool vma_is_valid(struct vm_area_struct *vma, bool write_fault)
+static bool vma_is_valid(struct vm_area_struct *vma, bool write_fault,
+			 bool force)
 {
-	if (unlikely(!(vma->vm_flags & VM_READ)))
+	if (unlikely(!(vma->vm_flags & VM_READ)) && !force)
 		return false;
 
 	if (write_fault && (unlikely(!(vma->vm_flags & VM_WRITE))))
@@ -3126,7 +3127,8 @@ retry:
 			pfn = KVM_PFN_ERR_FAULT;
 	} else {
 		if ((kfp->flags & FOLL_NOWAIT) &&
-		    vma_is_valid(vma, kfp->flags & FOLL_WRITE))
+		    vma_is_valid(vma, kfp->flags & FOLL_WRITE,
+				 kfp->flags & FOLL_FORCE))
 			pfn = KVM_PFN_ERR_NEEDS_IO;
 		else
 			pfn = KVM_PFN_ERR_FAULT;
