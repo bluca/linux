@@ -331,6 +331,11 @@ syscall_initial_byte:
 	.byte 0x3c
 syscall_write_byte:
 	.byte 0xa5
+execute_only_code:
+	.byte 0xb8
+	.long 0x12345678
+	.byte 0xc3
+.set execute_only_code_length, . - execute_only_code
 	.balign 8
 fs_marker:
 	.quad 0x0123456789abcdef
@@ -1709,6 +1714,10 @@ _start:
 	jne 1f
 	movl $229, failure_code(%rip)
 	call check_write_only_mapping
+	test %eax, %eax
+	jne 1f
+	movl $230, failure_code(%rip)
+	call check_execute_only_mapping
 	test %eax, %eax
 	jne 1f
 
@@ -3589,6 +3598,100 @@ check_write_only_mapping:
 	mov $1, %eax
 	ret
 	.size check_write_only_mapping, . - check_write_only_mapping
+
+	.type check_execute_only_mapping, @function
+check_execute_only_mapping:
+	push %r12
+	push %r13
+	push %r14
+	mov $-1, %r12
+	xor %r13d, %r13d
+	mov $319, %eax
+	lea security_memfd_name(%rip), %rdi
+	mov $0x11, %esi
+	syscall
+	cmp $-4095, %rax
+	jae .Lexecute_only_fail
+	mov %rax, %r12
+	mov $77, %eax
+	mov %r12d, %edi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne .Lexecute_only_fail
+	mov $18, %eax
+	mov %r12d, %edi
+	lea execute_only_code(%rip), %rsi
+	mov $execute_only_code_length, %edx
+	xor %r10d, %r10d
+	syscall
+	cmp $execute_only_code_length, %rax
+	jne .Lexecute_only_fail
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $4, %edx
+	mov $2, %r10d
+	mov %r12d, %r8d
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Lexecute_only_fail
+	mov %rax, %r13
+	call *%r13
+	cmp $0x12345678, %eax
+	jne .Lexecute_only_fail
+	cmpl $0, pku_available(%rip)
+	je .Lexecute_only_readable
+	mov $11, %edi
+	mov $4, %esi
+	mov $14, %edx
+	mov %r13, %rcx
+	lea .Lexecute_only_read_resume(%rip), %r8
+	mov %r13, %r9
+	call prepare_exception
+	movq $0x25, expected_error_mask(%rip)
+	movq $0x25, expected_error(%rip)
+	mov (%r13), %al
+.Lexecute_only_read_resume:
+	call check_exception
+	test %eax, %eax
+	jne .Lexecute_only_fail
+	jmp .Lexecute_only_success
+.Lexecute_only_readable:
+	cmpb $0xb8, (%r13)
+	jne .Lexecute_only_fail
+.Lexecute_only_success:
+	xor %r14d, %r14d
+	jmp .Lexecute_only_cleanup
+.Lexecute_only_fail:
+	mov $1, %r14d
+.Lexecute_only_cleanup:
+	test %r13, %r13
+	jz .Lexecute_only_close
+	mov $11, %eax
+	mov %r13, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Lexecute_only_close
+	mov $1, %r14d
+.Lexecute_only_close:
+	cmp $0, %r12
+	jl .Lexecute_only_done
+	mov $3, %eax
+	mov %r12d, %edi
+	syscall
+	test %rax, %rax
+	je .Lexecute_only_done
+	mov $1, %r14d
+.Lexecute_only_done:
+	mov %r14d, %eax
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+	.size check_execute_only_mapping, . - check_execute_only_mapping
 
 	.type check_process_clone, @function
 check_process_clone:
