@@ -482,6 +482,13 @@ thread_ready:
 thread_release:
 	.long 0
 	.balign 8
+memslot_thread_tid:
+	.long 0
+memslot_thread_ready:
+	.long 0
+memslot_thread_release:
+	.long 0
+	.balign 8
 thread_shstk_address:
 	.quad 0
 	.balign 4
@@ -2540,10 +2547,10 @@ check_growdown_mapping:
 	push %r12
 	push %r13
 	mov $9, %eax
-	xor %edi, %edi
+	movabs $0x300000000000, %rdi
 	mov $4096, %esi
 	mov $3, %edx
-	mov $MAP_GROWSDOWN_PRIVATE_ANONYMOUS, %r10d
+	mov $MAP_FIXED_NOREPLACE_GROWSDOWN_PRIVATE_ANONYMOUS, %r10d
 	mov $-1, %r8
 	xor %r9d, %r9d
 	syscall
@@ -3668,10 +3675,13 @@ check_memslot_reuse:
 	.type check_memslot_compaction, @function
 check_memslot_compaction:
 	push %rbp
+	push %rbx
 	push %r12
 	push %r13
 	push %r14
 	push %r15
+	mov $-1, %rbp
+	mov $-1, %rbx
 	movabs $0x500000000000, %r12
 	mov %r12, %r14
 	mov $319, %eax
@@ -3687,6 +3697,43 @@ check_memslot_compaction:
 	syscall
 	test %rax, %rax
 	jne .Lmemslot_compaction_cleanup_fail
+	mov $9, %eax
+	xor %edi, %edi
+	mov $65536, %esi
+	mov $3, %edx
+	mov $MAP_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Lmemslot_compaction_cleanup_fail
+	mov %rax, %rbx
+	lea 65536(%rax), %rsi
+	movl $0, memslot_thread_tid(%rip)
+	movl $0, memslot_thread_ready(%rip)
+	movl $0, memslot_thread_release(%rip)
+	mov $0x310f00, %edi
+	lea memslot_thread_tid(%rip), %rdx
+	lea memslot_thread_tid(%rip), %r10
+	xor %r8d, %r8d
+	mov $56, %eax
+	syscall
+	test %rax, %rax
+	jz .Lmemslot_compaction_thread
+	js .Lmemslot_compaction_cleanup_fail
+.Lmemslot_compaction_wait_ready:
+	cmpl $0, memslot_thread_ready(%rip)
+	jne .Lmemslot_compaction_ready
+	lea memslot_thread_ready(%rip), %rdi
+	xor %esi, %esi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	mov $202, %eax
+	syscall
+	jmp .Lmemslot_compaction_wait_ready
+.Lmemslot_compaction_ready:
 	mov $129, %r15d
 .Lmemslot_compaction_batch:
 	xor %r13d, %r13d
@@ -3714,17 +3761,17 @@ check_memslot_compaction:
 	syscall
 	jmp .Lmemslot_compaction_cleanup_fail
 .Lmemslot_compaction_mapped:
+	add $4096, %r12
 	test $1, %r13d
 	jz .Lmemslot_compaction_read
-	movb $0x5a, (%r12)
-	cmpb $0x5a, (%r12)
+	movb $0x5a, -4096(%r12)
+	cmpb $0x5a, -4096(%r12)
 	jne .Lmemslot_compaction_cleanup_fail
 	jmp .Lmemslot_compaction_page_done
 .Lmemslot_compaction_read:
-	cmpb $0, (%r12)
+	cmpb $0, -4096(%r12)
 	jne .Lmemslot_compaction_cleanup_fail
 .Lmemslot_compaction_page_done:
-	add $4096, %r12
 	inc %r13d
 	cmp $256, %r13d
 	jne .Lmemslot_compaction_page
@@ -3747,13 +3794,49 @@ check_memslot_compaction:
 .Lmemslot_compaction_cleanup_fail:
 	mov $1, %r13d
 .Lmemslot_compaction_cleanup:
+	movl $1, memslot_thread_release(%rip)
+.Lmemslot_compaction_wait_thread:
+	mov memslot_thread_tid(%rip), %edx
+	test %edx, %edx
+	jz .Lmemslot_compaction_thread_done
+	lea memslot_thread_tid(%rip), %rdi
+	xor %esi, %esi
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	mov $202, %eax
+	syscall
+	jmp .Lmemslot_compaction_wait_thread
+.Lmemslot_compaction_thread_done:
+	cmp $-1, %rbx
+	je .Lmemslot_compaction_range_cleanup
 	mov $11, %eax
-	mov %r14, %rdi
-	mov $0x10200000, %esi
+	mov %rbx, %rdi
+	mov $65536, %esi
 	syscall
 	test %rax, %rax
-	je .Lmemslot_compaction_done
+	je .Lmemslot_compaction_range_cleanup
 	mov $1, %r13d
+.Lmemslot_compaction_range_cleanup:
+	mov %r14, %r15
+.Lmemslot_compaction_unmap_batch:
+	cmp %r12, %r15
+	jae .Lmemslot_compaction_done
+	mov %r12, %rsi
+	sub %r15, %rsi
+	cmp $0x100000, %rsi
+	jbe .Lmemslot_compaction_unmap_length
+	mov $0x100000, %esi
+.Lmemslot_compaction_unmap_length:
+	mov $11, %eax
+	mov %r15, %rdi
+	syscall
+	test %rax, %rax
+	je .Lmemslot_compaction_unmap_next
+	movl $1, %r13d
+.Lmemslot_compaction_unmap_next:
+	add $0x200000, %r15
+	jmp .Lmemslot_compaction_unmap_batch
 .Lmemslot_compaction_done:
 	mov $3, %eax
 	mov %ebp, %edi
@@ -3767,6 +3850,7 @@ check_memslot_compaction:
 	pop %r14
 	pop %r13
 	pop %r12
+	pop %rbx
 	pop %rbp
 	ret
 .Lmemslot_compaction_fail:
@@ -3774,9 +3858,30 @@ check_memslot_compaction:
 	pop %r14
 	pop %r13
 	pop %r12
+	pop %rbx
 	pop %rbp
 	mov $1, %eax
 	ret
+.Lmemslot_compaction_thread:
+	movl $1, memslot_thread_ready(%rip)
+	lea memslot_thread_ready(%rip), %rdi
+	mov $1, %esi
+	mov $1, %edx
+	xor %r10d, %r10d
+	xor %r8d, %r8d
+	xor %r9d, %r9d
+	mov $202, %eax
+	syscall
+.Lmemslot_compaction_thread_run:
+	cmpl $0, memslot_thread_release(%rip)
+	jne .Lmemslot_compaction_thread_exit
+	pause
+	jmp .Lmemslot_compaction_thread_run
+.Lmemslot_compaction_thread_exit:
+	xor %edi, %edi
+	mov $60, %eax
+	syscall
+	ud2
 	.size check_memslot_compaction, . - check_memslot_compaction
 
 	.type check_execute_only_mapping, @function
