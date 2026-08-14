@@ -1693,6 +1693,10 @@ _start:
 	call check_sysv_shared_memory
 	test %eax, %eax
 	jne 1f
+	movl $227, failure_code(%rip)
+	call check_hugetlb_mapping
+	test %eax, %eax
+	jne 1f
 
 	# The ordinary guest range has RWX first-stage PTEs. Permission faults
 	# below therefore prove the independent second-stage VMA ceiling.
@@ -3240,6 +3244,63 @@ check_sysv_shared_memory:
 	pop %r12
 	ret
 	.size check_sysv_shared_memory, . - check_sysv_shared_memory
+
+	.type check_hugetlb_mapping, @function
+check_hugetlb_mapping:
+	push %r12
+	mov $9, %eax
+	xor %edi, %edi
+	mov $0x200000, %esi
+	mov $3, %edx
+	mov $0x40022, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-12, %rax
+	je .Lhugetlb_skip
+	cmp $-4095, %rax
+	jae .Lhugetlb_fail
+	mov %rax, %r12
+	movb $0x34, (%r12)
+	movb $0x78, 0x1fffff(%r12)
+	cmpb $0x34, (%r12)
+	jne .Lhugetlb_cleanup_fail
+	cmpb $0x78, 0x1fffff(%r12)
+	jne .Lhugetlb_cleanup_fail
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $0x200000, %esi
+	syscall
+	test %rax, %rax
+	jne .Lhugetlb_fail
+	mov $11, %edi
+	mov $1, %esi
+	mov $14, %edx
+	mov %r12, %rcx
+	lea .Lhugetlb_resume(%rip), %r8
+	mov %r12, %r9
+	call prepare_exception
+	movq $7, expected_error_mask(%rip)
+	movq $4, expected_error(%rip)
+	mov (%r12), %eax
+.Lhugetlb_resume:
+	call check_exception
+	pop %r12
+	ret
+.Lhugetlb_cleanup_fail:
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $0x200000, %esi
+	syscall
+.Lhugetlb_fail:
+	pop %r12
+	mov $1, %eax
+	ret
+.Lhugetlb_skip:
+	pop %r12
+	xor %eax, %eax
+	ret
+	.size check_hugetlb_mapping, . - check_hugetlb_mapping
 
 	.type check_process_clone, @function
 check_process_clone:
