@@ -956,6 +956,140 @@ static void test_dso_stress(int kvm_fd)
 		    "Protected DSO stress failed: %#x", status);
 }
 
+static unsigned long get_anon_huge_pages(void *address)
+{
+	unsigned long target = (unsigned long)address;
+	char line[256];
+	bool found = false;
+	FILE *smaps;
+
+	smaps = fopen("/proc/self/smaps", "re");
+	if (!smaps)
+		return ULONG_MAX;
+
+	while (fgets(line, sizeof(line), smaps)) {
+		unsigned long start, end, size;
+
+		if (sscanf(line, "%lx-%lx", &start, &end) == 2) {
+			found = target >= start && target < end;
+			continue;
+		}
+		if (found && sscanf(line, "AnonHugePages: %lu kB", &size) == 1) {
+			fclose(smaps);
+			return size << 10;
+		}
+	}
+
+	fclose(smaps);
+	return ULONG_MAX;
+}
+
+static int madvise_collapse_retry(void *address, size_t size)
+{
+	int ret;
+
+	ret = madvise(address, size, MADV_COLLAPSE);
+	if (ret && errno == EAGAIN)
+		ret = madvise(address, size, MADV_COLLAPSE);
+	return ret;
+}
+
+static int run_thp_stress_target(void)
+{
+	const unsigned long thp_size = 2UL << 20;
+	const unsigned long page_size = 4096;
+	const unsigned long dropped_page = 257;
+	unsigned long base, aligned, end, i;
+	void *reservation, *region;
+
+	reservation = mmap(NULL, thp_size * 2, PROT_READ | PROT_WRITE,
+			   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (reservation == MAP_FAILED)
+		return 10;
+
+	base = (unsigned long)reservation;
+	aligned = (base + thp_size - 1) & ~(thp_size - 1);
+	end = base + thp_size * 2;
+	if ((aligned > base && munmap((void *)base, aligned - base)) ||
+	    (aligned + thp_size < end &&
+	     munmap((void *)(aligned + thp_size), end - aligned - thp_size)))
+		return 11;
+	region = (void *)aligned;
+
+	for (i = 0; i < thp_size / page_size; i++)
+		*(unsigned long *)(aligned + i * page_size) = 0x5a000000UL + i;
+
+	if (madvise_collapse_retry(region, thp_size)) {
+		int saved_errno = errno;
+
+		munmap(region, thp_size);
+		if (saved_errno == EINVAL || saved_errno == EOPNOTSUPP)
+			return KSFT_SKIP;
+		return 12;
+	}
+	if (get_anon_huge_pages(region) != thp_size)
+		return 13;
+
+	if (madvise((char *)region + dropped_page * page_size, page_size,
+		    MADV_DONTNEED))
+		return 14;
+	if (get_anon_huge_pages(region) != 0)
+		return 15;
+
+	for (i = 0; i < thp_size / page_size; i++) {
+		unsigned long expected = i == dropped_page ? 0 : 0x5a000000UL + i;
+
+		if (*(unsigned long *)(aligned + i * page_size) != expected)
+			return 16;
+	}
+	*(unsigned long *)(aligned + dropped_page * page_size) =
+		0x5a000000UL + dropped_page;
+
+	if (madvise_collapse_retry(region, thp_size))
+		return 17;
+	if (get_anon_huge_pages(region) != thp_size)
+		return 18;
+	for (i = 0; i < thp_size / page_size; i++) {
+		unsigned long value = *(unsigned long *)(aligned + i * page_size);
+
+		if (value != 0x5a000000UL + i)
+			return 19;
+	}
+
+	return munmap(region, thp_size) ? 20 : 0;
+}
+
+static void test_thp_stress(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
+	if (!child) {
+		int fd, ret;
+
+		fd = create_context_with_features(kvm_fd, KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		execl("/proc/self/exe", "protected_task_test",
+		      "--thp-stress-target", NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() failed: %d", errno);
+	if (WIFEXITED(status) && WEXITSTATUS(status) == KSFT_SKIP) {
+		print_skip("MADV_COLLAPSE is unavailable for protected THP stress");
+		return;
+	}
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "Protected THP stress failed: %#x", status);
+}
+
 static void get_exec_helper_path(char path[PATH_MAX])
 {
 	static const char helper[] = "protected_task_exec";
@@ -1681,6 +1815,8 @@ int main(int argc, char *argv[])
 		return 42;
 	if (argc == 2 && !strcmp(argv[1], "--dso-stress-target"))
 		return run_dso_stress_target();
+	if (argc == 2 && !strcmp(argv[1], "--thp-stress-target"))
+		return run_thp_stress_target();
 
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
@@ -1705,6 +1841,7 @@ int main(int argc, char *argv[])
 	close(first_fd);
 	test_close_while_armed(second_fd);
 	test_io_permissions_reject_exec(kvm_fd);
+	test_thp_stress(kvm_fd);
 	test_dso_stress(kvm_fd);
 	test_protected_exec(kvm_fd);
 	close(kvm_fd);
