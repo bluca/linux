@@ -578,8 +578,9 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 	if (!ret)
 		ret = fsnotify_mmap_perm(file, prot, off, len);
 	if (!ret) {
-		if ((flag & MAP_FIXED) &&
-		    kvm_protected_task_needs_pgtable_update())
+		if (((flag & MAP_FIXED) &&
+		     kvm_protected_task_needs_pgtable_update()) ||
+		    (prot == PROT_EXEC && kvm_protected_task_is_active()))
 			protected_task_quiesced =
 				kvm_protected_task_begin_mm_update();
 		if (mmap_write_lock_killable(mm)) {

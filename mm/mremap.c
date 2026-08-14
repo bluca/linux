@@ -32,6 +32,7 @@
 #include <asm/tlb.h>
 
 #include "internal.h"
+#include "vma.h"
 
 /* Classify the kind of remap operation being performed. */
 enum mremap_type {
@@ -1970,6 +1971,7 @@ static unsigned long do_mremap(struct vma_remap_struct *vrm)
 {
 	struct mm_struct *mm = current->mm;
 	bool protected_task_quiesced = false;
+	bool protected_pgtable_changed = false;
 	unsigned long res;
 	bool failed;
 
@@ -1989,6 +1991,19 @@ static unsigned long do_mremap(struct vma_remap_struct *vrm)
 		return -EINTR;
 	}
 	vrm->mmap_locked = true;
+	if (protected_task_quiesced) {
+		unsigned long end;
+
+		if (!check_add_overflow(vrm->addr, vrm->old_len, &end))
+			protected_pgtable_changed =
+				vma_range_needs_protected_task_update(mm,
+								      vrm->addr, end);
+		if ((vrm->flags & MREMAP_FIXED) &&
+		    !check_add_overflow(vrm->new_addr, vrm->new_len, &end))
+			protected_pgtable_changed |=
+				vma_range_needs_protected_task_update(mm,
+								      vrm->new_addr, end);
+	}
 
 	if (!check_map_count_against_split_early()) {
 		mmap_write_unlock(mm);
@@ -2015,7 +2030,8 @@ out:
 	if (vrm->mmap_locked)
 		mmap_write_unlock(mm);
 	if (protected_task_quiesced)
-		kvm_protected_task_end_mm_update(!failed);
+		kvm_protected_task_end_mm_update(!failed &&
+						 protected_pgtable_changed);
 
 	/* VMA mlock'd + was expanded, so populated expanded region. */
 	if (!failed && vrm->populate_expand)

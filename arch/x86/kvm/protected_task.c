@@ -632,7 +632,8 @@ static void kvm_protected_task_restrict_xstate(
 	kvm_protected_task_sync_dynamic_xstate(vcpu, state, false);
 }
 
-static int kvm_protected_task_validate_mm(struct mm_struct *mm)
+static int kvm_protected_task_validate_mm(struct mm_struct *mm,
+					  struct kvm_protected_task_x86 *state)
 {
 	struct vm_area_struct *vma;
 	VMA_ITERATOR(vmi, mm, 0);
@@ -641,8 +642,9 @@ static int kvm_protected_task_validate_mm(struct mm_struct *mm)
 	mmap_read_lock(mm);
 	for_each_vma(vmi, vma)
 		if (vma->vm_end > KVM_PT_VA_LIMIT ||
-		    ((vma->vm_flags & (VM_WRITE | VM_EXEC)) &&
-		     !(vma->vm_flags & VM_READ))) {
+		    ((vma->vm_flags & VM_EXEC) &&
+		     !(vma->vm_flags & VM_READ) && vma_pkey(vma) &&
+		     !state->pku)) {
 			ret = -EOPNOTSUPP;
 			break;
 		}
@@ -1251,7 +1253,7 @@ static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 	u64 *stub_page;
 	int ret;
 
-	ret = kvm_protected_task_validate_mm(current->mm);
+	ret = kvm_protected_task_validate_mm(current->mm, state);
 	if (ret)
 		return ret;
 	ret = kvm_protected_task_image_size(current->mm, &size);
@@ -1388,7 +1390,7 @@ bool kvm_arch_protected_task_needs_pgtable_update(struct kvm_vcpu *vcpu,
 {
 	struct kvm_protected_task_x86 *state = arch_state;
 
-	return state->shstk;
+	return state->pku || state->shstk;
 }
 
 unsigned long kvm_arch_protected_task_elf_hwcap(struct kvm_vcpu *vcpu,

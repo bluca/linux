@@ -39,6 +39,7 @@ struct kvm_follow_pfn {
 	 * mapping, e.g. via kmap(), mremap(), etc.
 	 */
 	bool pin;
+	bool protected_task_access;
 
 	/*
 	 * If non-NULL, try to get a writable mapping even for a read fault.

@@ -684,6 +684,9 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address);
 #endif
 
 int expand_downwards(struct vm_area_struct *vma, unsigned long address);
+bool vma_range_needs_protected_task_update(struct mm_struct *mm,
+					   unsigned long start,
+					   unsigned long end);
 
 int __vm_munmap(unsigned long start, size_t len, bool unlock);
 

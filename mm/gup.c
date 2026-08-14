@@ -1218,12 +1218,15 @@ static int check_vma_flags(struct vm_area_struct *vma, unsigned long gup_flags)
 
 	if (vma_is_secretmem(vma))
 		return -EFAULT;
-	if (vm_flags & VM_KVM_PROTECTED) {
-		if (!(gup_flags & FOLL_KVM_PROTECTED) || write || foreign)
+	if (gup_flags & FOLL_KVM_PROTECTED) {
+		if (write || foreign)
+			return -EFAULT;
+		if (!(vm_flags & VM_KVM_PROTECTED) &&
+		    !(vm_flags & VM_MAYREAD))
 			return -EFAULT;
 		return 0;
 	}
-	if (gup_flags & FOLL_KVM_PROTECTED)
+	if (vm_flags & VM_KVM_PROTECTED)
 		return -EFAULT;
 
 	if (write) {

@@ -5,6 +5,7 @@
  */
 
 #include <linux/kvm_protected_task.h>
+#include <linux/pkeys.h>
 
 #include "vma_internal.h"
 #include "vma.h"
@@ -3295,6 +3296,7 @@ int __vm_munmap(unsigned long start, size_t len, bool unlock)
 {
 	int ret;
 	struct mm_struct *mm = current->mm;
+	bool protected_pgtable_changed = false;
 	bool protected_task_quiesced = false;
 	LIST_HEAD(uf);
 	VMA_ITERATOR(vmi, mm, start);
@@ -3307,13 +3309,22 @@ int __vm_munmap(unsigned long start, size_t len, bool unlock)
 			kvm_protected_task_end_mm_update(false);
 		return -EINTR;
 	}
+	if (protected_task_quiesced) {
+		unsigned long end;
+
+		if (!check_add_overflow(start, len, &end))
+			protected_pgtable_changed =
+				vma_range_needs_protected_task_update(mm,
+								      start, end);
+	}
 
 	ret = do_vmi_munmap(&vmi, mm, start, len, &uf, unlock);
 	if (ret || !unlock)
 		mmap_write_unlock(mm);
 
 	if (protected_task_quiesced)
-		kvm_protected_task_end_mm_update(!ret);
+		kvm_protected_task_end_mm_update(!ret &&
+						 protected_pgtable_changed);
 	userfaultfd_unmap_complete(mm, &uf);
 	return ret;
 }

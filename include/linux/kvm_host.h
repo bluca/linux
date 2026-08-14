@@ -1319,6 +1319,10 @@ static inline void kvm_release_faultin_page(struct kvm *kvm, struct page *page,
 kvm_pfn_t __kvm_faultin_pfn(const struct kvm_memory_slot *slot, gfn_t gfn,
 			    unsigned int foll, bool *writable,
 			    struct page **refcounted_page);
+kvm_pfn_t __kvm_faultin_pfn_protected(const struct kvm_memory_slot *slot,
+				      gfn_t gfn, unsigned int foll,
+				      bool *writable,
+				      struct page **refcounted_page);
 
 static inline kvm_pfn_t kvm_faultin_pfn(struct kvm_vcpu *vcpu, gfn_t gfn,
 					bool write, bool *writable,

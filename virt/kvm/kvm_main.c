@@ -3002,8 +3002,10 @@ static int hva_to_pfn_slow(struct kvm_follow_pfn *kfp, kvm_pfn_t *pfn)
 	struct page *page, *wpage;
 	int npages;
 
-	if (kfp->slot->flags & KVM_MEMSLOT_PROTECTED_TASK)
-		npages = get_user_page_protected_task(kfp->hva, &page, flags,
+	if (kfp->slot->flags & KVM_MEMSLOT_PROTECTED_TASK ||
+	    kfp->protected_task_access)
+		npages = get_user_page_protected_task(kfp->hva, &page,
+						       flags & ~FOLL_FORCE,
 						       kfp->pin);
 	else if (kfp->pin)
 		npages = pin_user_pages_unlocked(kfp->hva, 1, &page, flags);
@@ -3173,14 +3175,17 @@ static kvm_pfn_t kvm_follow_pfn(struct kvm_follow_pfn *kfp)
 	return hva_to_pfn(kfp);
 }
 
-kvm_pfn_t __kvm_faultin_pfn(const struct kvm_memory_slot *slot, gfn_t gfn,
-			    unsigned int foll, bool *writable,
-			    struct page **refcounted_page)
+static kvm_pfn_t __kvm_faultin_pfn_common(const struct kvm_memory_slot *slot,
+					  gfn_t gfn, unsigned int foll,
+					  bool *writable,
+					  struct page **refcounted_page,
+					  bool protected_task_access)
 {
 	struct kvm_follow_pfn kfp = {
 		.slot = slot,
 		.gfn = gfn,
 		.flags = foll,
+		.protected_task_access = protected_task_access,
 		.map_writable = writable,
 		.refcounted_page = refcounted_page,
 	};
@@ -3193,7 +3198,25 @@ kvm_pfn_t __kvm_faultin_pfn(const struct kvm_memory_slot *slot, gfn_t gfn,
 
 	return kvm_follow_pfn(&kfp);
 }
+
+kvm_pfn_t __kvm_faultin_pfn(const struct kvm_memory_slot *slot, gfn_t gfn,
+			    unsigned int foll, bool *writable,
+			    struct page **refcounted_page)
+{
+	return __kvm_faultin_pfn_common(slot, gfn, foll, writable,
+					refcounted_page, false);
+}
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(__kvm_faultin_pfn);
+
+kvm_pfn_t __kvm_faultin_pfn_protected(const struct kvm_memory_slot *slot,
+				      gfn_t gfn, unsigned int foll,
+				      bool *writable,
+				      struct page **refcounted_page)
+{
+	return __kvm_faultin_pfn_common(slot, gfn, foll, writable,
+					refcounted_page, true);
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(__kvm_faultin_pfn_protected);
 
 int kvm_prefetch_pages(struct kvm_memory_slot *slot, gfn_t gfn,
 		       struct page **pages, int nr_pages)

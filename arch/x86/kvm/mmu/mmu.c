@@ -47,10 +47,12 @@
 #include <linux/kern_levels.h>
 #include <linux/kstrtox.h>
 #include <linux/kthread.h>
+#include <linux/pkeys.h>
 #include <linux/wordpart.h>
 
 #include <asm/page.h>
 #include <asm/memtype.h>
+#include <asm/pkeys.h>
 #include <asm/cmpxchg.h>
 #include <asm/cpuid/api.h>
 #include <asm/io.h>
@@ -4678,8 +4680,13 @@ static int __kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 		return kvm_mmu_faultin_pfn_gmem(vcpu, fault);
 
 	foll |= FOLL_NOWAIT;
-	fault->pfn = __kvm_faultin_pfn(fault->slot, fault->gfn, foll,
-				       &fault->map_writable, &fault->refcounted_page);
+	if (fault->force_gup)
+		fault->pfn = __kvm_faultin_pfn_protected(fault->slot,
+				fault->gfn, foll, &fault->map_writable,
+				&fault->refcounted_page);
+	else
+		fault->pfn = __kvm_faultin_pfn(fault->slot, fault->gfn, foll,
+				&fault->map_writable, &fault->refcounted_page);
 
 	/*
 	 * If resolving the page failed because I/O is needed to fault-in the
@@ -4708,8 +4715,13 @@ static int __kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 	 */
 	foll |= FOLL_INTERRUPTIBLE;
 	foll &= ~FOLL_NOWAIT;
-	fault->pfn = __kvm_faultin_pfn(fault->slot, fault->gfn, foll,
-				       &fault->map_writable, &fault->refcounted_page);
+	if (fault->force_gup)
+		fault->pfn = __kvm_faultin_pfn_protected(fault->slot,
+				fault->gfn, foll, &fault->map_writable,
+				&fault->refcounted_page);
+	else
+		fault->pfn = __kvm_faultin_pfn(fault->slot, fault->gfn, foll,
+				&fault->map_writable, &fault->refcounted_page);
 
 	return RET_PF_CONTINUE;
 }
@@ -4738,11 +4750,15 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 		if (vma->vm_flags & VM_EXEC)
 			access |= ACC_EXEC_MASK;
 
-		/* NPT cannot encode execute-only leaves without making them readable. */
+		/* NPT relies on the first-stage pkey for execute-only mappings. */
 		if (fault->exec && shadow_nx_mask &&
-		    !(vma->vm_flags & VM_READ))
-			allowed = false;
-		else if (fault->exec)
+		    !(vma->vm_flags & VM_READ)) {
+			allowed = (vma_pkey(vma) == 0 ||
+				   kvm_is_cr4_bit_set(vcpu, X86_CR4_PKE)) &&
+				  (vma->vm_flags & VM_EXEC);
+			if (allowed)
+				access |= ACC_READ_MASK;
+		} else if (fault->exec)
 			allowed = vma->vm_flags & VM_EXEC;
 		else if (fault->write)
 			allowed = vma->vm_flags & VM_WRITE;
