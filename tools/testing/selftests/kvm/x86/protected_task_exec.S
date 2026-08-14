@@ -426,6 +426,12 @@ uffdio_api:
 uffdio_register:
 	.zero 32
 	.balign 8
+uffd_msg:
+	.zero 32
+	.balign 8
+uffdio_copy:
+	.zero 40
+	.balign 8
 shstk_repair_address:
 	.quad 0
 shstk_repair_value:
@@ -1677,6 +1683,10 @@ _start:
 	jne 1f
 	movl $224, failure_code(%rip)
 	call check_userfaultfd_sigbus
+	test %eax, %eax
+	jne 1f
+	movl $226, failure_code(%rip)
+	call check_userfaultfd_event
 	test %eax, %eax
 	jne 1f
 	movl $225, failure_code(%rip)
@@ -2993,6 +3003,167 @@ check_userfaultfd_sigbus:
 	pop %r12
 	ret
 	.size check_userfaultfd_sigbus, . - check_userfaultfd_sigbus
+
+	.type check_userfaultfd_event, @function
+check_userfaultfd_event:
+	push %r12
+	push %r13
+	push %r14
+	push %r15
+	sub $16, %rsp
+	mov $-1, %r12
+	xor %r13d, %r13d
+	xor %r14d, %r14d
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $MAP_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Luserfaultfd_event_fail
+	mov %rax, %r13
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $MAP_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Luserfaultfd_event_fail
+	mov %rax, %r14
+	movb $0x6b, (%r14)
+	mov $323, %eax
+	mov $0x80001, %edi
+	syscall
+	cmp $-4095, %rax
+	jae .Luserfaultfd_event_fail
+	mov %rax, %r12
+	movq $0xaa, uffdio_api(%rip)
+	movq $0, 8+uffdio_api(%rip)
+	movq $0, 16+uffdio_api(%rip)
+	mov $16, %eax
+	mov %r12d, %edi
+	mov $0xc018aa3f, %esi
+	lea uffdio_api(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_event_fail
+	mov %r13, uffdio_register(%rip)
+	movq $4096, 8+uffdio_register(%rip)
+	movq $1, 16+uffdio_register(%rip)
+	movq $0, 24+uffdio_register(%rip)
+	mov $16, %eax
+	mov %r12d, %edi
+	mov $0xc020aa00, %esi
+	lea uffdio_register(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_event_fail
+	mov $57, %eax
+	syscall
+	test %rax, %rax
+	jz .Luserfaultfd_event_child
+	js .Luserfaultfd_event_fail
+	mov %rax, %r15
+	movb (%r13), %al
+	cmpb $0x6b, %al
+	sete 8(%rsp)
+	mov %r15, %rdi
+	mov %rsp, %rsi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	mov $61, %eax
+	syscall
+	cmp %r15, %rax
+	jne .Luserfaultfd_event_parent_fail
+	cmpl $0, (%rsp)
+	jne .Luserfaultfd_event_parent_fail
+	cmpb $0, 8(%rsp)
+	jz .Luserfaultfd_event_parent_fail
+	xor %r15d, %r15d
+	jmp .Luserfaultfd_event_cleanup
+.Luserfaultfd_event_parent_fail:
+	mov $1, %r15d
+	jmp .Luserfaultfd_event_cleanup
+.Luserfaultfd_event_child:
+	mov $0, %eax
+	mov %r12d, %edi
+	lea uffd_msg(%rip), %rsi
+	mov $32, %edx
+	syscall
+	cmp $32, %rax
+	jne .Luserfaultfd_event_child_fail
+	cmpb $0x12, uffd_msg(%rip)
+	jne .Luserfaultfd_event_child_fail
+	cmp 16+uffd_msg(%rip), %r13
+	jne .Luserfaultfd_event_child_fail
+	mov %r13, uffdio_copy(%rip)
+	mov %r14, 8+uffdio_copy(%rip)
+	movq $4096, 16+uffdio_copy(%rip)
+	movq $0, 24+uffdio_copy(%rip)
+	movq $0, 32+uffdio_copy(%rip)
+	mov $16, %eax
+	mov %r12d, %edi
+	mov $0xc028aa03, %esi
+	lea uffdio_copy(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_event_child_fail
+	cmpq $4096, 32+uffdio_copy(%rip)
+	jne .Luserfaultfd_event_child_fail
+	xor %edi, %edi
+	jmp .Luserfaultfd_event_child_exit
+.Luserfaultfd_event_child_fail:
+	mov $1, %edi
+.Luserfaultfd_event_child_exit:
+	mov $60, %eax
+	syscall
+	ud2
+.Luserfaultfd_event_fail:
+	mov $1, %r15d
+.Luserfaultfd_event_cleanup:
+	cmp $0, %r12
+	jl .Luserfaultfd_event_unmap_source
+	mov $3, %eax
+	mov %r12d, %edi
+	syscall
+	test %rax, %rax
+	je .Luserfaultfd_event_unmap_source
+	mov $1, %r15d
+.Luserfaultfd_event_unmap_source:
+	test %r14, %r14
+	jz .Luserfaultfd_event_unmap_target
+	mov $11, %eax
+	mov %r14, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Luserfaultfd_event_unmap_target
+	mov $1, %r15d
+.Luserfaultfd_event_unmap_target:
+	test %r13, %r13
+	jz .Luserfaultfd_event_done
+	mov $11, %eax
+	mov %r13, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Luserfaultfd_event_done
+	mov $1, %r15d
+.Luserfaultfd_event_done:
+	mov %r15d, %eax
+	add $16, %rsp
+	pop %r15
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+	.size check_userfaultfd_event, . - check_userfaultfd_event
 
 	.type check_sysv_shared_memory, @function
 check_sysv_shared_memory:
