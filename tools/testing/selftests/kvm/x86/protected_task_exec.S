@@ -1707,6 +1707,10 @@ _start:
 	call check_hugetlb_mapping
 	test %eax, %eax
 	jne 1f
+	movl $229, failure_code(%rip)
+	call check_write_only_mapping
+	test %eax, %eax
+	jne 1f
 
 	# The ordinary guest range has RWX first-stage PTEs. Permission faults
 	# below therefore prove the independent second-stage VMA ceiling.
@@ -3546,6 +3550,45 @@ check_hugetlb_mapping:
 	xor %eax, %eax
 	ret
 	.size check_hugetlb_mapping, . - check_hugetlb_mapping
+
+	.type check_write_only_mapping, @function
+check_write_only_mapping:
+	push %r12
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $2, %edx
+	mov $MAP_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Lwrite_only_fail
+	mov %rax, %r12
+	cmpb $0, (%r12)
+	jne .Lwrite_only_cleanup_fail
+	movb $0xa6, (%r12)
+	cmpb $0xa6, (%r12)
+	jne .Lwrite_only_cleanup_fail
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne .Lwrite_only_fail
+	pop %r12
+	xor %eax, %eax
+	ret
+.Lwrite_only_cleanup_fail:
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	syscall
+.Lwrite_only_fail:
+	pop %r12
+	mov $1, %eax
+	ret
+	.size check_write_only_mapping, . - check_write_only_mapping
 
 	.type check_process_clone, @function
 check_process_clone:
