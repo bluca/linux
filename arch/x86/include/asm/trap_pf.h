@@ -34,6 +34,9 @@ struct pt_regs;
 void x86_force_sig_user_page_fault(struct pt_regs *regs,
 				   unsigned long error_code,
 				   unsigned long address, int si_code);
+void x86_handle_user_page_fault(struct pt_regs *regs,
+				unsigned long error_code,
+				unsigned long address);
 void x86_force_sig_user_pkey_fault(struct pt_regs *regs,
 				   unsigned long error_code,
 				   unsigned long address, u32 pkey);

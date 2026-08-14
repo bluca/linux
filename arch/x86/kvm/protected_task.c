@@ -1140,6 +1140,12 @@ static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 	idx = srcu_read_lock(&vcpu->kvm->srcu);
 	visible = kvm_vcpu_is_visible_gfn(vcpu, address >> PAGE_SHIFT);
 	srcu_read_unlock(&vcpu->kvm->srcu, idx);
+	if (vcpu->arch.protected_task_backing_fault) {
+		x86_handle_user_page_fault(regs,
+			vcpu->arch.protected_task_pf_error_code | X86_PF_USER,
+			address);
+		return 0;
+	}
 
 	vma = lock_mm_and_find_vma(current->mm, address, regs);
 	if (vma) {
@@ -1466,6 +1472,7 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 		goto out;
 	kvm_protected_task_setup_pkru(vcpu, state);
 
+	vcpu->arch.protected_task_backing_fault = false;
 	ret = kvm_vcpu_run(vcpu);
 	kvm_protected_task_vcpu_run_complete(vcpu);
 	run_complete = true;

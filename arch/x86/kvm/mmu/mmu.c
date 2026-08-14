@@ -3561,6 +3561,10 @@ static int kvm_handle_error_pfn(struct kvm_vcpu *vcpu, struct kvm_page_fault *fa
 		kvm_send_hwpoison_signal(fault->slot, fault->gfn);
 		return RET_PF_RETRY;
 	}
+	if (unlikely(vcpu->kvm->protected_task)) {
+		kvm_mmu_prepare_memory_fault_exit(vcpu, fault);
+		vcpu->arch.protected_task_backing_fault = true;
+	}
 
 	return -EFAULT;
 }

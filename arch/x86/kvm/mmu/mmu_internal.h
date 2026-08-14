@@ -333,6 +333,10 @@ static_assert(RET_PF_CONTINUE == 0);
 static inline void kvm_mmu_prepare_memory_fault_exit(struct kvm_vcpu *vcpu,
 						     struct kvm_page_fault *fault)
 {
+	if (vcpu->kvm->protected_task) {
+		vcpu->arch.protected_task_pf_error_code = fault->error_code;
+		vcpu->arch.protected_task_backing_fault = false;
+	}
 	kvm_prepare_memory_fault_exit(vcpu, fault->gfn << PAGE_SHIFT,
 				      PAGE_SIZE, fault->write, fault->exec,
 				      fault->is_private);
