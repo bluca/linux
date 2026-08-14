@@ -3686,7 +3686,7 @@ check_memslot_compaction:
 	mov %r12, %r14
 	mov $319, %eax
 	lea security_memfd_name(%rip), %rdi
-	mov $1, %esi
+	mov $0x11, %esi
 	syscall
 	cmp $-4095, %rax
 	jae .Lmemslot_compaction_fail
@@ -3741,7 +3741,7 @@ check_memslot_compaction:
 	mov $1, %edx
 	test $1, %r13d
 	jz .Lmemslot_compaction_protection_ready
-	mov $2, %edx
+	mov $3, %edx
 .Lmemslot_compaction_protection_ready:
 	mov $9, %eax
 	mov %r12, %rdi
@@ -3764,8 +3764,18 @@ check_memslot_compaction:
 	add $4096, %r12
 	test $1, %r13d
 	jz .Lmemslot_compaction_read
-	movb $0x5a, -4096(%r12)
-	cmpb $0x5a, -4096(%r12)
+	movb $0xb8, -4096(%r12)
+	mov %r13d, -4095(%r12)
+	movb $0xc3, -4091(%r12)
+	mov $10, %eax
+	lea -4096(%r12), %rdi
+	mov $4096, %esi
+	mov $5, %edx
+	syscall
+	test %rax, %rax
+	jne .Lmemslot_compaction_cleanup_fail
+	call *%rdi
+	cmp %r13d, %eax
 	jne .Lmemslot_compaction_cleanup_fail
 	jmp .Lmemslot_compaction_page_done
 .Lmemslot_compaction_read:
@@ -3784,7 +3794,11 @@ check_memslot_compaction:
 	jne .Lmemslot_compaction_cleanup_fail
 	cmpb $0, -0x100000(%r12)
 	jne .Lmemslot_compaction_cleanup_fail
-	cmpb $0x5a, -4096(%r12)
+	cmpb $0xb8, -4096(%r12)
+	jne .Lmemslot_compaction_cleanup_fail
+	cmpl $255, -4095(%r12)
+	jne .Lmemslot_compaction_cleanup_fail
+	cmpb $0xc3, -4091(%r12)
 	jne .Lmemslot_compaction_cleanup_fail
 	add $0x100000, %r12
 	dec %r15d
