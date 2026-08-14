@@ -1727,6 +1727,10 @@ _start:
 	call check_memslot_reuse
 	test %eax, %eax
 	jne 1f
+	movl $233, failure_code(%rip)
+	call check_memslot_compaction
+	test %eax, %eax
+	jne 1f
 	movl $230, failure_code(%rip)
 	call check_execute_only_mapping
 	test %eax, %eax
@@ -3660,6 +3664,120 @@ check_memslot_reuse:
 	mov $1, %eax
 	ret
 	.size check_memslot_reuse, . - check_memslot_reuse
+
+	.type check_memslot_compaction, @function
+check_memslot_compaction:
+	push %rbp
+	push %r12
+	push %r13
+	push %r14
+	push %r15
+	movabs $0x500000000000, %r12
+	mov %r12, %r14
+	mov $319, %eax
+	lea security_memfd_name(%rip), %rdi
+	mov $1, %esi
+	syscall
+	cmp $-4095, %rax
+	jae .Lmemslot_compaction_fail
+	mov %rax, %rbp
+	mov $77, %eax
+	mov %ebp, %edi
+	mov $0x10200000, %esi
+	syscall
+	test %rax, %rax
+	jne .Lmemslot_compaction_cleanup_fail
+	mov $129, %r15d
+.Lmemslot_compaction_batch:
+	xor %r13d, %r13d
+.Lmemslot_compaction_page:
+	mov $1, %edx
+	test $1, %r13d
+	jz .Lmemslot_compaction_protection_ready
+	mov $2, %edx
+.Lmemslot_compaction_protection_ready:
+	mov $9, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	mov $1, %r10d
+	mov %rbp, %r8
+	mov %r12, %r9
+	sub %r14, %r9
+	syscall
+	cmp %r12, %rax
+	je .Lmemslot_compaction_mapped
+	cmp $-4095, %rax
+	jae .Lmemslot_compaction_cleanup_fail
+	mov %rax, %rdi
+	mov $11, %eax
+	mov $4096, %esi
+	syscall
+	jmp .Lmemslot_compaction_cleanup_fail
+.Lmemslot_compaction_mapped:
+	test $1, %r13d
+	jz .Lmemslot_compaction_read
+	movb $0x5a, (%r12)
+	cmpb $0x5a, (%r12)
+	jne .Lmemslot_compaction_cleanup_fail
+	jmp .Lmemslot_compaction_page_done
+.Lmemslot_compaction_read:
+	cmpb $0, (%r12)
+	jne .Lmemslot_compaction_cleanup_fail
+.Lmemslot_compaction_page_done:
+	add $4096, %r12
+	inc %r13d
+	cmp $256, %r13d
+	jne .Lmemslot_compaction_page
+	mov $10, %eax
+	lea -0x100000(%r12), %rdi
+	mov $0x100000, %esi
+	mov $3, %edx
+	syscall
+	test %rax, %rax
+	jne .Lmemslot_compaction_cleanup_fail
+	cmpb $0, -0x100000(%r12)
+	jne .Lmemslot_compaction_cleanup_fail
+	cmpb $0x5a, -4096(%r12)
+	jne .Lmemslot_compaction_cleanup_fail
+	add $0x100000, %r12
+	dec %r15d
+	jne .Lmemslot_compaction_batch
+	xor %r13d, %r13d
+	jmp .Lmemslot_compaction_cleanup
+.Lmemslot_compaction_cleanup_fail:
+	mov $1, %r13d
+.Lmemslot_compaction_cleanup:
+	mov $11, %eax
+	mov %r14, %rdi
+	mov $0x10200000, %esi
+	syscall
+	test %rax, %rax
+	je .Lmemslot_compaction_done
+	mov $1, %r13d
+.Lmemslot_compaction_done:
+	mov $3, %eax
+	mov %ebp, %edi
+	syscall
+	test %rax, %rax
+	je .Lmemslot_compaction_closed
+	mov $1, %r13d
+.Lmemslot_compaction_closed:
+	mov %r13d, %eax
+	pop %r15
+	pop %r14
+	pop %r13
+	pop %r12
+	pop %rbp
+	ret
+.Lmemslot_compaction_fail:
+	pop %r15
+	pop %r14
+	pop %r13
+	pop %r12
+	pop %rbp
+	mov $1, %eax
+	ret
+	.size check_memslot_compaction, . - check_memslot_compaction
 
 	.type check_execute_only_mapping, @function
 check_execute_only_mapping:
