@@ -384,6 +384,29 @@ static bool kvm_protected_task_adjust_pgtable_update(void *state)
 							    exec->arch_state);
 }
 
+static int kvm_protected_task_refresh(struct kvm_protected_task_exec *exec,
+				      struct pt_regs *regs)
+{
+	struct kvm_protected_task_exec *new_exec;
+	struct kvm_protected_task_exec old_exec;
+	int ret;
+
+	ret = kvm_protected_task_create_exec(current->mm, (void **)&new_exec);
+	if (ret)
+		return ret;
+	ret = kvm_protected_task_finalize_vcpu(new_exec, regs);
+	if (ret) {
+		kvm_protected_task_release_exec(new_exec);
+		return ret;
+	}
+
+	old_exec = *exec;
+	*exec = *new_exec;
+	kfree(new_exec);
+	kvm_protected_task_release_exec_resources(&old_exec);
+	return 0;
+}
+
 static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
 {
 	struct kvm_protected_task_exec *exec = state;
@@ -394,31 +417,23 @@ static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
 	pgtable_gen = atomic64_read(&current->mm->protected_task_pgtable_gen);
 
 	if (unlikely(exec->pgtable_gen != pgtable_gen)) {
-		struct kvm_protected_task_exec *new_exec;
-		struct kvm_protected_task_exec old_exec;
-
-		ret = kvm_protected_task_create_exec(current->mm,
-						     (void **)&new_exec);
+		ret = kvm_protected_task_refresh(exec, regs);
 		if (ret)
 			goto complete;
-		ret = kvm_protected_task_finalize_vcpu(new_exec, regs);
-		if (ret) {
-			kvm_protected_task_release_exec(new_exec);
-			goto complete;
-		}
-
-		old_exec = *exec;
-		*exec = *new_exec;
-		kfree(new_exec);
-		kvm_protected_task_release_exec_resources(&old_exec);
 	}
 	if (unlikely(kvm_protected_task_vcpu_run_blocked(exec))) {
 		ret = 0;
 		goto complete;
 	}
 
-	return kvm_arch_protected_task_run(exec->vcpu, exec->arch_state, regs,
-						   &exec->next_slot);
+	ret = kvm_arch_protected_task_run(exec->vcpu, exec->arch_state,
+					  regs, &exec->next_slot);
+	if (ret == -ENOSPC) {
+		kvm_protected_task_vcpu_run_begin(exec);
+		ret = kvm_protected_task_refresh(exec, regs);
+		kvm_protected_task_vcpu_run_complete(exec->vcpu);
+	}
+	return ret;
 
 complete:
 	kvm_protected_task_vcpu_run_complete(exec->vcpu);

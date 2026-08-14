@@ -2214,6 +2214,7 @@ int kvm_map_user_memory_region(struct kvm *kvm, u32 *id,
 			       gpa_t gpa, unsigned long end)
 {
 	struct kvm_userspace_memory_region2 region = {};
+	struct kvm_memslot_iter iter;
 	struct kvm_memory_slot *memslot;
 	struct kvm_memslots *slots;
 	gfn_t end_gfn, gfn;
@@ -2229,6 +2230,12 @@ int kvm_map_user_memory_region(struct kvm *kvm, u32 *id,
 	gfn = gpa_to_gfn(gpa);
 	if (__gfn_to_memslot(slots, gfn)) {
 		r = 0;
+		goto out;
+	}
+	/* Compact only after fragmentation materially exceeds the current VMAs. */
+	if (*id >= KVM_USER_MEM_SLOTS / 8 &&
+	    *id / 2 > READ_ONCE(kvm->mm->map_count)) {
+		r = -ENOSPC;
 		goto out;
 	}
 
@@ -2274,10 +2281,9 @@ int kvm_map_user_memory_region(struct kvm *kvm, u32 *id,
 found:
 	end_gfn = min_t(gfn_t, end >> PAGE_SHIFT,
 			gfn + KVM_MEM_MAX_NR_PAGES);
-	kvm_for_each_memslot(memslot, bkt, slots) {
-		if (memslot->base_gfn > gfn)
-			end_gfn = min(end_gfn, memslot->base_gfn);
-	}
+	kvm_memslot_iter_start(&iter, slots, gfn);
+	if (kvm_memslot_iter_is_valid(&iter, end_gfn))
+		end_gfn = iter.slot->base_gfn;
 	if (gfn >= end_gfn) {
 		r = -EEXIST;
 		goto out;
