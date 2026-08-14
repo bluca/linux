@@ -414,6 +414,18 @@ expected_cr2:
 expected_pkey:
 	.long 0
 	.balign 8
+aio_context:
+	.quad 0
+	.balign 8
+io_uring_params:
+	.zero 120
+	.balign 8
+uffdio_api:
+	.zero 24
+	.balign 8
+uffdio_register:
+	.zero 32
+	.balign 8
 shstk_repair_address:
 	.quad 0
 shstk_repair_value:
@@ -1655,6 +1667,22 @@ _start:
 	call check_truncated_file_fault
 	test %eax, %eax
 	jne 1f
+	movl $222, failure_code(%rip)
+	call check_aio_ring
+	test %eax, %eax
+	jne 1f
+	movl $223, failure_code(%rip)
+	call check_io_uring_mappings
+	test %eax, %eax
+	jne 1f
+	movl $224, failure_code(%rip)
+	call check_userfaultfd_sigbus
+	test %eax, %eax
+	jne 1f
+	movl $225, failure_code(%rip)
+	call check_sysv_shared_memory
+	test %eax, %eax
+	jne 1f
 
 	# The ordinary guest range has RWX first-stage PTEs. Permission faults
 	# below therefore prove the independent second-stage VMA ceiling.
@@ -2668,6 +2696,379 @@ check_truncated_file_fault:
 	pop %r12
 	ret
 	.size check_truncated_file_fault, . - check_truncated_file_fault
+
+	.type check_aio_ring, @function
+check_aio_ring:
+	push %r12
+	movq $0, aio_context(%rip)
+	mov $206, %eax
+	mov $2, %edi
+	lea aio_context(%rip), %rsi
+	syscall
+	test %rax, %rax
+	jne .Laio_ring_fail
+	mov aio_context(%rip), %r12
+	test %r12, %r12
+	jz .Laio_ring_fail
+	cmpl $0xa10a10a1, 16(%r12)
+	jne .Laio_ring_destroy_fail
+	cmpl $1, 20(%r12)
+	jne .Laio_ring_destroy_fail
+	cmpl $0, 24(%r12)
+	jne .Laio_ring_destroy_fail
+	cmpl $32, 28(%r12)
+	jne .Laio_ring_destroy_fail
+	cmpl $0, 8(%r12)
+	jne .Laio_ring_destroy_fail
+	cmpl $0, 12(%r12)
+	jne .Laio_ring_destroy_fail
+	cmpl $2, 4(%r12)
+	jbe .Laio_ring_destroy_fail
+	mov $207, %eax
+	mov %r12, %rdi
+	syscall
+	test %rax, %rax
+	jne .Laio_ring_fail
+	movq $0, aio_context(%rip)
+	mov $11, %edi
+	mov $1, %esi
+	mov $14, %edx
+	mov %r12, %rcx
+	lea .Laio_ring_resume(%rip), %r8
+	mov %r12, %r9
+	call prepare_exception
+	movq $7, expected_error_mask(%rip)
+	movq $4, expected_error(%rip)
+	mov (%r12), %eax
+.Laio_ring_resume:
+	call check_exception
+	pop %r12
+	ret
+.Laio_ring_destroy_fail:
+	mov $207, %eax
+	mov %r12, %rdi
+	syscall
+.Laio_ring_fail:
+	pop %r12
+	mov $1, %eax
+	ret
+	.size check_aio_ring, . - check_aio_ring
+
+	.type check_io_uring_mappings, @function
+check_io_uring_mappings:
+	push %r12
+	push %r13
+	push %r14
+	push %r15
+	mov $-1, %r12
+	xor %r13d, %r13d
+	xor %r14d, %r14d
+	lea io_uring_params(%rip), %rdi
+	xor %eax, %eax
+	mov $15, %ecx
+	rep stosq
+	mov $425, %eax
+	mov $2, %edi
+	lea io_uring_params(%rip), %rsi
+	syscall
+	cmp $-4095, %rax
+	jae .Lio_uring_fail
+	mov %rax, %r12
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $1, %r10d
+	mov %r12d, %r8d
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Lio_uring_fail
+	mov %rax, %r13
+	mov 52+io_uring_params(%rip), %ecx
+	mov (%r13,%rcx), %edx
+	cmp io_uring_params(%rip), %edx
+	jne .Lio_uring_fail
+	mov 48+io_uring_params(%rip), %ecx
+	mov (%r13,%rcx), %edx
+	mov io_uring_params(%rip), %r15d
+	dec %r15d
+	cmp %r15d, %edx
+	jne .Lio_uring_fail
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $1, %r10d
+	mov %r12d, %r8d
+	mov $0x10000000, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Lio_uring_fail
+	mov %rax, %r14
+	movabs $0x0123456789abcdef, %rax
+	mov %rax, (%r14)
+	cmp %rax, (%r14)
+	jne .Lio_uring_fail
+	mov $3, %eax
+	mov %r12d, %edi
+	syscall
+	test %rax, %rax
+	jne .Lio_uring_fail
+	mov $-1, %r12
+	mov 52+io_uring_params(%rip), %ecx
+	mov (%r13,%rcx), %edx
+	cmp io_uring_params(%rip), %edx
+	jne .Lio_uring_fail
+	movabs $0x0123456789abcdef, %rax
+	cmp %rax, (%r14)
+	jne .Lio_uring_fail
+	mov $11, %eax
+	mov %r14, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne .Lio_uring_fail
+	xor %r14d, %r14d
+	mov $11, %eax
+	mov %r13, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne .Lio_uring_fail
+	mov $11, %edi
+	mov $1, %esi
+	mov $14, %edx
+	mov %r13, %rcx
+	lea .Lio_uring_resume(%rip), %r8
+	mov %r13, %r9
+	call prepare_exception
+	movq $7, expected_error_mask(%rip)
+	movq $4, expected_error(%rip)
+	mov (%r13), %eax
+.Lio_uring_resume:
+	call check_exception
+	mov %eax, %r15d
+	xor %r13d, %r13d
+	jmp .Lio_uring_cleanup
+.Lio_uring_fail:
+	mov $1, %r15d
+.Lio_uring_cleanup:
+	test %r14, %r14
+	jz .Lio_uring_cleanup_ring
+	mov $11, %eax
+	mov %r14, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Lio_uring_cleanup_ring
+	mov $1, %r15d
+.Lio_uring_cleanup_ring:
+	test %r13, %r13
+	jz .Lio_uring_close
+	mov $11, %eax
+	mov %r13, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Lio_uring_close
+	mov $1, %r15d
+.Lio_uring_close:
+	cmp $0, %r12
+	jl .Lio_uring_done
+	mov $3, %eax
+	mov %r12d, %edi
+	syscall
+	test %rax, %rax
+	je .Lio_uring_done
+	mov $1, %r15d
+.Lio_uring_done:
+	mov %r15d, %eax
+	pop %r15
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+	.size check_io_uring_mappings, . - check_io_uring_mappings
+
+	.type check_userfaultfd_sigbus, @function
+check_userfaultfd_sigbus:
+	push %r12
+	push %r13
+	push %r14
+	mov $-1, %r12
+	xor %r13d, %r13d
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $MAP_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Luserfaultfd_fail
+	mov %rax, %r13
+	mov $323, %eax
+	mov $0x80801, %edi
+	syscall
+	cmp $-4095, %rax
+	jae .Luserfaultfd_fail
+	mov %rax, %r12
+	movq $0xaa, uffdio_api(%rip)
+	movq $0x80, 8+uffdio_api(%rip)
+	movq $0, 16+uffdio_api(%rip)
+	mov $16, %eax
+	mov %r12d, %edi
+	mov $0xc018aa3f, %esi
+	lea uffdio_api(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_fail
+	cmpq $0xaa, uffdio_api(%rip)
+	jne .Luserfaultfd_fail
+	testq $0x80, 8+uffdio_api(%rip)
+	jz .Luserfaultfd_fail
+	mov %r13, uffdio_register(%rip)
+	movq $4096, 8+uffdio_register(%rip)
+	movq $1, 16+uffdio_register(%rip)
+	movq $0, 24+uffdio_register(%rip)
+	mov $16, %eax
+	mov %r12d, %edi
+	mov $0xc020aa00, %esi
+	lea uffdio_register(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_fail
+	mov $7, %edi
+	mov $2, %esi
+	mov $14, %edx
+	mov %r13, %rcx
+	lea .Luserfaultfd_resume(%rip), %r8
+	mov %r13, %r9
+	call prepare_exception
+	movq $7, expected_error_mask(%rip)
+	movq $4, expected_error(%rip)
+	mov (%r13), %eax
+.Luserfaultfd_resume:
+	call check_exception
+	test %eax, %eax
+	jne .Luserfaultfd_fail
+	mov $3, %eax
+	mov %r12d, %edi
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_fail
+	mov $-1, %r12
+	movb $0x5a, (%r13)
+	cmpb $0x5a, (%r13)
+	jne .Luserfaultfd_fail
+	xor %r14d, %r14d
+	jmp .Luserfaultfd_cleanup
+.Luserfaultfd_fail:
+	mov $1, %r14d
+.Luserfaultfd_cleanup:
+	cmp $0, %r12
+	jl .Luserfaultfd_unmap
+	mov $3, %eax
+	mov %r12d, %edi
+	syscall
+	test %rax, %rax
+	je .Luserfaultfd_unmap
+	mov $1, %r14d
+.Luserfaultfd_unmap:
+	test %r13, %r13
+	jz .Luserfaultfd_done
+	mov $11, %eax
+	mov %r13, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Luserfaultfd_done
+	mov $1, %r14d
+.Luserfaultfd_done:
+	mov %r14d, %eax
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+	.size check_userfaultfd_sigbus, . - check_userfaultfd_sigbus
+
+	.type check_sysv_shared_memory, @function
+check_sysv_shared_memory:
+	push %r12
+	push %r13
+	push %r14
+	mov $-1, %r12
+	xor %r13d, %r13d
+	mov $29, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $0x380, %edx
+	syscall
+	test %rax, %rax
+	js .Lsysv_shm_fail
+	mov %rax, %r12
+	mov $30, %eax
+	mov %r12d, %edi
+	xor %esi, %esi
+	xor %edx, %edx
+	syscall
+	cmp $-4095, %rax
+	jae .Lsysv_shm_fail
+	mov %rax, %r13
+	movabs $0xfedcba9876543210, %rax
+	mov %rax, (%r13)
+	cmp %rax, (%r13)
+	jne .Lsysv_shm_fail
+	mov $67, %eax
+	mov %r13, %rdi
+	syscall
+	test %rax, %rax
+	jne .Lsysv_shm_fail
+	mov $11, %edi
+	mov $1, %esi
+	mov $14, %edx
+	mov %r13, %rcx
+	lea .Lsysv_shm_resume(%rip), %r8
+	mov %r13, %r9
+	call prepare_exception
+	movq $7, expected_error_mask(%rip)
+	movq $4, expected_error(%rip)
+	mov (%r13), %rax
+.Lsysv_shm_resume:
+	call check_exception
+	mov %eax, %r14d
+	xor %r13d, %r13d
+	jmp .Lsysv_shm_remove
+.Lsysv_shm_fail:
+	mov $1, %r14d
+	test %r13, %r13
+	jz .Lsysv_shm_remove
+	mov $67, %eax
+	mov %r13, %rdi
+	syscall
+	test %rax, %rax
+	je .Lsysv_shm_remove
+	mov $1, %r14d
+.Lsysv_shm_remove:
+	cmp $0, %r12
+	jl .Lsysv_shm_done
+	mov $31, %eax
+	mov %r12d, %edi
+	xor %esi, %esi
+	xor %edx, %edx
+	syscall
+	test %rax, %rax
+	je .Lsysv_shm_done
+	mov $1, %r14d
+.Lsysv_shm_done:
+	mov %r14d, %eax
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+	.size check_sysv_shared_memory, . - check_sysv_shared_memory
 
 	.type check_process_clone, @function
 check_process_clone:
