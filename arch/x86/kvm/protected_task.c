@@ -1141,13 +1141,12 @@ static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 	visible = kvm_vcpu_is_visible_gfn(vcpu, address >> PAGE_SHIFT);
 	srcu_read_unlock(&vcpu->kvm->srcu, idx);
 
-	mmap_read_lock(current->mm);
-	vma = vma_lookup(current->mm, address);
+	vma = lock_mm_and_find_vma(current->mm, address, regs);
 	if (vma) {
 		mapped = true;
 		end = vma->vm_end;
+		mmap_read_unlock(current->mm);
 	}
-	mmap_read_unlock(current->mm);
 
 	if (!mapped || visible) {
 		u32 error_code = X86_PF_USER | (mapped ? X86_PF_PROT : 0);
