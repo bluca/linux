@@ -488,6 +488,9 @@ thread_shstk_address:
 pku_available:
 	.long 0
 	.balign 4
+la57_available:
+	.long 0
+	.balign 4
 sse3_available:
 	.long 0
 	.balign 4
@@ -770,6 +773,10 @@ _start:
 	mov %eax, failure_code(%rip)
 	jmp 1f
 .Lcpu_profile_ok:
+	movl $232, failure_code(%rip)
+	call check_la57_mapping
+	test %eax, %eax
+	jne 1f
 	cmpl $0, sse3_available(%rip)
 	je .Lcpu_profile_sse3_reported
 	movl $172, failure_code(%rip)
@@ -2295,6 +2302,9 @@ _start:
 	call check_cpu_profile
 	test %eax, %eax
 	jne 15f
+	call check_la57_mapping
+	test %eax, %eax
+	jne 15f
 	movl $220, failure_code(%rip)
 	call check_growdown_mapping
 	test %eax, %eax
@@ -3745,6 +3755,93 @@ check_execute_only_mapping:
 	ret
 	.size check_execute_only_mapping, . - check_execute_only_mapping
 
+	.type check_la57_mapping, @function
+check_la57_mapping:
+	cmpl $0, la57_available(%rip)
+	je .Lla57_success
+	push %r12
+	push %r13
+	push %r14
+	movabs $0x800000000000, %r12
+	xor %r13d, %r13d
+	mov $9, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $MAP_FIXED_NOREPLACE_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp %r12, %rax
+	jne .Lla57_fail
+	mov $1, %r13d
+	movabs $0x0123456789abcdef, %r14
+	mov %r14, (%r12)
+	cmp %r14, (%r12)
+	jne .Lla57_cleanup_fail
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne .Lla57_cleanup_fail
+	xor %r13d, %r13d
+	mov $11, %edi
+	mov $1, %esi
+	mov $14, %edx
+	mov %r12, %rcx
+	lea .Lla57_fault_resume(%rip), %r8
+	mov %r12, %r9
+	call prepare_exception
+	movq $7, expected_error_mask(%rip)
+	movq $4, expected_error(%rip)
+	mov (%r12), %rax
+.Lla57_fault_resume:
+	call check_exception
+	test %eax, %eax
+	jne .Lla57_fail
+	mov $9, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $MAP_FIXED_NOREPLACE_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp %r12, %rax
+	jne .Lla57_fail
+	mov $1, %r13d
+	movb $0x5a, (%r12)
+	cmpb $0x5a, (%r12)
+	jne .Lla57_cleanup_fail
+	xor %r14d, %r14d
+	jmp .Lla57_cleanup
+.Lla57_cleanup_fail:
+	mov $1, %r14d
+.Lla57_cleanup:
+	test %r13d, %r13d
+	jz .Lla57_done
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Lla57_done
+	mov $1, %r14d
+.Lla57_done:
+	mov %r14d, %eax
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+.Lla57_fail:
+	mov $1, %r14d
+	jmp .Lla57_cleanup
+.Lla57_success:
+	xor %eax, %eax
+	ret
+	.size check_la57_mapping, . - check_la57_mapping
+
 	.type check_process_clone, @function
 check_process_clone:
 	test %rax, %rax
@@ -3768,6 +3865,9 @@ check_process_clone:
 .Lprocess_child:
 	mov initial_stack(%rip), %rdi
 	call check_cpu_profile
+	test %eax, %eax
+	jne .Lprocess_child_fail
+	call check_la57_mapping
 	test %eax, %eax
 	jne .Lprocess_child_fail
 	movl $219, failure_code(%rip)
@@ -5384,6 +5484,7 @@ check_cpu_profile:
 	movl $0, amx_complex_available(%rip)
 	movl $0, leaf7_max_subleaf(%rip)
 	movl $0, pku_available(%rip)
+	movl $0, la57_available(%rip)
 	movl $0, lam_available(%rip)
 	movl $0, shstk_available(%rip)
 	movl $0, amx_available(%rip)
@@ -5470,8 +5571,12 @@ check_cpu_profile:
 	xor %ecx, %ecx
 	cpuid
 	test $0x8, %ecx
-	jz .Lcpu_detect_rdpid
+	jz .Lcpu_detect_la57
 	movl $1, pku_available(%rip)
+.Lcpu_detect_la57:
+	test $0x10000, %ecx
+	jz .Lcpu_detect_rdpid
+	movl $1, la57_available(%rip)
 .Lcpu_detect_rdpid:
 	test $0x400000, %ecx
 	jz .Lcpu_detect_shstk
@@ -5541,6 +5646,8 @@ check_cpu_profile:
 	cmpl $0, shstk_available(%rip)
 	jne .Lcpu_profile_xstate_max
 	cmpl $0, lam_available(%rip)
+	jne .Lcpu_profile_leaf7_max
+	cmpl $0, la57_available(%rip)
 	jne .Lcpu_profile_leaf7_max
 	cmpl $0, shani_available(%rip)
 	jne .Lcpu_profile_leaf7_max
@@ -5730,6 +5837,10 @@ check_cpu_profile:
 	cmp %r13d, %ebx
 	jne 2f
 	xor %r13d, %r13d
+	cmpl $0, la57_available(%rip)
+	je .Lcpu_leaf7_pku
+	or $0x10000, %r13d
+.Lcpu_leaf7_pku:
 	cmpl $0, pku_available(%rip)
 	je .Lcpu_leaf7_shstk
 	or $0x18, %r13d
@@ -6402,6 +6513,16 @@ check_cpu_profile:
 	mov $0x80000008, %eax
 	xor %ecx, %ecx
 	cpuid
+	mov %eax, %r12d
+	shr $8, %r12d
+	and $0xff, %r12d
+	mov $48, %r13d
+	cmpl $0, la57_available(%rip)
+	je .Lcpu_extended_8_width
+	mov $57, %r13d
+.Lcpu_extended_8_width:
+	cmp %r13d, %r12d
+	jne 2f
 	xor %r13d, %r13d
 	test $0x1, %ebx
 	jz .Lcpu_extended_8_ebx
