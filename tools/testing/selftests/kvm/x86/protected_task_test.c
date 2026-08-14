@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <cpuid.h>
+#include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -886,6 +887,75 @@ static void test_io_permissions_reject_exec(int kvm_fd)
 		    "I/O-permission exec rejection failed: %#x", status);
 }
 
+static int run_dso_stress_target(void)
+{
+	static const char soname[] = "libm.so.6";
+	double (*cosine)(double angle);
+	const char *error;
+	void *handle;
+	int i;
+
+	handle = dlopen(soname, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+	if (handle) {
+		dlclose(handle);
+		return 1;
+	}
+	dlerror();
+
+	for (i = 0; i < 64; i++) {
+		handle = dlopen(soname, RTLD_NOW | RTLD_LOCAL);
+		if (!handle)
+			return 2;
+
+		dlerror();
+		cosine = dlsym(handle, "cos");
+		error = dlerror();
+		if (error || !cosine || cosine(0.0) != 1.0) {
+			dlclose(handle);
+			return 3;
+		}
+		if (dlclose(handle))
+			return 4;
+
+		handle = dlopen(soname, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+		if (handle) {
+			dlclose(handle);
+			return 5;
+		}
+		dlerror();
+	}
+
+	return 0;
+}
+
+static void test_dso_stress(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
+	if (!child) {
+		int fd, ret;
+
+		fd = create_context_with_features(kvm_fd,
+					  KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		execl("/proc/self/exe", "protected_task_test",
+		      "--dso-stress-target", NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() failed: %d", errno);
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "Protected DSO stress failed: %#x", status);
+}
+
 static void get_exec_helper_path(char path[PATH_MAX])
 {
 	static const char helper[] = "protected_task_exec";
@@ -1609,6 +1679,8 @@ int main(int argc, char *argv[])
 
 	if (argc == 2 && !strcmp(argv[1], "--io-permission-exec-target"))
 		return 42;
+	if (argc == 2 && !strcmp(argv[1], "--dso-stress-target"))
+		return run_dso_stress_target();
 
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
@@ -1633,6 +1705,7 @@ int main(int argc, char *argv[])
 	close(first_fd);
 	test_close_while_armed(second_fd);
 	test_io_permissions_reject_exec(kvm_fd);
+	test_dso_stress(kvm_fd);
 	test_protected_exec(kvm_fd);
 	close(kvm_fd);
 	return 0;
