@@ -432,6 +432,12 @@ uffd_msg:
 uffdio_copy:
 	.zero 40
 	.balign 8
+uffdio_writeprotect:
+	.zero 24
+	.balign 8
+uffdio_continue:
+	.zero 32
+	.balign 8
 shstk_repair_address:
 	.quad 0
 shstk_repair_value:
@@ -1687,6 +1693,10 @@ _start:
 	jne 1f
 	movl $226, failure_code(%rip)
 	call check_userfaultfd_event
+	test %eax, %eax
+	jne 1f
+	movl $228, failure_code(%rip)
+	call check_userfaultfd_minor
 	test %eax, %eax
 	jne 1f
 	movl $225, failure_code(%rip)
@@ -3048,7 +3058,7 @@ check_userfaultfd_event:
 	jae .Luserfaultfd_event_fail
 	mov %rax, %r12
 	movq $0xaa, uffdio_api(%rip)
-	movq $0, 8+uffdio_api(%rip)
+	movq $1, 8+uffdio_api(%rip)
 	movq $0, 16+uffdio_api(%rip)
 	mov $16, %eax
 	mov %r12d, %edi
@@ -3057,9 +3067,11 @@ check_userfaultfd_event:
 	syscall
 	test %rax, %rax
 	jne .Luserfaultfd_event_fail
+	testq $1, 8+uffdio_api(%rip)
+	jz .Luserfaultfd_event_fail
 	mov %r13, uffdio_register(%rip)
 	movq $4096, 8+uffdio_register(%rip)
-	movq $1, 16+uffdio_register(%rip)
+	movq $3, 16+uffdio_register(%rip)
 	movq $0, 24+uffdio_register(%rip)
 	mov $16, %eax
 	mov %r12d, %edi
@@ -3076,6 +3088,37 @@ check_userfaultfd_event:
 	mov %rax, %r15
 	movb (%r13), %al
 	cmpb $0x6b, %al
+	sete 8(%rsp)
+	mov %r15, %rdi
+	mov %rsp, %rsi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	mov $61, %eax
+	syscall
+	cmp %r15, %rax
+	jne .Luserfaultfd_event_parent_fail
+	cmpl $0, (%rsp)
+	jne .Luserfaultfd_event_parent_fail
+	cmpb $0, 8(%rsp)
+	jz .Luserfaultfd_event_parent_fail
+	mov %r13, uffdio_writeprotect(%rip)
+	movq $4096, 8+uffdio_writeprotect(%rip)
+	movq $1, 16+uffdio_writeprotect(%rip)
+	mov $16, %eax
+	mov %r12d, %edi
+	mov $0xc018aa06, %esi
+	lea uffdio_writeprotect(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_event_parent_fail
+	mov $57, %eax
+	syscall
+	test %rax, %rax
+	jz .Luserfaultfd_wp_child
+	js .Luserfaultfd_event_parent_fail
+	mov %rax, %r15
+	movb $0x7c, (%r13)
+	cmpb $0x7c, (%r13)
 	sete 8(%rsp)
 	mov %r15, %rdi
 	mov %rsp, %rsi
@@ -3128,6 +3171,34 @@ check_userfaultfd_event:
 	mov $60, %eax
 	syscall
 	ud2
+.Luserfaultfd_wp_child:
+	mov $0, %eax
+	mov %r12d, %edi
+	lea uffd_msg(%rip), %rsi
+	mov $32, %edx
+	syscall
+	cmp $32, %rax
+	jne .Luserfaultfd_event_child_fail
+	cmpb $0x12, uffd_msg(%rip)
+	jne .Luserfaultfd_event_child_fail
+	mov 8+uffd_msg(%rip), %rax
+	and $3, %eax
+	cmp $3, %eax
+	jne .Luserfaultfd_event_child_fail
+	cmp 16+uffd_msg(%rip), %r13
+	jne .Luserfaultfd_event_child_fail
+	mov %r13, uffdio_writeprotect(%rip)
+	movq $4096, 8+uffdio_writeprotect(%rip)
+	movq $0, 16+uffdio_writeprotect(%rip)
+	mov $16, %eax
+	mov %r12d, %edi
+	mov $0xc018aa06, %esi
+	lea uffdio_writeprotect(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_event_child_fail
+	xor %edi, %edi
+	jmp .Luserfaultfd_event_child_exit
 .Luserfaultfd_event_fail:
 	mov $1, %r15d
 .Luserfaultfd_event_cleanup:
@@ -3168,6 +3239,180 @@ check_userfaultfd_event:
 	pop %r12
 	ret
 	.size check_userfaultfd_event, . - check_userfaultfd_event
+
+	.type check_userfaultfd_minor, @function
+check_userfaultfd_minor:
+	push %r12
+	push %r13
+	push %r14
+	push %r15
+	sub $16, %rsp
+	mov $-1, %r12
+	mov $-1, %r13
+	xor %r14d, %r14d
+	mov $319, %eax
+	lea security_memfd_name(%rip), %rdi
+	mov $1, %esi
+	syscall
+	cmp $-4095, %rax
+	jae .Luserfaultfd_minor_fail
+	mov %rax, %r13
+	mov $77, %eax
+	mov %r13d, %edi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_minor_fail
+	mov $18, %eax
+	mov %r13d, %edi
+	lea syscall_initial_byte(%rip), %rsi
+	mov $1, %edx
+	xor %r10d, %r10d
+	syscall
+	cmp $1, %rax
+	jne .Luserfaultfd_minor_fail
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $1, %r10d
+	mov %r13d, %r8d
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Luserfaultfd_minor_fail
+	mov %rax, %r14
+	mov $323, %eax
+	mov $0x80001, %edi
+	syscall
+	cmp $-4095, %rax
+	jae .Luserfaultfd_minor_fail
+	mov %rax, %r12
+	movq $0xaa, uffdio_api(%rip)
+	movq $0, 8+uffdio_api(%rip)
+	movq $0, 16+uffdio_api(%rip)
+	mov $16, %eax
+	mov %r12d, %edi
+	mov $0xc018aa3f, %esi
+	lea uffdio_api(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_minor_fail
+	testq $0x400, 8+uffdio_api(%rip)
+	jz .Luserfaultfd_minor_skip
+	mov %r14, uffdio_register(%rip)
+	movq $4096, 8+uffdio_register(%rip)
+	movq $4, 16+uffdio_register(%rip)
+	movq $0, 24+uffdio_register(%rip)
+	mov $16, %eax
+	mov %r12d, %edi
+	mov $0xc020aa00, %esi
+	lea uffdio_register(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_minor_fail
+	mov $57, %eax
+	syscall
+	test %rax, %rax
+	jz .Luserfaultfd_minor_child
+	js .Luserfaultfd_minor_fail
+	mov %rax, %r15
+	movb (%r14), %al
+	cmpb $0x3c, %al
+	sete 8(%rsp)
+	mov %r15, %rdi
+	mov %rsp, %rsi
+	xor %edx, %edx
+	xor %r10d, %r10d
+	mov $61, %eax
+	syscall
+	cmp %r15, %rax
+	jne .Luserfaultfd_minor_parent_fail
+	cmpl $0, (%rsp)
+	jne .Luserfaultfd_minor_parent_fail
+	cmpb $0, 8(%rsp)
+	jz .Luserfaultfd_minor_parent_fail
+.Luserfaultfd_minor_skip:
+	xor %r15d, %r15d
+	jmp .Luserfaultfd_minor_cleanup
+.Luserfaultfd_minor_parent_fail:
+	mov $1, %r15d
+	jmp .Luserfaultfd_minor_cleanup
+.Luserfaultfd_minor_child:
+	mov $0, %eax
+	mov %r12d, %edi
+	lea uffd_msg(%rip), %rsi
+	mov $32, %edx
+	syscall
+	cmp $32, %rax
+	jne .Luserfaultfd_minor_child_fail
+	cmpb $0x12, uffd_msg(%rip)
+	jne .Luserfaultfd_minor_child_fail
+	mov 8+uffd_msg(%rip), %rax
+	test $4, %eax
+	jz .Luserfaultfd_minor_child_fail
+	cmp 16+uffd_msg(%rip), %r14
+	jne .Luserfaultfd_minor_child_fail
+	mov %r14, uffdio_continue(%rip)
+	movq $4096, 8+uffdio_continue(%rip)
+	movq $0, 16+uffdio_continue(%rip)
+	movq $0, 24+uffdio_continue(%rip)
+	mov $16, %eax
+	mov %r12d, %edi
+	mov $0xc020aa07, %esi
+	lea uffdio_continue(%rip), %rdx
+	syscall
+	test %rax, %rax
+	jne .Luserfaultfd_minor_child_fail
+	cmpq $4096, 24+uffdio_continue(%rip)
+	jne .Luserfaultfd_minor_child_fail
+	xor %edi, %edi
+	jmp .Luserfaultfd_minor_child_exit
+.Luserfaultfd_minor_child_fail:
+	mov $1, %edi
+.Luserfaultfd_minor_child_exit:
+	mov $60, %eax
+	syscall
+	ud2
+.Luserfaultfd_minor_fail:
+	mov $1, %r15d
+.Luserfaultfd_minor_cleanup:
+	cmp $0, %r12
+	jl .Luserfaultfd_minor_unmap
+	mov $3, %eax
+	mov %r12d, %edi
+	syscall
+	test %rax, %rax
+	je .Luserfaultfd_minor_unmap
+	mov $1, %r15d
+.Luserfaultfd_minor_unmap:
+	test %r14, %r14
+	jz .Luserfaultfd_minor_close_memfd
+	mov $11, %eax
+	mov %r14, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Luserfaultfd_minor_close_memfd
+	mov $1, %r15d
+.Luserfaultfd_minor_close_memfd:
+	cmp $0, %r13
+	jl .Luserfaultfd_minor_done
+	mov $3, %eax
+	mov %r13d, %edi
+	syscall
+	test %rax, %rax
+	je .Luserfaultfd_minor_done
+	mov $1, %r15d
+.Luserfaultfd_minor_done:
+	mov %r15d, %eax
+	add $16, %rsp
+	pop %r15
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+	.size check_userfaultfd_minor, . - check_userfaultfd_minor
 
 	.type check_sysv_shared_memory, @function
 check_sysv_shared_memory:
