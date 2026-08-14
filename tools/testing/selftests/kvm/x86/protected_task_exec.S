@@ -1651,6 +1651,10 @@ _start:
 	call install_exception_handler
 	test %eax, %eax
 	jne 1f
+	movl $221, failure_code(%rip)
+	call check_truncated_file_fault
+	test %eax, %eax
+	jne 1f
 
 	# The ordinary guest range has RWX first-stage PTEs. Permission faults
 	# below therefore prove the independent second-stage VMA ceiling.
@@ -2570,6 +2574,100 @@ check_growdown_guard:
 	mov $1, %r14d
 	jmp .Lgrowdown_guard_done
 	.size check_growdown_guard, . - check_growdown_guard
+
+	.type check_truncated_file_fault, @function
+check_truncated_file_fault:
+	push %r12
+	push %r13
+	push %r14
+	mov $-1, %r12
+	xor %r13d, %r13d
+	mov $319, %eax
+	lea security_memfd_name(%rip), %rdi
+	mov $1, %esi
+	syscall
+	cmp $-4095, %rax
+	jae .Ltruncated_file_fail
+	mov %rax, %r12
+	mov $77, %eax
+	mov %r12d, %edi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne .Ltruncated_file_fail
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $1, %r10d
+	mov %r12d, %r8d
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Ltruncated_file_fail
+	mov %rax, %r13
+	movb $0x3c, (%r13)
+	cmpb $0x3c, (%r13)
+	jne .Ltruncated_file_fail
+	mov $77, %eax
+	mov %r12d, %edi
+	xor %esi, %esi
+	syscall
+	test %rax, %rax
+	jne .Ltruncated_file_fail
+	mov $7, %edi
+	mov $2, %esi
+	mov $14, %edx
+	mov %r13, %rcx
+	lea .Ltruncated_file_resume(%rip), %r8
+	mov %r13, %r9
+	call prepare_exception
+	movq $7, expected_error_mask(%rip)
+	movq $4, expected_error(%rip)
+	movb (%r13), %al
+.Ltruncated_file_resume:
+	call check_exception
+	test %eax, %eax
+	jne .Ltruncated_file_fail
+	mov $77, %eax
+	mov %r12d, %edi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne .Ltruncated_file_fail
+	movb $0xa5, (%r13)
+	cmpb $0xa5, (%r13)
+	jne .Ltruncated_file_fail
+	xor %r14d, %r14d
+	jmp .Ltruncated_file_cleanup
+.Ltruncated_file_fail:
+	mov $1, %r14d
+.Ltruncated_file_cleanup:
+	test %r13, %r13
+	jz .Ltruncated_file_close
+	mov $11, %eax
+	mov %r13, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Ltruncated_file_close
+	mov $1, %r14d
+.Ltruncated_file_close:
+	cmp $0, %r12
+	jl .Ltruncated_file_done
+	mov $3, %eax
+	mov %r12d, %edi
+	syscall
+	test %rax, %rax
+	je .Ltruncated_file_done
+	mov $1, %r14d
+.Ltruncated_file_done:
+	mov %r14d, %eax
+	pop %r14
+	pop %r13
+	pop %r12
+	ret
+	.size check_truncated_file_fault, . - check_truncated_file_fault
 
 	.type check_process_clone, @function
 check_process_clone:
