@@ -200,6 +200,10 @@ static int kvm_protected_task_map_mm(struct kvm_protected_task_exec *exec,
 	for_each_vma(vmi, vma) {
 		if (vma->vm_flags & VM_KVM_PROTECTED)
 			continue;
+		if (i && ranges[i - 1].end == vma->vm_start) {
+			ranges[i - 1].end = vma->vm_end;
+			continue;
+		}
 		if (WARN_ON_ONCE(i >= nr)) {
 			ret = -EAGAIN;
 			goto unlock;

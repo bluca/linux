@@ -1246,7 +1246,7 @@ int kvm_set_user_memory_region(struct kvm *kvm,
 			       const struct kvm_userspace_memory_region2 *mem);
 int kvm_set_protected_task_memory_region(
 	struct kvm *kvm, const struct kvm_userspace_memory_region2 *mem);
-int kvm_map_user_memory_region(struct kvm *kvm, u32 slot,
+int kvm_map_user_memory_region(struct kvm *kvm, u32 *slot,
 			       gpa_t gpa, unsigned long end);
 void kvm_arch_free_memslot(struct kvm *kvm, struct kvm_memory_slot *slot);
 void kvm_arch_memslots_updated(struct kvm *kvm, u64 gen);

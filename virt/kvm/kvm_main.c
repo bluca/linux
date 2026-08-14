@@ -2210,40 +2210,87 @@ int kvm_set_protected_task_memory_region(
 	return kvm_set_memory_region(kvm, mem, KVM_MEMSLOT_PROTECTED_TASK);
 }
 
-int kvm_map_user_memory_region(struct kvm *kvm, u32 id,
+int kvm_map_user_memory_region(struct kvm *kvm, u32 *id,
 			       gpa_t gpa, unsigned long end)
 {
-	struct kvm_userspace_memory_region2 region = {
-		.slot = id,
-	};
+	struct kvm_userspace_memory_region2 region = {};
 	struct kvm_memory_slot *memslot;
 	struct kvm_memslots *slots;
 	gfn_t end_gfn, gfn;
-	int bkt;
+	u32 candidate;
+	int bkt, r;
 
-	if (id >= KVM_USER_MEM_SLOTS || !PAGE_ALIGNED(gpa) ||
+	if (!id || !PAGE_ALIGNED(gpa) ||
 	    !PAGE_ALIGNED(end) || gpa >= end)
 		return -EINVAL;
 
 	guard(mutex)(&kvm->slots_lock);
 	slots = kvm_memslots(kvm);
 	gfn = gpa_to_gfn(gpa);
-	if (__gfn_to_memslot(slots, gfn))
-		return 0;
+	if (__gfn_to_memslot(slots, gfn)) {
+		r = 0;
+		goto out;
+	}
 
+	for (candidate = 0; candidate < KVM_USER_MEM_SLOTS; candidate++) {
+		u32 slot = (*id + candidate) % KVM_USER_MEM_SLOTS;
+
+		memslot = id_to_memslot(slots, slot);
+		if (!memslot || !memslot->npages) {
+			region.slot = slot;
+			goto found;
+		}
+	}
+
+	mmap_read_lock(kvm->mm);
+	kvm_for_each_memslot(memslot, bkt, slots) {
+		unsigned long start, slot_end;
+
+		if (memslot->id >= KVM_USER_MEM_SLOTS ||
+		    (memslot->flags & KVM_MEMSLOT_PROTECTED_TASK))
+			continue;
+		start = memslot->userspace_addr;
+		if (check_add_overflow(start,
+				       memslot->npages << PAGE_SHIFT, &slot_end))
+			continue;
+		if (!find_vma_intersection(kvm->mm, start, slot_end)) {
+			struct kvm_userspace_memory_region2 delete = {
+				.slot = memslot->id,
+			};
+
+			region.slot = memslot->id;
+			mmap_read_unlock(kvm->mm);
+			r = kvm_set_memory_region(kvm, &delete, 0);
+			if (r)
+				goto out;
+			slots = kvm_memslots(kvm);
+			goto found;
+		}
+	}
+	mmap_read_unlock(kvm->mm);
+	r = -ENOSPC;
+	goto out;
+
+found:
 	end_gfn = min_t(gfn_t, end >> PAGE_SHIFT,
 			gfn + KVM_MEM_MAX_NR_PAGES);
 	kvm_for_each_memslot(memslot, bkt, slots) {
 		if (memslot->base_gfn > gfn)
 			end_gfn = min(end_gfn, memslot->base_gfn);
 	}
-	if (gfn >= end_gfn)
-		return -EEXIST;
+	if (gfn >= end_gfn) {
+		r = -EEXIST;
+		goto out;
+	}
 
 	region.guest_phys_addr = gpa;
 	region.userspace_addr = gpa;
 	region.memory_size = (end_gfn - gfn) << PAGE_SHIFT;
-	return kvm_set_memory_region(kvm, &region, 0);
+	r = kvm_set_memory_region(kvm, &region, 0);
+	if (!r)
+		*id = (region.slot + 1) % KVM_USER_MEM_SLOTS;
+out:
+	return r;
 }
 
 static int kvm_vm_ioctl_set_memory_region(struct kvm *kvm,

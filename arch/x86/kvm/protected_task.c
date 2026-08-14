@@ -1164,7 +1164,7 @@ static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 		return 0;
 	}
 
-	ret = kvm_map_user_memory_region(vcpu->kvm, (*next_slot)++,
+	ret = kvm_map_user_memory_region(vcpu->kvm, next_slot,
 					 address, end);
 	return ret == -EEXIST ? 0 : ret;
 }
