@@ -1716,6 +1716,10 @@ _start:
 	call check_write_only_mapping
 	test %eax, %eax
 	jne 1f
+	movl $231, failure_code(%rip)
+	call check_memslot_reuse
+	test %eax, %eax
+	jne 1f
 	movl $230, failure_code(%rip)
 	call check_execute_only_mapping
 	test %eax, %eax
@@ -3598,6 +3602,54 @@ check_write_only_mapping:
 	mov $1, %eax
 	ret
 	.size check_write_only_mapping, . - check_write_only_mapping
+
+	.type check_memslot_reuse, @function
+check_memslot_reuse:
+	push %r12
+	push %r13
+	push %r14
+	movabs $0x400000000000, %r12
+	mov $1024, %r13d
+.Lmemslot_reuse_loop:
+	mov $9, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	mov $3, %edx
+	mov $MAP_PRIVATE_ANONYMOUS, %r10d
+	mov $-1, %r8
+	xor %r9d, %r9d
+	syscall
+	cmp %r12, %rax
+	jne .Lmemslot_reuse_fail
+	mov %r13, (%r12)
+	cmp %r13, (%r12)
+	jne .Lmemslot_reuse_cleanup_fail
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	jne .Lmemslot_reuse_fail
+	add $0x200000, %r12
+	dec %r13d
+	jne .Lmemslot_reuse_loop
+	pop %r14
+	pop %r13
+	pop %r12
+	xor %eax, %eax
+	ret
+.Lmemslot_reuse_cleanup_fail:
+	mov $11, %eax
+	mov %r12, %rdi
+	mov $4096, %esi
+	syscall
+.Lmemslot_reuse_fail:
+	pop %r14
+	pop %r13
+	pop %r12
+	mov $1, %eax
+	ret
+	.size check_memslot_reuse, . - check_memslot_reuse
 
 	.type check_execute_only_mapping, @function
 check_execute_only_mapping:
