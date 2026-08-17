@@ -24,6 +24,7 @@
 #include <asm/prctl.h>
 #include <linux/kvm.h>
 #include <linux/ptrace.h>
+#include <linux/userfaultfd.h>
 
 #include "kvm_util.h"
 #include "test_util.h"
@@ -1090,6 +1091,230 @@ static void test_thp_stress(int kvm_fd)
 		    "Protected THP stress failed: %#x", status);
 }
 
+enum uffd_invalidation_op {
+	UFFD_INVALIDATE_REMOVE,
+	UFFD_INVALIDATE_REMAP,
+	UFFD_INVALIDATE_UNMAP,
+};
+
+struct uffd_invalidation_args {
+	enum uffd_invalidation_op op;
+	void *source;
+	void *target;
+	size_t size;
+	long result;
+	int error;
+};
+
+static void *run_uffd_invalidation(void *opaque)
+{
+	struct uffd_invalidation_args *args = opaque;
+
+	errno = 0;
+	switch (args->op) {
+	case UFFD_INVALIDATE_REMOVE:
+		args->result = madvise(args->source, args->size, MADV_DONTNEED);
+		break;
+	case UFFD_INVALIDATE_REMAP:
+		args->result = (long)mremap(args->source, args->size, args->size,
+					     MREMAP_MAYMOVE | MREMAP_FIXED,
+					     args->target);
+		break;
+	case UFFD_INVALIDATE_UNMAP:
+		args->result = munmap(args->source, args->size);
+		break;
+	}
+	if (args->result == -1)
+		args->error = errno;
+	return NULL;
+}
+
+static int register_uffd_missing(int uffd, void *address, size_t size)
+{
+	struct uffdio_register reg = {
+		.range.start = (unsigned long)address,
+		.range.len = size,
+		.mode = UFFDIO_REGISTER_MODE_MISSING,
+	};
+
+	return ioctl(uffd, UFFDIO_REGISTER, &reg);
+}
+
+static int unregister_uffd(int uffd, void *address, size_t size)
+{
+	struct uffdio_range range = {
+		.start = (unsigned long)address,
+		.len = size,
+	};
+
+	return ioctl(uffd, UFFDIO_UNREGISTER, &range);
+}
+
+static int check_uffd_invalidation_event(int uffd,
+					 struct uffd_invalidation_args *args,
+					 unsigned int expected_event)
+{
+	struct uffd_msg msg, unmap_msg;
+	pthread_t thread;
+	ssize_t bytes;
+	int ret;
+
+	ret = pthread_create(&thread, NULL, run_uffd_invalidation, args);
+	if (ret)
+		return 30;
+	do {
+		bytes = read(uffd, &msg, sizeof(msg));
+	} while (bytes < 0 && errno == EINTR);
+	if (bytes != sizeof(msg))
+		return 31;
+	if (expected_event == UFFD_EVENT_REMAP) {
+		do {
+			bytes = read(uffd, &unmap_msg, sizeof(unmap_msg));
+		} while (bytes < 0 && errno == EINTR);
+		if (bytes != sizeof(unmap_msg))
+			return 37;
+	}
+	if (pthread_join(thread, NULL))
+		return 32;
+	if (args->error)
+		return 33;
+	if (msg.event != expected_event)
+		return 34;
+
+	if (expected_event == UFFD_EVENT_REMAP) {
+		if (msg.arg.remap.from != (unsigned long)args->source ||
+		    msg.arg.remap.to != (unsigned long)args->target ||
+		    msg.arg.remap.len != args->size ||
+		    args->result != (long)args->target)
+			return 35;
+		if (unmap_msg.event != UFFD_EVENT_UNMAP ||
+		    unmap_msg.arg.remove.start != (unsigned long)args->source ||
+		    unmap_msg.arg.remove.end !=
+			    (unsigned long)args->source + args->size)
+			return 38;
+	} else if (msg.arg.remove.start != (unsigned long)args->source ||
+		   msg.arg.remove.end != (unsigned long)args->source + args->size ||
+		   args->result) {
+		return 36;
+	}
+
+	return 0;
+}
+
+static int run_uffd_invalidation_target(void)
+{
+	const uint64_t features = UFFD_FEATURE_EVENT_REMOVE |
+		UFFD_FEATURE_EVENT_REMAP | UFFD_FEATURE_EVENT_UNMAP;
+	const size_t page_size = 4096;
+	struct uffdio_api api = {
+		.api = UFFD_API,
+		.features = features,
+	};
+	struct uffd_invalidation_args args = {
+		.size = page_size,
+	};
+	void *mapping, *target;
+	int ret, uffd;
+
+	uffd = syscall(SYS_userfaultfd, O_CLOEXEC | UFFD_USER_MODE_ONLY);
+	if (uffd < 0)
+		return 40;
+	if (ioctl(uffd, UFFDIO_API, &api))
+		return 41;
+	if ((api.features & features) != features)
+		return KSFT_SKIP;
+
+	mapping = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapping == MAP_FAILED)
+		return 42;
+	*(unsigned long *)mapping = 0x12345678;
+	if (register_uffd_missing(uffd, mapping, page_size))
+		return 43;
+	args.op = UFFD_INVALIDATE_REMOVE;
+	args.source = mapping;
+	args.target = NULL;
+	args.result = -1;
+	args.error = 0;
+	ret = check_uffd_invalidation_event(uffd, &args, UFFD_EVENT_REMOVE);
+	if (ret)
+		return ret;
+	if (unregister_uffd(uffd, mapping, page_size) ||
+	    munmap(mapping, page_size))
+		return 44;
+
+	mapping = mmap(NULL, page_size * 2, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapping == MAP_FAILED)
+		return 45;
+	target = (char *)mapping + page_size;
+	*(unsigned long *)mapping = 0x87654321;
+	if (munmap(target, page_size) ||
+	    register_uffd_missing(uffd, mapping, page_size))
+		return 46;
+	args.op = UFFD_INVALIDATE_REMAP;
+	args.source = mapping;
+	args.target = target;
+	args.result = -1;
+	args.error = 0;
+	ret = check_uffd_invalidation_event(uffd, &args, UFFD_EVENT_REMAP);
+	if (ret)
+		return ret;
+	if (*(unsigned long *)target != 0x87654321 ||
+	    unregister_uffd(uffd, target, page_size) ||
+	    munmap(target, page_size))
+		return 47;
+
+	mapping = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapping == MAP_FAILED)
+		return 48;
+	*(unsigned long *)mapping = 0xabcdef;
+	if (register_uffd_missing(uffd, mapping, page_size))
+		return 49;
+	args.op = UFFD_INVALIDATE_UNMAP;
+	args.source = mapping;
+	args.target = NULL;
+	args.result = -1;
+	args.error = 0;
+	ret = check_uffd_invalidation_event(uffd, &args, UFFD_EVENT_UNMAP);
+	if (ret)
+		return ret;
+
+	return close(uffd) ? 50 : 0;
+}
+
+static void test_uffd_invalidation(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
+	if (!child) {
+		int fd, ret;
+
+		fd = create_context_with_features(kvm_fd, KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		execl("/proc/self/exe", "protected_task_test",
+		      "--uffd-invalidation-target", NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() failed: %d", errno);
+	if (WIFEXITED(status) && WEXITSTATUS(status) == KSFT_SKIP) {
+		print_skip("UFFD invalidation events are unavailable");
+		return;
+	}
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "Protected UFFD invalidation stress failed: %#x", status);
+}
+
 static void get_exec_helper_path(char path[PATH_MAX])
 {
 	static const char helper[] = "protected_task_exec";
@@ -1817,6 +2042,8 @@ int main(int argc, char *argv[])
 		return run_dso_stress_target();
 	if (argc == 2 && !strcmp(argv[1], "--thp-stress-target"))
 		return run_thp_stress_target();
+	if (argc == 2 && !strcmp(argv[1], "--uffd-invalidation-target"))
+		return run_uffd_invalidation_target();
 
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
@@ -1841,6 +2068,7 @@ int main(int argc, char *argv[])
 	close(first_fd);
 	test_close_while_armed(second_fd);
 	test_io_permissions_reject_exec(kvm_fd);
+	test_uffd_invalidation(kvm_fd);
 	test_thp_stress(kvm_fd);
 	test_dso_stress(kvm_fd);
 	test_protected_exec(kvm_fd);
