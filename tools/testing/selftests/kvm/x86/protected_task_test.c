@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +24,7 @@
 
 #include <asm/prctl.h>
 #include <linux/kvm.h>
+#include <linux/mempolicy.h>
 #include <linux/ptrace.h>
 #include <linux/userfaultfd.h>
 
@@ -1322,6 +1324,304 @@ static void test_swap_reclaim(int kvm_fd)
 		    "Protected swap/reclaim stress failed: %#x", status);
 }
 
+#define NUMA_MASK_WORDS 16
+#define NUMA_TEST_PAGES 1024
+
+static int get_allowed_numa_nodes(unsigned long mask[NUMA_MASK_WORDS])
+{
+	const unsigned long maxnode = sizeof(unsigned long) * CHAR_BIT *
+		NUMA_MASK_WORDS;
+	int mode;
+
+	memset(mask, 0, sizeof(unsigned long) * NUMA_MASK_WORDS);
+	if (syscall(SYS_get_mempolicy, &mode, mask, maxnode, NULL,
+		    MPOL_F_MEMS_ALLOWED))
+		return -errno;
+	return 0;
+}
+
+static int find_numa_node(const unsigned long mask[NUMA_MASK_WORDS],
+			  int previous)
+{
+	const int bits = sizeof(unsigned long) * CHAR_BIT;
+	int node;
+
+	for (node = previous + 1; node < NUMA_MASK_WORDS * bits; node++)
+		if (mask[node / bits] & (1UL << (node % bits)))
+			return node;
+	return -1;
+}
+
+static void make_numa_mask(unsigned long mask[NUMA_MASK_WORDS], int node)
+{
+	const int bits = sizeof(unsigned long) * CHAR_BIT;
+
+	memset(mask, 0, sizeof(unsigned long) * NUMA_MASK_WORDS);
+	mask[node / bits] = 1UL << (node % bits);
+}
+
+static int query_numa_pages(void **pages, int *status, int expected_node)
+{
+	long ret;
+	int i;
+
+	ret = syscall(SYS_move_pages, 0, NUMA_TEST_PAGES, pages, NULL,
+		      status, 0);
+	if (ret)
+		return ret < 0 ? -errno : -EIO;
+	for (i = 0; i < NUMA_TEST_PAGES; i++)
+		if (status[i] != expected_node)
+			return -EIO;
+	return 0;
+}
+
+static int move_numa_pages(void **pages, int *nodes, int *status, int node)
+{
+	long ret;
+	int i;
+
+	for (i = 0; i < NUMA_TEST_PAGES; i++)
+		nodes[i] = node;
+	ret = syscall(SYS_move_pages, 0, NUMA_TEST_PAGES, pages, nodes,
+		      status, MPOL_MF_MOVE);
+	if (ret)
+		return ret < 0 ? -errno : -EIO;
+	for (i = 0; i < NUMA_TEST_PAGES; i++)
+		if (status[i] != node)
+			return -EIO;
+	return 0;
+}
+
+static void set_numa_pattern(void *mapping)
+{
+	const size_t page_size = 4096;
+	int i;
+
+	for (i = 0; i < NUMA_TEST_PAGES; i++) {
+		unsigned long *page = mapping + i * page_size;
+
+		page[0] = 0xd1b54a32d192ed03UL ^ i;
+		page[page_size / sizeof(*page) - 1] = ~page[0];
+	}
+}
+
+static bool check_numa_pattern(void *mapping)
+{
+	const size_t page_size = 4096;
+	int i;
+
+	for (i = 0; i < NUMA_TEST_PAGES; i++) {
+		unsigned long *page = mapping + i * page_size;
+		unsigned long expected = 0xd1b54a32d192ed03UL ^ i;
+
+		if (page[0] != expected ||
+		    page[page_size / sizeof(*page) - 1] != ~expected)
+			return false;
+	}
+	return true;
+}
+
+static void set_numa_pages(void **pages, void *mapping)
+{
+	const size_t page_size = 4096;
+	int i;
+
+	for (i = 0; i < NUMA_TEST_PAGES; i++)
+		pages[i] = mapping + i * page_size;
+}
+
+static int run_numa_policy_target(void)
+{
+	const unsigned long maxnode = sizeof(unsigned long) * CHAR_BIT *
+		NUMA_MASK_WORDS;
+	const size_t size = NUMA_TEST_PAGES * 4096UL;
+	unsigned long allowed[NUMA_MASK_WORDS], actual[NUMA_MASK_WORDS];
+	unsigned long bind[NUMA_MASK_WORDS];
+	void *pages[NUMA_TEST_PAGES];
+	int status[NUMA_TEST_PAGES];
+	void *mapping;
+	int mode, node, ret;
+
+	ret = get_allowed_numa_nodes(allowed);
+	if (ret)
+		return 80;
+	node = find_numa_node(allowed, -1);
+	if (node < 0)
+		return 81;
+	make_numa_mask(bind, node);
+
+	if (syscall(SYS_set_mempolicy, MPOL_BIND, bind, maxnode))
+		return 82;
+	memset(actual, 0, sizeof(actual));
+	if (syscall(SYS_get_mempolicy, &mode, actual, maxnode, NULL, 0) ||
+	    mode != MPOL_BIND || memcmp(actual, bind, sizeof(actual)))
+		return 83;
+
+	mapping = mmap(NULL, size, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapping == MAP_FAILED)
+		return 84;
+	if (syscall(SYS_mbind, mapping, size, MPOL_BIND, bind, maxnode, 0))
+		return 85;
+	memset(actual, 0, sizeof(actual));
+	if (syscall(SYS_get_mempolicy, &mode, actual, maxnode, mapping,
+		    MPOL_F_ADDR) ||
+	    mode != MPOL_BIND || memcmp(actual, bind, sizeof(actual)))
+		return 86;
+
+	set_numa_pattern(mapping);
+	set_numa_pages(pages, mapping);
+	if (query_numa_pages(pages, status, node) ||
+	    !check_numa_pattern(mapping))
+		return 87;
+	if (syscall(SYS_set_mempolicy, MPOL_DEFAULT, NULL, 0))
+		return 88;
+
+	return munmap(mapping, size) ? 89 : 0;
+}
+
+struct numa_access_args {
+	void *mapping;
+	atomic_bool stop;
+	atomic_bool failed;
+};
+
+static void *run_numa_access(void *opaque)
+{
+	struct numa_access_args *args = opaque;
+
+	while (!atomic_load_explicit(&args->stop, memory_order_acquire)) {
+		if (!check_numa_pattern(args->mapping)) {
+			atomic_store_explicit(&args->failed, true,
+					      memory_order_release);
+			break;
+		}
+	}
+	return NULL;
+}
+
+static int run_numa_migration_target(void)
+{
+	const unsigned long maxnode = sizeof(unsigned long) * CHAR_BIT *
+		NUMA_MASK_WORDS;
+	const size_t size = NUMA_TEST_PAGES * 4096UL;
+	unsigned long allowed[NUMA_MASK_WORDS], source_mask[NUMA_MASK_WORDS];
+	void *pages[NUMA_TEST_PAGES];
+	int nodes[NUMA_TEST_PAGES], status[NUMA_TEST_PAGES];
+	struct numa_access_args args;
+	pthread_t thread;
+	void *mapping;
+	int iteration, node, ret, source, target;
+
+	ret = get_allowed_numa_nodes(allowed);
+	if (ret)
+		return 90;
+	source = find_numa_node(allowed, -1);
+	target = find_numa_node(allowed, source);
+	if (source < 0 || target < 0)
+		return KSFT_SKIP;
+	make_numa_mask(source_mask, source);
+
+	mapping = mmap(NULL, size, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapping == MAP_FAILED)
+		return 91;
+	if (syscall(SYS_mbind, mapping, size, MPOL_BIND, source_mask,
+		    maxnode, 0))
+		return 92;
+	set_numa_pattern(mapping);
+	set_numa_pages(pages, mapping);
+	if (query_numa_pages(pages, status, source))
+		return 93;
+
+	args.mapping = mapping;
+	atomic_init(&args.stop, false);
+	atomic_init(&args.failed, false);
+	ret = pthread_create(&thread, NULL, run_numa_access, &args);
+	if (ret)
+		return 94;
+
+	ret = move_numa_pages(pages, nodes, status, target);
+	if (ret == -EPERM || ret == -EACCES) {
+		ret = KSFT_SKIP;
+		goto stop;
+	}
+	if (ret) {
+		ret = 95;
+		goto stop;
+	}
+	if (syscall(SYS_mbind, mapping, size, MPOL_BIND, source_mask,
+		    maxnode, MPOL_MF_MOVE | MPOL_MF_STRICT) ||
+	    query_numa_pages(pages, status, source)) {
+		ret = 96;
+		goto stop;
+	}
+
+	for (iteration = 0; iteration < 32; iteration++) {
+		node = iteration & 1 ? source : target;
+		if (move_numa_pages(pages, nodes, status, node)) {
+			ret = 97;
+			goto stop;
+		}
+	}
+	ret = check_numa_pattern(mapping) ? 0 : 98;
+
+stop:
+	atomic_store_explicit(&args.stop, true, memory_order_release);
+	if (pthread_join(thread, NULL))
+		return 99;
+	if (atomic_load_explicit(&args.failed, memory_order_acquire))
+		return 100;
+	if (munmap(mapping, size))
+		return 101;
+	return ret;
+}
+
+static int run_numa_target(int kvm_fd, const char *target)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
+	if (!child) {
+		int fd, ret;
+
+		fd = create_context_with_features(kvm_fd, KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		execl("/proc/self/exe", "protected_task_test", target, NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() failed: %d", errno);
+	return status;
+}
+
+static void test_numa_stress(int kvm_fd)
+{
+	int status;
+
+	status = run_numa_target(kvm_fd, "--numa-policy-target");
+	if (WIFEXITED(status) && WEXITSTATUS(status) == KSFT_SKIP)
+		print_skip("NUMA policy is unavailable");
+	else
+		TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+			    "Protected NUMA policy stress failed: %#x", status);
+
+	status = run_numa_target(kvm_fd, "--numa-migration-target");
+	if (WIFEXITED(status) && WEXITSTATUS(status) == KSFT_SKIP) {
+		print_skip("Cross-node NUMA migration is unavailable");
+		return;
+	}
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "Protected NUMA migration stress failed: %#x", status);
+}
+
 enum uffd_invalidation_op {
 	UFFD_INVALIDATE_REMOVE,
 	UFFD_INVALIDATE_REMAP,
@@ -2275,6 +2575,10 @@ int main(int argc, char *argv[])
 		return run_thp_stress_target();
 	if (argc == 2 && !strcmp(argv[1], "--swap-reclaim-target"))
 		return run_swap_reclaim_target();
+	if (argc == 2 && !strcmp(argv[1], "--numa-policy-target"))
+		return run_numa_policy_target();
+	if (argc == 2 && !strcmp(argv[1], "--numa-migration-target"))
+		return run_numa_migration_target();
 	if (argc == 2 && !strcmp(argv[1], "--uffd-invalidation-target"))
 		return run_uffd_invalidation_target();
 
@@ -2302,6 +2606,7 @@ int main(int argc, char *argv[])
 	test_close_while_armed(second_fd);
 	test_io_permissions_reject_exec(kvm_fd);
 	test_swap_reclaim(kvm_fd);
+	test_numa_stress(kvm_fd);
 	test_uffd_invalidation(kvm_fd);
 	test_thp_stress(kvm_fd);
 	test_dso_stress(kvm_fd);
