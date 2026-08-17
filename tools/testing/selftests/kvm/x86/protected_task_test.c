@@ -1091,6 +1091,237 @@ static void test_thp_stress(int kvm_fd)
 		    "Protected THP stress failed: %#x", status);
 }
 
+static unsigned long get_mapping_swap(void *address)
+{
+	unsigned long target = (unsigned long)address;
+	char line[256];
+	bool found = false;
+	FILE *smaps;
+
+	smaps = fopen("/proc/self/smaps", "re");
+	if (!smaps)
+		return ULONG_MAX;
+
+	while (fgets(line, sizeof(line), smaps)) {
+		unsigned long start, end, size;
+
+		if (sscanf(line, "%lx-%lx", &start, &end) == 2) {
+			found = target >= start && target < end;
+			continue;
+		}
+		if (found && sscanf(line, "Swap: %lu kB", &size) == 1) {
+			fclose(smaps);
+			return size << 10;
+		}
+	}
+
+	fclose(smaps);
+	return ULONG_MAX;
+}
+
+static unsigned long get_swap_total(void)
+{
+	char line[256];
+	FILE *meminfo;
+
+	meminfo = fopen("/proc/meminfo", "re");
+	if (!meminfo)
+		return ULONG_MAX;
+
+	while (fgets(line, sizeof(line), meminfo)) {
+		unsigned long size;
+
+		if (sscanf(line, "SwapTotal: %lu kB", &size) == 1) {
+			fclose(meminfo);
+			return size << 10;
+		}
+	}
+
+	fclose(meminfo);
+	return ULONG_MAX;
+}
+
+static int open_current_memory_reclaim(void)
+{
+	char line[PATH_MAX], path[PATH_MAX];
+	FILE *cgroup;
+	int length;
+
+	cgroup = fopen("/proc/self/cgroup", "re");
+	if (!cgroup)
+		return -1;
+
+	while (fgets(line, sizeof(line), cgroup)) {
+		if (strncmp(line, "0::", 3))
+			continue;
+
+		line[strcspn(line, "\n")] = '\0';
+		length = snprintf(path, sizeof(path),
+				  "/sys/fs/cgroup%s/memory.reclaim", line + 3);
+		fclose(cgroup);
+		if (length < 0 || length >= sizeof(path)) {
+			errno = ENAMETOOLONG;
+			return -1;
+		}
+		return open(path, O_WRONLY | O_CLOEXEC);
+	}
+
+	fclose(cgroup);
+	errno = ENOENT;
+	return -1;
+}
+
+static int reclaim_current_cgroup(size_t size)
+{
+	char request[64];
+	ssize_t written;
+	int fd, length, saved_errno;
+
+	fd = open_current_memory_reclaim();
+	if (fd < 0)
+		return -errno;
+
+	length = snprintf(request, sizeof(request), "%zu swappiness=max", size);
+	if (length < 0 || length >= sizeof(request)) {
+		close(fd);
+		return -EOVERFLOW;
+	}
+
+	errno = 0;
+	written = write(fd, request, length);
+	saved_errno = errno;
+	close(fd);
+	if (written == length)
+		return 0;
+	return written < 0 ? -saved_errno : -EIO;
+}
+
+static void set_swap_pattern(void *mapping, size_t size)
+{
+	const size_t page_size = 4096;
+	size_t offset;
+
+	for (offset = 0; offset < size; offset += page_size) {
+		unsigned long *page = (unsigned long *)((char *)mapping + offset);
+
+		page[0] = 0x9e3779b97f4a7c15UL ^ offset;
+		page[page_size / sizeof(*page) - 1] = ~page[0];
+	}
+}
+
+static bool check_swap_pattern(void *mapping, size_t size)
+{
+	const size_t page_size = 4096;
+	size_t offset;
+
+	for (offset = 0; offset < size; offset += page_size) {
+		unsigned long *page = (unsigned long *)((char *)mapping + offset);
+		unsigned long expected = 0x9e3779b97f4a7c15UL ^ offset;
+
+		if (page[0] != expected ||
+		    page[page_size / sizeof(*page) - 1] != ~expected)
+			return false;
+	}
+	return true;
+}
+
+static int run_swap_reclaim_target(void)
+{
+	const size_t size = 64UL << 20;
+	unsigned long swap_total, swapped;
+	void *mapping;
+	int iteration, ret;
+
+	swap_total = get_swap_total();
+	if (swap_total == ULONG_MAX)
+		return 60;
+	if (!swap_total)
+		return KSFT_SKIP;
+
+	mapping = mmap(NULL, size, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapping == MAP_FAILED)
+		return 61;
+	set_swap_pattern(mapping, size);
+
+	if (madvise(mapping, size, MADV_PAGEOUT)) {
+		int saved_errno = errno;
+
+		munmap(mapping, size);
+		if (saved_errno == EINVAL || saved_errno == EOPNOTSUPP)
+			return KSFT_SKIP;
+		return 62;
+	}
+	swapped = get_mapping_swap(mapping);
+	if (swapped == ULONG_MAX)
+		return 63;
+	if (!swapped)
+		return 64;
+	if (!check_swap_pattern(mapping, size))
+		return 65;
+	if (get_mapping_swap(mapping))
+		return 66;
+
+	swapped = 0;
+	for (iteration = 0; iteration < 4 && !swapped; iteration++) {
+		if (madvise(mapping, size, MADV_COLD)) {
+			if (errno == EINVAL || errno == EOPNOTSUPP)
+				return KSFT_SKIP;
+			return 67;
+		}
+
+		ret = reclaim_current_cgroup(size);
+		if (ret && ret != -EAGAIN) {
+			if (ret == -ENOENT || ret == -EACCES || ret == -EROFS ||
+			    ret == -EINVAL)
+				return KSFT_SKIP;
+			return 68;
+		}
+		swapped = get_mapping_swap(mapping);
+		if (swapped == ULONG_MAX)
+			return 69;
+	}
+	if (!swapped)
+		return 70;
+	if (!check_swap_pattern(mapping, size))
+		return 71;
+	if (get_mapping_swap(mapping))
+		return 72;
+
+	return munmap(mapping, size) ? 73 : 0;
+}
+
+static void test_swap_reclaim(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
+	if (!child) {
+		int fd, ret;
+
+		fd = create_context_with_features(kvm_fd, KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		execl("/proc/self/exe", "protected_task_test",
+		      "--swap-reclaim-target", NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() failed: %d", errno);
+	if (WIFEXITED(status) && WEXITSTATUS(status) == KSFT_SKIP) {
+		print_skip("Swap or cgroup reclaim is unavailable");
+		return;
+	}
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "Protected swap/reclaim stress failed: %#x", status);
+}
+
 enum uffd_invalidation_op {
 	UFFD_INVALIDATE_REMOVE,
 	UFFD_INVALIDATE_REMAP,
@@ -2042,6 +2273,8 @@ int main(int argc, char *argv[])
 		return run_dso_stress_target();
 	if (argc == 2 && !strcmp(argv[1], "--thp-stress-target"))
 		return run_thp_stress_target();
+	if (argc == 2 && !strcmp(argv[1], "--swap-reclaim-target"))
+		return run_swap_reclaim_target();
 	if (argc == 2 && !strcmp(argv[1], "--uffd-invalidation-target"))
 		return run_uffd_invalidation_target();
 
@@ -2068,6 +2301,7 @@ int main(int argc, char *argv[])
 	close(first_fd);
 	test_close_while_armed(second_fd);
 	test_io_permissions_reject_exec(kvm_fd);
+	test_swap_reclaim(kvm_fd);
 	test_uffd_invalidation(kvm_fd);
 	test_thp_stress(kvm_fd);
 	test_dso_stress(kvm_fd);

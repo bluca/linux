@@ -152,6 +152,8 @@ struct kvm_protected_task_x86 {
 	unsigned long pgtable_addr;
 	unsigned long pgtable_size;
 	unsigned long pgtable_used;
+	struct page **pgtable_pages;
+	unsigned long pgtable_npages;
 	unsigned long pgd;
 	unsigned long syscall_stub;
 	bool avx;
@@ -1268,6 +1270,50 @@ static int kvm_protected_task_handle_exception(struct kvm_vcpu *vcpu,
 		0 : -EIO;
 }
 
+static int kvm_protected_task_pin_page_tables(struct kvm_protected_task_x86 *state)
+{
+	unsigned long page, nr_pages;
+	struct page **pages;
+	long ret;
+
+	if (WARN_ON_ONCE(!PAGE_ALIGNED(state->pgtable_used)))
+		return -EINVAL;
+	nr_pages = state->pgtable_used >> PAGE_SHIFT;
+	pages = kcalloc(nr_pages, sizeof(*pages), GFP_KERNEL_ACCOUNT);
+	if (!pages)
+		return -ENOMEM;
+
+	for (page = 0; page < nr_pages; page++) {
+		ret = get_user_page_protected_task(state->pgtable_addr +
+						   page * PAGE_SIZE,
+						   &pages[page], 0, true);
+		if (ret != 1) {
+			ret = ret < 0 ? ret : -EFAULT;
+			goto unpin;
+		}
+	}
+
+	state->pgtable_pages = pages;
+	state->pgtable_npages = nr_pages;
+	return 0;
+
+unpin:
+	unpin_user_pages(pages, page);
+	kfree(pages);
+	return ret;
+}
+
+static void kvm_protected_task_unpin_page_tables(struct kvm_protected_task_x86 *state)
+{
+	if (!state->pgtable_pages)
+		return;
+
+	unpin_user_pages(state->pgtable_pages, state->pgtable_npages);
+	kfree(state->pgtable_pages);
+	state->pgtable_pages = NULL;
+	state->pgtable_npages = 0;
+}
+
 static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 						struct kvm_protected_task_x86 *state,
 						u32 slot)
@@ -1341,6 +1387,9 @@ static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 	state->pgtable_used = builder.used;
 	state->pgd = pgd;
 	state->syscall_stub = stub_gpa;
+	ret = kvm_protected_task_pin_page_tables(state);
+	if (ret)
+		goto free_image;
 
 	/* Only the protected memslot may force-access the hidden image. */
 	ret = vm_mprotect(state->pgtable_addr, size, PROT_NONE);
@@ -1571,6 +1620,7 @@ void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *arch_state)
 	WARN_ON_ONCE(kvm_protected_task_deactivate_fpu(vcpu, state));
 	if (state->pgtable_addr && current->mm == vcpu->kvm->mm)
 		WARN_ON_ONCE(kvm_arch_protected_task_deactivate(vcpu, state));
+	kvm_protected_task_unpin_page_tables(state);
 	kfree(state);
 }
 
@@ -1586,8 +1636,10 @@ int kvm_arch_protected_task_deactivate(struct kvm_vcpu *vcpu, void *arch_state)
 
 	ret = vm_munmap_protected_task(state->pgtable_addr,
 					       state->pgtable_size);
-	if (!ret)
+	if (!ret) {
 		state->pgtable_addr = 0;
+		kvm_protected_task_unpin_page_tables(state);
+	}
 	return ret;
 }
 
