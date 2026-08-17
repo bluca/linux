@@ -30,6 +30,7 @@
 
 #include "kvm_util.h"
 #include "test_util.h"
+#include "cgroup_util.h"
 
 static void assert_ioctl_errno(int fd, unsigned long request, void *arg,
 			       int expected_errno)
@@ -1622,6 +1623,107 @@ static void test_numa_stress(int kvm_fd)
 		    "Protected NUMA migration stress failed: %#x", status);
 }
 
+static int run_oom_target(int ready_fd)
+{
+	const size_t size = 512UL << 20;
+	const size_t page_size = 4096;
+	atomic_char *mapping;
+	char ready = 'R';
+	size_t offset;
+
+	if (write(ready_fd, &ready, sizeof(ready)) != sizeof(ready))
+		return 110;
+	close(ready_fd);
+
+	mapping = mmap(NULL, size, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapping == MAP_FAILED)
+		return 111;
+	for (offset = 0; offset < size; offset += page_size)
+		atomic_store_explicit(&mapping[offset], offset >> PAGE_SHIFT,
+				      memory_order_relaxed);
+
+	return 112;
+}
+
+static void test_cgroup_oom(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	char root[PATH_MAX], name[64], fd_string[32], ready;
+	long oom_before, oom_kill_before, oom_after, oom_kill_after;
+	char *cgroup;
+	int pipefd[2], status;
+	pid_t child;
+
+	if (cg_find_unified_root(root, sizeof(root), NULL)) {
+		print_skip("Cgroup v2 is unavailable for protected OOM stress");
+		return;
+	}
+	snprintf(name, sizeof(name), "protected_task_oom_%d", getpid());
+	cgroup = cg_name(root, name);
+	TEST_ASSERT(cgroup, "Failed to allocate cgroup path");
+	if (cg_create(cgroup)) {
+		int saved_errno = errno;
+
+		free(cgroup);
+		if (saved_errno == EACCES || saved_errno == EROFS ||
+		    saved_errno == EPERM) {
+			print_skip("Cgroup creation is unavailable for protected OOM stress");
+			return;
+		}
+		TEST_FAIL("Failed to create OOM cgroup: %d", saved_errno);
+	}
+
+	if (cg_write(cgroup, "memory.max", "128M") ||
+	    cg_write(cgroup, "memory.swap.max", "0") ||
+	    cg_write(cgroup, "memory.oom.group", "1")) {
+		cg_destroy(cgroup);
+		free(cgroup);
+		print_skip("Memory controller limits are unavailable");
+		return;
+	}
+	oom_before = cg_read_key_long(cgroup, "memory.events", "oom ");
+	oom_kill_before = cg_read_key_long(cgroup, "memory.events", "oom_kill ");
+	TEST_ASSERT(oom_before >= 0 && oom_kill_before >= 0,
+		    "Failed to read initial OOM counters");
+	TEST_ASSERT(pipe(pipefd) == 0, "pipe() failed: %d", errno);
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
+	if (!child) {
+		int fd, ret;
+
+		close(pipefd[0]);
+		if (cg_enter_current(cgroup))
+			_exit(113);
+		fd = create_context_with_features(kvm_fd, KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		snprintf(fd_string, sizeof(fd_string), "%d", pipefd[1]);
+		execl("/proc/self/exe", "protected_task_test", "--oom-target",
+		      fd_string, NULL);
+		_exit(127);
+	}
+
+	close(pipefd[1]);
+	TEST_ASSERT(read(pipefd[0], &ready, sizeof(ready)) == sizeof(ready) &&
+		    ready == 'R', "Protected OOM target did not start");
+	close(pipefd[0]);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() failed: %d", errno);
+	TEST_ASSERT(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL,
+		    "Protected OOM target status was %#x", status);
+	oom_after = cg_read_key_long(cgroup, "memory.events", "oom ");
+	oom_kill_after = cg_read_key_long(cgroup, "memory.events", "oom_kill ");
+	TEST_ASSERT(oom_after > oom_before && oom_kill_after > oom_kill_before,
+		    "OOM counters did not increase: %ld/%ld -> %ld/%ld",
+		    oom_before, oom_kill_before, oom_after, oom_kill_after);
+	TEST_ASSERT(cg_destroy(cgroup) == 0, "Failed to destroy OOM cgroup");
+	free(cgroup);
+}
+
 enum uffd_invalidation_op {
 	UFFD_INVALIDATE_REMOVE,
 	UFFD_INVALIDATE_REMAP,
@@ -2567,6 +2669,8 @@ int main(int argc, char *argv[])
 	struct kvm_protected_task_info first_info, second_info;
 	int kvm_fd, first_fd, second_fd;
 
+	if (argc == 3 && !strcmp(argv[1], "--oom-target"))
+		return run_oom_target(atoi(argv[2]));
 	if (argc == 2 && !strcmp(argv[1], "--io-permission-exec-target"))
 		return 42;
 	if (argc == 2 && !strcmp(argv[1], "--dso-stress-target"))
@@ -2607,6 +2711,7 @@ int main(int argc, char *argv[])
 	test_io_permissions_reject_exec(kvm_fd);
 	test_swap_reclaim(kvm_fd);
 	test_numa_stress(kvm_fd);
+	test_cgroup_oom(kvm_fd);
 	test_uffd_invalidation(kvm_fd);
 	test_thp_stress(kvm_fd);
 	test_dso_stress(kvm_fd);
