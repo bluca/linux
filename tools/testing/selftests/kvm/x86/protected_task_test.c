@@ -1047,6 +1047,159 @@ static long get_protected_kvm_stat(const char *name)
 	return value;
 }
 
+static bool protected_kvm_vm_has_process_tid(const char *vm_name, pid_t pid)
+{
+	char path[PATH_MAX], task_path[64];
+	struct dirent *entry;
+	DIR *directory;
+	bool found = false;
+	int length;
+
+	length = snprintf(path, sizeof(path), "/sys/kernel/debug/kvm/%s",
+			  vm_name);
+	TEST_ASSERT(length >= 0 && length < sizeof(path),
+		    "Protected KVM debugfs path is too long");
+	directory = opendir(path);
+	TEST_ASSERT(directory, "opendir(%s) failed: %d", path, errno);
+	while ((entry = readdir(directory))) {
+		long tid;
+		FILE *file;
+
+		if (strncmp(entry->d_name, "vcpu", strlen("vcpu")))
+			continue;
+		length = snprintf(path, sizeof(path),
+				  "/sys/kernel/debug/kvm/%s/%s/pid",
+				  vm_name, entry->d_name);
+		TEST_ASSERT(length >= 0 && length < sizeof(path),
+			    "Protected vCPU debugfs path is too long");
+		file = fopen(path, "re");
+		TEST_ASSERT(file, "fopen(%s) failed: %d", path, errno);
+		TEST_ASSERT(fscanf(file, "%ld", &tid) == 1,
+			    "Failed to read %s", path);
+		TEST_ASSERT(fclose(file) == 0, "fclose(%s) failed: %d",
+			    path, errno);
+
+		length = snprintf(task_path, sizeof(task_path),
+				  "/proc/%d/task/%ld", pid, tid);
+		TEST_ASSERT(length >= 0 && length < sizeof(task_path),
+			    "Task path is too long");
+		if (!access(task_path, F_OK)) {
+			found = true;
+			break;
+		}
+	}
+	TEST_ASSERT(closedir(directory) == 0,
+		    "closedir protected KVM VM failed: %d", errno);
+	return found;
+}
+
+static size_t get_protected_kvm_vms(pid_t pid, char names[][NAME_MAX + 1],
+				    size_t max_names)
+{
+	struct dirent *entry;
+	size_t n = 0;
+	DIR *directory;
+
+	directory = opendir("/sys/kernel/debug/kvm");
+	TEST_ASSERT(directory, "opendir KVM debugfs failed: %d", errno);
+	while ((entry = readdir(directory))) {
+		if (!strstr(entry->d_name, "-pt") ||
+		    !protected_kvm_vm_has_process_tid(entry->d_name, pid))
+			continue;
+		TEST_ASSERT(n < max_names,
+			    "Too many protected KVM VMs for process %d", pid);
+		TEST_ASSERT(strlen(entry->d_name) <= NAME_MAX,
+			    "Protected KVM VM name is too long");
+		strcpy(names[n++], entry->d_name);
+	}
+	TEST_ASSERT(closedir(directory) == 0,
+		    "closedir KVM debugfs failed: %d", errno);
+	return n;
+}
+
+static size_t get_protected_kvm_vcpus(const char *vm_name)
+{
+	char path[PATH_MAX];
+	struct dirent *entry;
+	size_t n = 0;
+	DIR *directory;
+	int length;
+
+	length = snprintf(path, sizeof(path), "/sys/kernel/debug/kvm/%s",
+			  vm_name);
+	TEST_ASSERT(length >= 0 && length < sizeof(path),
+		    "Protected KVM debugfs path is too long");
+	directory = opendir(path);
+	TEST_ASSERT(directory, "opendir(%s) failed: %d", path, errno);
+	while ((entry = readdir(directory)))
+		if (!strncmp(entry->d_name, "vcpu", strlen("vcpu")))
+			n++;
+	TEST_ASSERT(closedir(directory) == 0,
+		    "closedir protected KVM VM failed: %d", errno);
+	return n;
+}
+
+static void *run_vcpu_reuse_thread(void *arg)
+{
+	return (void *)(uintptr_t)(syscall(SYS_gettid) <= 0);
+}
+
+static int run_vcpu_reuse_target(void)
+{
+	char vm_names[2][NAME_MAX + 1];
+	const int nr_threads = 1100;
+	size_t nr_vms, nr_vcpus;
+	void *thread_result;
+	pthread_t thread;
+	int i, ret;
+
+	for (i = 0; i < nr_threads; i++) {
+		ret = pthread_create(&thread, NULL, run_vcpu_reuse_thread, NULL);
+		if (ret)
+			return 10;
+		ret = pthread_join(thread, &thread_result);
+		if (ret || thread_result)
+			return 11;
+	}
+
+	nr_vms = get_protected_kvm_vms(getpid(), vm_names,
+					ARRAY_SIZE(vm_names));
+	if (nr_vms != 1)
+		return 12;
+	nr_vcpus = get_protected_kvm_vcpus(vm_names[0]);
+	if (nr_vcpus != 2)
+		return 13;
+	return 0;
+}
+
+static void test_vcpu_reuse(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
+	if (!child) {
+		int fd, ret;
+
+		fd = create_context_with_features(kvm_fd,
+					  KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		execl("/proc/self/exe", "protected_task_test",
+		      "--vcpu-reuse-target", NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() failed: %d", errno);
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "Protected vCPU reuse failed: %#x", status);
+}
+
 static int run_thp_stress_target(void)
 {
 	const unsigned long thp_size = 2UL << 20;
@@ -3154,6 +3307,7 @@ static void test_protected_exec(int kvm_fd)
 	};
 	struct protected_avx_features features;
 	char expected_output[4096] = {}, output[sizeof(expected_output)] = {};
+	char main_vm[NAME_MAX + 1] = {};
 	char helper[PATH_MAX];
 	unsigned long main_address = 0;
 	size_t expected_length = 0, nread = 0;
@@ -3207,8 +3361,9 @@ static void test_protected_exec(int kvm_fd)
 	close(ready_pipe[1]);
 	for (int i = 0; i < 12; i++) {
 		unsigned long address, addresses[2];
+		char vm_names[2][NAME_MAX + 1];
 		ssize_t nread;
-		size_t n;
+		size_t n, nr_vms;
 		pid_t target;
 		int stage = i % 6;
 
@@ -3226,15 +3381,22 @@ static void test_protected_exec(int kvm_fd)
 		}
 		n = get_hidden_mappings(target, addresses,
 					sizeof(addresses) / sizeof(addresses[0]));
+		nr_vms = get_protected_kvm_vms(target, vm_names,
+					       ARRAY_SIZE(vm_names));
+		TEST_ASSERT(nr_vms == 1,
+			    "Task %d has %zu protected KVM VMs", target, nr_vms);
 		for (size_t j = 0; j < n; j++)
 			assert_hidden_mapping_fully_resident(target, addresses[j]);
 		if (stage == 0) {
 			TEST_ASSERT(target == child && n == 1,
 				    "Initial helper has unexpected mappings");
 			main_address = address = addresses[0];
+			strcpy(main_vm, vm_names[0]);
 		} else if (stage == 1 || stage == 3) {
 			unsigned long main_addresses[2];
+			char main_vms[2][NAME_MAX + 1];
 			size_t main_n;
+			size_t main_nr_vms;
 
 			TEST_ASSERT(target != child && n == 1,
 				    "Process child has unexpected mappings");
@@ -3244,18 +3406,30 @@ static void test_protected_exec(int kvm_fd)
 			TEST_ASSERT(main_n == 1,
 					    "Main helper has unexpected mappings");
 			main_address = main_addresses[0];
+			main_nr_vms = get_protected_kvm_vms(child, main_vms,
+							   ARRAY_SIZE(main_vms));
+			TEST_ASSERT(main_nr_vms == 1,
+					    "Main helper has %zu protected KVM VMs",
+					    main_nr_vms);
+			strcpy(main_vm, main_vms[0]);
+			TEST_ASSERT(strcmp(vm_names[0], main_vm),
+					    "Process child shared the main KVM VM");
 		} else if (stage == 2) {
 			TEST_ASSERT(target != child && n == 1,
 				    "vfork child has unexpected mappings");
 			address = addresses[0];
 			TEST_ASSERT(address == main_address,
 				    "vfork child did not share the hidden mapping");
+			TEST_ASSERT(!strcmp(vm_names[0], main_vm),
+					    "vfork child did not share the main KVM VM");
 		} else if (stage == 4) {
 			TEST_ASSERT(target == child && n == 1,
 				    "Thread created another hidden mapping");
 			address = addresses[0];
 			TEST_ASSERT(address == main_address,
 				    "Thread did not share the hidden mapping");
+			TEST_ASSERT(!strcmp(vm_names[0], main_vm),
+					    "Thread did not share the main KVM VM");
 		} else {
 			TEST_ASSERT(target == child && n == 1,
 				    "Post-thread helper %d has %zu hidden mappings, expected task %d with one",
@@ -3309,6 +3483,8 @@ int main(int argc, char *argv[])
 		return 42;
 	if (argc == 2 && !strcmp(argv[1], "--dso-stress-target"))
 		return run_dso_stress_target();
+	if (argc == 2 && !strcmp(argv[1], "--vcpu-reuse-target"))
+		return run_vcpu_reuse_target();
 	if (argc == 2 && !strcmp(argv[1], "--thp-stress-target"))
 		return run_thp_stress_target();
 	if (argc == 2 && !strcmp(argv[1], "--swap-reclaim-target"))
@@ -3352,6 +3528,7 @@ int main(int argc, char *argv[])
 	test_uffd_invalidation(kvm_fd);
 	test_thp_stress(kvm_fd);
 	test_dso_stress(kvm_fd);
+	test_vcpu_reuse(kvm_fd);
 	test_protected_exec(kvm_fd);
 	close(kvm_fd);
 	return 0;
