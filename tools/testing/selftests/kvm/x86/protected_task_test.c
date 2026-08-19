@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <cpuid.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
@@ -8,6 +9,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -1001,13 +1003,64 @@ static int madvise_collapse_retry(void *address, size_t size)
 	return ret;
 }
 
+static long get_protected_kvm_stat(const char *name)
+{
+	char path[PATH_MAX], prefix[32];
+	struct dirent *entry;
+	long value = -ENOENT;
+	DIR *directory;
+	FILE *file;
+	int length;
+
+	length = snprintf(prefix, sizeof(prefix), "%d-pt", getpid());
+	if (length < 0 || length >= sizeof(prefix))
+		return -ENAMETOOLONG;
+
+	directory = opendir("/sys/kernel/debug/kvm");
+	if (!directory)
+		return -errno;
+
+	while ((entry = readdir(directory))) {
+		if (strncmp(entry->d_name, prefix, length))
+			continue;
+
+		length = snprintf(path, sizeof(path),
+				  "/sys/kernel/debug/kvm/%s/%s",
+				  entry->d_name, name);
+		if (length < 0 || length >= sizeof(path)) {
+			value = -ENAMETOOLONG;
+			break;
+		}
+
+		file = fopen(path, "re");
+		if (!file) {
+			value = -errno;
+			break;
+		}
+		if (fscanf(file, "%ld", &value) != 1)
+			value = -EIO;
+		fclose(file);
+		break;
+	}
+
+	closedir(directory);
+	return value;
+}
+
 static int run_thp_stress_target(void)
 {
 	const unsigned long thp_size = 2UL << 20;
 	const unsigned long page_size = 4096;
 	const unsigned long dropped_page = 257;
 	unsigned long base, aligned, end, i;
+	long baseline_2m, pages_2m;
 	void *reservation, *region;
+	int status;
+	pid_t child;
+
+	baseline_2m = get_protected_kvm_stat("pages_2m");
+	if (baseline_2m < 0)
+		return KSFT_SKIP;
 
 	reservation = mmap(NULL, thp_size * 2, PROT_READ | PROT_WRITE,
 			   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1036,6 +1089,13 @@ static int run_thp_stress_target(void)
 	}
 	if (get_anon_huge_pages(region) != thp_size)
 		return 13;
+	for (i = 0; i < thp_size / page_size; i++)
+		if (*(unsigned long *)(aligned + i * page_size) !=
+		    0x5a000000UL + i)
+			return 21;
+	pages_2m = get_protected_kvm_stat("pages_2m");
+	if (pages_2m <= baseline_2m)
+		return 22;
 
 	if (madvise((char *)region + dropped_page * page_size, page_size,
 		    MADV_DONTNEED))
@@ -1049,6 +1109,8 @@ static int run_thp_stress_target(void)
 		if (*(unsigned long *)(aligned + i * page_size) != expected)
 			return 16;
 	}
+	if (get_protected_kvm_stat("pages_2m") != baseline_2m)
+		return 23;
 	*(unsigned long *)(aligned + dropped_page * page_size) =
 		0x5a000000UL + dropped_page;
 
@@ -1062,6 +1124,40 @@ static int run_thp_stress_target(void)
 		if (value != 0x5a000000UL + i)
 			return 19;
 	}
+	if (get_protected_kvm_stat("pages_2m") <= baseline_2m)
+		return 24;
+
+	if (mprotect((char *)region + dropped_page * page_size, page_size,
+		     PROT_READ))
+		return 25;
+	if (get_protected_kvm_stat("pages_2m") != baseline_2m)
+		return 26;
+	child = fork();
+	if (child < 0)
+		return 27;
+	if (!child) {
+		if (signal(SIGSEGV, SIG_DFL) == SIG_ERR)
+			_exit(33);
+		*(volatile unsigned long *)(aligned + dropped_page * page_size) = 0;
+		_exit(0);
+	}
+	if (waitpid(child, &status, 0) != child || !WIFSIGNALED(status) ||
+	    WTERMSIG(status) != SIGSEGV)
+		return 28;
+	if (*(unsigned long *)(aligned + dropped_page * page_size) !=
+	    0x5a000000UL + dropped_page)
+		return 29;
+	if (mprotect((char *)region + dropped_page * page_size, page_size,
+		     PROT_READ | PROT_WRITE) ||
+	    madvise_collapse_retry(region, thp_size))
+		return 30;
+	for (i = 0; i < thp_size / page_size; i++)
+		if (*(unsigned long *)(aligned + i * page_size) !=
+		    0x5a000000UL + i)
+			return 31;
+	if (get_anon_huge_pages(region) != thp_size ||
+	    get_protected_kvm_stat("pages_2m") <= baseline_2m)
+		return 32;
 
 	return munmap(region, thp_size) ? 20 : 0;
 }
