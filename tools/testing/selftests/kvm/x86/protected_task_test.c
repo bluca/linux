@@ -3233,21 +3233,29 @@ static void test_protected_exec(int kvm_fd)
 				    "Initial helper has unexpected mappings");
 			main_address = address = addresses[0];
 		} else if (stage == 1 || stage == 3) {
+			unsigned long main_addresses[2];
+			size_t main_n;
+
 			TEST_ASSERT(target != child && n == 1,
 				    "Process child has unexpected mappings");
 			address = addresses[0];
+			main_n = get_hidden_mappings(child, main_addresses,
+						     ARRAY_SIZE(main_addresses));
+			TEST_ASSERT(main_n == 1,
+					    "Main helper has unexpected mappings");
+			main_address = main_addresses[0];
 		} else if (stage == 2) {
-			TEST_ASSERT(target != child && n == 2,
+			TEST_ASSERT(target != child && n == 1,
 				    "vfork child has unexpected mappings");
-			address = addresses[addresses[0] == main_address];
-			TEST_ASSERT(address != main_address,
-				    "vfork hidden mapping is not distinct");
+			address = addresses[0];
+			TEST_ASSERT(address == main_address,
+				    "vfork child did not share the hidden mapping");
 		} else if (stage == 4) {
-			TEST_ASSERT(target == child && n == 2,
-				    "Thread did not create a second hidden mapping");
-			address = addresses[addresses[0] == main_address];
-			TEST_ASSERT(address != main_address,
-				    "Thread hidden mapping is not distinct");
+			TEST_ASSERT(target == child && n == 1,
+				    "Thread created another hidden mapping");
+			address = addresses[0];
+			TEST_ASSERT(address == main_address,
+				    "Thread did not share the hidden mapping");
 		} else {
 			TEST_ASSERT(target == child && n == 1,
 				    "Post-thread helper %d has %zu hidden mappings, expected task %d with one",
