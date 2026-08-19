@@ -10,13 +10,16 @@
 #include <sched.h>
 #include <stdatomic.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
 #include <sys/io.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
+#include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/user.h>
 #include <sys/wait.h>
@@ -1623,6 +1626,487 @@ static void test_numa_stress(int kvm_fd)
 		    "Protected NUMA migration stress failed: %#x", status);
 }
 
+#define HOTPLUG_TEST_SIZE	(64UL << 20)
+#define PAGEMAP_PRESENT		(1ULL << 63)
+#define PAGEMAP_PFN_MASK	((1ULL << 55) - 1)
+
+struct memory_hotplug_target_info {
+	__u64 address;
+	__u64 size;
+};
+
+struct memory_hotplug_access_args {
+	void *mapping;
+	size_t size;
+	atomic_bool stop;
+	atomic_bool failed;
+};
+
+struct mapped_memory_block {
+	unsigned long long index;
+	size_t pages;
+	bool movable;
+};
+
+static void *run_memory_hotplug_access(void *opaque)
+{
+	struct memory_hotplug_access_args *args = opaque;
+
+	while (!atomic_load_explicit(&args->stop, memory_order_acquire)) {
+		if (!check_swap_pattern(args->mapping, args->size)) {
+			atomic_store_explicit(&args->failed, true,
+					      memory_order_release);
+			break;
+		}
+	}
+	return NULL;
+}
+
+static int run_memory_hotplug_target(int socket_fd)
+{
+	struct memory_hotplug_target_info info;
+	struct memory_hotplug_access_args args;
+	pthread_t thread;
+	char command;
+	ssize_t length;
+	void *mapping;
+	int ret;
+
+	mapping = mmap(NULL, HOTPLUG_TEST_SIZE, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapping == MAP_FAILED)
+		return 180;
+	set_swap_pattern(mapping, HOTPLUG_TEST_SIZE);
+
+	args.mapping = mapping;
+	args.size = HOTPLUG_TEST_SIZE;
+	atomic_init(&args.stop, false);
+	atomic_init(&args.failed, false);
+	ret = pthread_create(&thread, NULL, run_memory_hotplug_access, &args);
+	if (ret) {
+		munmap(mapping, HOTPLUG_TEST_SIZE);
+		return 181;
+	}
+
+	info.address = (uintptr_t)mapping;
+	info.size = HOTPLUG_TEST_SIZE;
+	length = send(socket_fd, &info, sizeof(info), MSG_NOSIGNAL);
+	if (length == sizeof(info)) {
+		do {
+			length = recv(socket_fd, &command, sizeof(command), 0);
+		} while (length < 0 && errno == EINTR);
+	}
+
+	atomic_store_explicit(&args.stop, true, memory_order_release);
+	ret = pthread_join(thread, NULL);
+	if (ret) {
+		munmap(mapping, HOTPLUG_TEST_SIZE);
+		return 182;
+	}
+	if (length != sizeof(command))
+		ret = 183;
+	else if (command == 'S')
+		ret = KSFT_SKIP;
+	else if (command != 'C' ||
+		 atomic_load_explicit(&args.failed, memory_order_acquire) ||
+		 !check_swap_pattern(mapping, HOTPLUG_TEST_SIZE))
+		ret = 184;
+	else
+		ret = 0;
+	if (munmap(mapping, HOTPLUG_TEST_SIZE) && !ret)
+		ret = 185;
+	return ret;
+}
+
+static int hotplug_read_file(const char *path, char *buffer, size_t size)
+{
+	int fd, saved_errno;
+	ssize_t length;
+
+	if (size < 2)
+		return -EINVAL;
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -errno;
+	length = read(fd, buffer, size - 1);
+	saved_errno = errno;
+	close(fd);
+	if (length < 0)
+		return -saved_errno;
+	if (length == size - 1)
+		return -EOVERFLOW;
+	buffer[length] = '\0';
+	return 0;
+}
+
+static int hotplug_write_file(const char *path, const char *value)
+{
+	size_t size = strlen(value);
+	int fd, saved_errno;
+	ssize_t length;
+
+	fd = open(path, O_WRONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -errno;
+	length = write(fd, value, size);
+	saved_errno = errno;
+	close(fd);
+	if (length < 0)
+		return -saved_errno;
+	return length == size ? 0 : -EIO;
+}
+
+static int hotplug_block_path(char *path, size_t size,
+			      unsigned long long index, const char *file)
+{
+	int length;
+
+	length = snprintf(path, size,
+			  "/sys/devices/system/memory/memory%llu/%s",
+			  index, file);
+	return length < 0 || length >= size ? -ENAMETOOLONG : 0;
+}
+
+static int hotplug_get_block_size(unsigned long long *block_size)
+{
+	char buffer[64], *end;
+	unsigned long long value;
+	int ret;
+
+	ret = hotplug_read_file("/sys/devices/system/memory/block_size_bytes",
+				buffer, sizeof(buffer));
+	if (ret)
+		return ret;
+	errno = 0;
+	value = strtoull(buffer, &end, 16);
+	if (errno || end == buffer || !value)
+		return -EINVAL;
+	while (*end == ' ' || *end == '\t' || *end == '\n')
+		end++;
+	if (*end || value % 4096)
+		return -EINVAL;
+	*block_size = value;
+	return 0;
+}
+
+static int hotplug_check_block(struct mapped_memory_block *block,
+			       bool *eligible)
+{
+	char path[PATH_MAX], buffer[128];
+	int ret;
+
+	*eligible = false;
+	ret = hotplug_block_path(path, sizeof(path), block->index, "removable");
+	if (ret)
+		return ret;
+	ret = hotplug_read_file(path, buffer, sizeof(buffer));
+	if (ret == -ENOENT)
+		return 0;
+	if (ret)
+		return ret;
+	if (buffer[0] != '1')
+		return 0;
+
+	ret = hotplug_block_path(path, sizeof(path), block->index, "state");
+	if (ret)
+		return ret;
+	ret = hotplug_read_file(path, buffer, sizeof(buffer));
+	if (ret)
+		return ret;
+	if (strncmp(buffer, "online", strlen("online")))
+		return 0;
+
+	ret = hotplug_block_path(path, sizeof(path), block->index,
+				 "valid_zones");
+	if (ret)
+		return ret;
+	ret = hotplug_read_file(path, buffer, sizeof(buffer));
+	if (!ret)
+		block->movable = strstr(buffer, "Movable") != NULL;
+	else if (ret != -ENOENT)
+		return ret;
+	*eligible = true;
+	return 0;
+}
+
+static int hotplug_set_block_state(unsigned long long index,
+				   const char *state)
+{
+	char path[PATH_MAX];
+	int ret;
+
+	ret = hotplug_block_path(path, sizeof(path), index, "state");
+	if (ret)
+		return ret;
+	return hotplug_write_file(path, state);
+}
+
+static int hotplug_block_has_state(unsigned long long index,
+				   const char *state)
+{
+	char path[PATH_MAX], buffer[32];
+	int ret;
+
+	ret = hotplug_block_path(path, sizeof(path), index, "state");
+	if (ret)
+		return ret;
+	ret = hotplug_read_file(path, buffer, sizeof(buffer));
+	if (ret)
+		return ret;
+	return strncmp(buffer, state, strlen(state)) ? 0 : 1;
+}
+
+static int hotplug_collect_mapping_blocks(
+		pid_t pid, const struct memory_hotplug_target_info *info,
+		unsigned long long block_size,
+		struct mapped_memory_block **ret_blocks, size_t *ret_count)
+{
+	const unsigned long page_size = 4096;
+	struct mapped_memory_block *blocks;
+	char path[64];
+	size_t i, nr_blocks = 0, pages;
+	int fd, length, ret = 0;
+	bool have_pfn = false;
+
+	if (!info->size || info->address % page_size ||
+	    info->size % page_size || info->address > UINT64_MAX - info->size)
+		return -EINVAL;
+	pages = info->size / page_size;
+	blocks = calloc(pages, sizeof(*blocks));
+	if (!blocks)
+		return -ENOMEM;
+	length = snprintf(path, sizeof(path), "/proc/%d/pagemap", pid);
+	if (length < 0 || length >= sizeof(path)) {
+		ret = -ENAMETOOLONG;
+		goto out;
+	}
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		ret = -errno;
+		goto out;
+	}
+
+	for (i = 0; i < pages; i++) {
+		unsigned long long address = info->address + i * page_size;
+		unsigned long long entry, pfn, index;
+		off_t offset = address / page_size * sizeof(entry);
+		ssize_t nread;
+		size_t j;
+
+		nread = pread(fd, &entry, sizeof(entry), offset);
+		if (nread != sizeof(entry)) {
+			ret = nread < 0 ? -errno : -EIO;
+			break;
+		}
+		if (!(entry & PAGEMAP_PRESENT))
+			continue;
+		pfn = entry & PAGEMAP_PFN_MASK;
+		if (!pfn)
+			continue;
+		have_pfn = true;
+		if (pfn > ULLONG_MAX / page_size) {
+			ret = -EOVERFLOW;
+			break;
+		}
+		index = pfn * page_size / block_size;
+		for (j = 0; j < nr_blocks; j++)
+			if (blocks[j].index == index)
+				break;
+		if (j == nr_blocks)
+			blocks[nr_blocks++].index = index;
+		blocks[j].pages++;
+	}
+	close(fd);
+	if (!ret && !have_pfn)
+		ret = -EACCES;
+out:
+	if (ret) {
+		free(blocks);
+		return ret;
+	}
+	*ret_blocks = blocks;
+	*ret_count = nr_blocks;
+	return 0;
+}
+
+static int hotplug_count_mapping_pages(
+		pid_t pid, const struct memory_hotplug_target_info *info,
+		unsigned long long block_size, unsigned long long index,
+		size_t *count)
+{
+	struct mapped_memory_block *blocks;
+	size_t i, nr_blocks;
+	int ret;
+
+	ret = hotplug_collect_mapping_blocks(pid, info, block_size, &blocks,
+					     &nr_blocks);
+	if (ret)
+		return ret;
+	*count = 0;
+	for (i = 0; i < nr_blocks; i++)
+		if (blocks[i].index == index) {
+			*count = blocks[i].pages;
+			break;
+		}
+	free(blocks);
+	return 0;
+}
+
+static void test_memory_hotplug(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	struct memory_hotplug_target_info info;
+	struct mapped_memory_block *blocks = NULL;
+	unsigned long long block_size, selected = 0;
+	const char *skip_reason = NULL;
+	size_t i, nr_blocks = 0, pages = 0;
+	int sockets[2], status = 0, ret, operation_error = 0;
+	int online_error = 0, state, pass;
+	ssize_t length;
+	pid_t child;
+	char command = 'S';
+	bool offlined = false, send_failed = false;
+
+	ret = hotplug_get_block_size(&block_size);
+	if (ret) {
+		print_skip("Memory hotplug sysfs is unavailable");
+		return;
+	}
+	TEST_ASSERT(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sockets) == 0,
+		    "socketpair() failed: %d", errno);
+	child = fork();
+	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
+	if (!child) {
+		char fd_string[32];
+		int fd;
+
+		close(sockets[0]);
+		fd = create_context_with_features(kvm_fd,
+					  KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		snprintf(fd_string, sizeof(fd_string), "%d", sockets[1]);
+		execl("/proc/self/exe", "protected_task_test",
+		      "--memory-hotplug-target", fd_string, NULL);
+		_exit(127);
+	}
+
+	close(sockets[1]);
+	do {
+		length = recv(sockets[0], &info, sizeof(info), MSG_WAITALL);
+	} while (length < 0 && errno == EINTR);
+	if (length != sizeof(info)) {
+		operation_error = length < 0 ? -errno : -EIO;
+		goto stop;
+	}
+
+	ret = hotplug_collect_mapping_blocks(child, &info, block_size,
+					     &blocks, &nr_blocks);
+	if (ret == -EACCES || ret == -EPERM) {
+		skip_reason = "PFNs are unavailable for protected memory hotplug stress";
+		goto stop;
+	}
+	if (ret) {
+		operation_error = ret;
+		goto stop;
+	}
+
+	for (i = 0; i < nr_blocks; i++) {
+		bool eligible;
+
+		ret = hotplug_check_block(&blocks[i], &eligible);
+		if (ret) {
+			operation_error = ret;
+			goto stop;
+		}
+		if (!eligible)
+			blocks[i].pages = 0;
+	}
+
+	for (pass = 0; pass < 2 && !offlined; pass++) {
+		for (i = 0; i < nr_blocks; i++) {
+			if (!blocks[i].pages || blocks[i].movable != !pass)
+				continue;
+			ret = hotplug_count_mapping_pages(child, &info, block_size,
+							 blocks[i].index, &pages);
+			if (ret) {
+				operation_error = ret;
+				goto stop;
+			}
+			if (!pages)
+				continue;
+			ret = hotplug_set_block_state(blocks[i].index, "offline");
+			if (ret == -EACCES || ret == -EPERM || ret == -EROFS) {
+				skip_reason = "Memory hotplug sysfs is not writable";
+				goto stop;
+			}
+			if (ret == -EBUSY || ret == -EINVAL || ret == -EAGAIN)
+				continue;
+			if (ret) {
+				operation_error = ret;
+				goto stop;
+			}
+			selected = blocks[i].index;
+			offlined = true;
+			command = 'C';
+			state = hotplug_block_has_state(selected, "offline");
+			if (state != 1) {
+				operation_error = state < 0 ? state : -EIO;
+				goto stop;
+			}
+			ret = hotplug_count_mapping_pages(child, &info, block_size,
+							 selected, &pages);
+			if (ret || pages) {
+				operation_error = ret ? ret : -EIO;
+				goto stop;
+			}
+			break;
+		}
+	}
+	if (!offlined)
+		skip_reason = "No mapped online memory block could be offlined";
+
+stop:
+	length = send(sockets[0], &command, sizeof(command), MSG_NOSIGNAL);
+	if (length != sizeof(command)) {
+		send_failed = true;
+		kill(child, SIGKILL);
+	}
+	close(sockets[0]);
+	if (waitpid(child, &status, 0) != child) {
+		operation_error = operation_error ?: -errno;
+		kill(child, SIGKILL);
+		waitpid(child, &status, 0);
+	}
+	if (offlined) {
+		online_error = hotplug_set_block_state(selected, "online");
+		if (!online_error) {
+			state = hotplug_block_has_state(selected, "online");
+			if (state != 1)
+				online_error = state < 0 ? state : -EIO;
+		}
+	}
+	free(blocks);
+
+	TEST_ASSERT(!online_error,
+		    "Failed to restore memory%llu online: %d",
+		    selected, -online_error);
+	TEST_ASSERT(!operation_error,
+		    "Protected memory hotplug operation failed: %d",
+		    -operation_error);
+	TEST_ASSERT(!send_failed, "Protected memory hotplug target stopped early");
+	if (!offlined) {
+		TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == KSFT_SKIP,
+			    "Protected memory hotplug skip failed: %#x", status);
+		print_skip(skip_reason ?: "Memory hotplug is unavailable");
+		return;
+	}
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "Protected memory hotplug stress failed: %#x", status);
+}
+
 static int run_oom_target(int ready_fd)
 {
 	const size_t size = 512UL << 20;
@@ -2683,6 +3167,8 @@ int main(int argc, char *argv[])
 		return run_numa_policy_target();
 	if (argc == 2 && !strcmp(argv[1], "--numa-migration-target"))
 		return run_numa_migration_target();
+	if (argc == 3 && !strcmp(argv[1], "--memory-hotplug-target"))
+		return run_memory_hotplug_target(atoi(argv[2]));
 	if (argc == 2 && !strcmp(argv[1], "--uffd-invalidation-target"))
 		return run_uffd_invalidation_target();
 
@@ -2711,6 +3197,7 @@ int main(int argc, char *argv[])
 	test_io_permissions_reject_exec(kvm_fd);
 	test_swap_reclaim(kvm_fd);
 	test_numa_stress(kvm_fd);
+	test_memory_hotplug(kvm_fd);
 	test_cgroup_oom(kvm_fd);
 	test_uffd_invalidation(kvm_fd);
 	test_thp_stress(kvm_fd);
