@@ -2572,6 +2572,50 @@ static size_t get_hidden_mappings(pid_t pid, unsigned long *addresses,
 	return n;
 }
 
+static void assert_hidden_mapping_fully_resident(pid_t pid,
+						 unsigned long address)
+{
+	unsigned long header_size = ULONG_MAX, size = ULONG_MAX;
+	unsigned long rss = ULONG_MAX, locked = ULONG_MAX;
+	char path[64], line[256];
+	bool found = false;
+	FILE *smaps;
+
+	snprintf(path, sizeof(path), "/proc/%d/smaps", pid);
+	smaps = fopen(path, "re");
+	TEST_ASSERT(smaps, "fopen(%s) failed: %d", path, errno);
+	while (fgets(line, sizeof(line), smaps)) {
+		unsigned long start, end, value;
+
+		if (sscanf(line, "%lx-%lx", &start, &end) == 2) {
+			if (found)
+				break;
+			found = start == address;
+			if (found)
+				header_size = (end - start) >> 10;
+			continue;
+		}
+		if (!found)
+			continue;
+		if (sscanf(line, "Size: %lu kB", &value) == 1)
+			size = value;
+		else if (sscanf(line, "Rss: %lu kB", &value) == 1)
+			rss = value;
+		else if (sscanf(line, "Locked: %lu kB", &value) == 1)
+			locked = value;
+	}
+	TEST_ASSERT(fclose(smaps) == 0, "fclose(%s) failed: %d", path, errno);
+	TEST_ASSERT(found && size != ULONG_MAX && rss != ULONG_MAX &&
+		    locked != ULONG_MAX,
+		    "Missing smaps accounting for hidden mapping %#lx in task %d",
+		    address, pid);
+	TEST_ASSERT(size == header_size && rss == size && locked == size,
+		    "Hidden mapping %#lx in task %d has Size/Rss/Locked "
+		    "%lu/%lu/%lu kB, expected %lu/%lu/%lu kB",
+		    address, pid, size, rss, locked,
+		    header_size, header_size, header_size);
+}
+
 static void test_hidden_mapping_ptrace(pid_t child, unsigned long address)
 {
 	long value;
@@ -3182,6 +3226,8 @@ static void test_protected_exec(int kvm_fd)
 		}
 		n = get_hidden_mappings(target, addresses,
 					sizeof(addresses) / sizeof(addresses[0]));
+		for (size_t j = 0; j < n; j++)
+			assert_hidden_mapping_fully_resident(target, addresses[j]);
 		if (stage == 0) {
 			TEST_ASSERT(target == child && n == 1,
 				    "Initial helper has unexpected mappings");
