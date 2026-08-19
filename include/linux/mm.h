@@ -4158,6 +4158,8 @@ extern unsigned long do_mmap(struct file *file, unsigned long addr,
 	vm_flags_t vm_flags, unsigned long pgoff, unsigned long *populate,
 	struct list_head *uf);
 unsigned long vm_mmap_protected_task(unsigned long len);
+int vm_unlock_protected_task_tail(unsigned long start, size_t old_len,
+				  size_t used_len);
 int vm_munmap_protected_task(unsigned long start, size_t len);
 extern int do_vmi_munmap(struct vma_iterator *vmi, struct mm_struct *mm,
 			 unsigned long start, size_t len, struct list_head *uf,

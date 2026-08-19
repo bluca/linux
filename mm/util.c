@@ -34,6 +34,7 @@
 
 #include "internal.h"
 #include "swap.h"
+#include "vma.h"
 
 /**
  * kfree_const - conditionally free memory
@@ -669,9 +670,58 @@ unsigned long vm_mmap_protected_task(unsigned long len)
 }
 EXPORT_SYMBOL_GPL(vm_mmap_protected_task);
 
+int vm_unlock_protected_task_tail(unsigned long start, size_t old_len,
+				  size_t used_len)
+{
+	struct mm_struct *mm = current->mm;
+	unsigned long end, tail_start, tail_pages;
+	struct vm_area_struct *prev, *vma;
+	vma_flags_t new_flags;
+	int ret;
+	VMA_ITERATOR(vmi, mm, start);
+
+	if (!PAGE_ALIGNED(start) || !PAGE_ALIGNED(old_len) ||
+	    !PAGE_ALIGNED(used_len) || !used_len || used_len >= old_len ||
+	    check_add_overflow(start, old_len, &end) ||
+	    check_add_overflow(start, used_len, &tail_start))
+		return -EINVAL;
+
+	if (mmap_write_lock_killable(mm))
+		return -EINTR;
+	vma = vma_iter_load(&vmi);
+	if (!vma || vma->vm_start != start || vma->vm_end != end ||
+	    !(vma->vm_flags & VM_KVM_PROTECTED) ||
+	    !(vma->vm_flags & VM_LOCKED)) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	prev = vma;
+	new_flags = vma->flags;
+	vma_flags_clear(&new_flags, VMA_LOCKED_BIT);
+	vma = vma_modify_flags(&vmi, prev, vma, tail_start, end, &new_flags);
+	if (IS_ERR(vma)) {
+		ret = PTR_ERR(vma);
+		goto unlock;
+	}
+
+	tail_pages = (old_len - used_len) >> PAGE_SHIFT;
+	VM_BUG_ON(mm->locked_vm < tail_pages);
+	vma_start_write(vma);
+	vma_clear_flags(vma, VMA_LOCKED_BIT);
+	mm->locked_vm -= tail_pages;
+	ret = 0;
+
+unlock:
+	mmap_write_unlock(mm);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(vm_unlock_protected_task_tail);
+
 int vm_munmap_protected_task(unsigned long start, size_t len)
 {
 	struct mm_struct *mm = current->mm;
+	unsigned long end = start + len, next = start;
 	struct vm_area_struct *vma;
 	int ret;
 	LIST_HEAD(uf);
@@ -679,22 +729,27 @@ int vm_munmap_protected_task(unsigned long start, size_t len)
 
 	if (mmap_write_lock_killable(mm))
 		return -EINTR;
-	vma = vma_iter_load(&vmi);
-	if (!vma || vma->vm_start != start || vma->vm_end != start + len ||
-	    !(vma->vm_flags & VM_KVM_PROTECTED)) {
+	for_each_vma_range(vmi, vma, end) {
+		if (vma->vm_start != next ||
+		    !(vma->vm_flags & VM_KVM_PROTECTED))
+			break;
+		next = vma->vm_end;
+	}
+	if (next != end) {
 		ret = -EINVAL;
 		goto unlock;
 	}
 
-	vma_clear_flags(vma, VMA_SEALED_BIT);
+	vma_iter_set(&vmi, start);
+	for_each_vma_range(vmi, vma, end)
+		vma_clear_flags(vma, VMA_SEALED_BIT);
 	vma_iter_set(&vmi, start);
 	ret = do_vmi_munmap(&vmi, mm, start, len, &uf, false);
 	if (ret) {
-		vma = vma_lookup(mm, start);
-		if (vma && vma->vm_start == start &&
-		    vma->vm_end == start + len &&
-		    vma->vm_flags & VM_KVM_PROTECTED)
-			vma_set_flags(vma, VMA_SEALED_BIT);
+		vma_iter_set(&vmi, start);
+		for_each_vma_range(vmi, vma, end)
+			if (vma->vm_flags & VM_KVM_PROTECTED)
+				vma_set_flags(vma, VMA_SEALED_BIT);
 	}
 
 unlock:

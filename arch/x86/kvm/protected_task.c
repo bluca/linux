@@ -1341,6 +1341,12 @@ static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 	state->pgtable_used = builder.used;
 	state->pgd = pgd;
 	state->syscall_stub = stub_gpa;
+	if (builder.used < size) {
+		ret = vm_unlock_protected_task_tail(state->pgtable_addr, size,
+						    builder.used);
+		if (ret)
+			goto free_image;
+	}
 
 	/* Only the protected memslot may force-access the hidden image. */
 	ret = vm_mprotect(state->pgtable_addr, size, PROT_NONE);
@@ -1352,7 +1358,7 @@ static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
 
 	region.guest_phys_addr = state->pgtable_addr;
 	region.userspace_addr = state->pgtable_addr;
-	region.memory_size = size;
+	region.memory_size = builder.used;
 	ret = kvm_set_protected_task_memory_region(vcpu->kvm, &region);
 
 free_image:
