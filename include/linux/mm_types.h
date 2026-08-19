@@ -1307,6 +1307,8 @@ struct mm_struct {
 
 #if IS_ENABLED(CONFIG_KVM)
 		atomic64_t protected_task_pgtable_gen;
+		struct mutex protected_task_vm_lock;
+		void *protected_task_vm;
 		struct mutex protected_task_image_lock;
 		void *protected_task_arch_image;
 		spinlock_t protected_task_lock;

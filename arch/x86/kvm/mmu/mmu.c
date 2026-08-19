@@ -4740,10 +4740,14 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 		return true;
 
 	mmap_read_lock(vcpu->kvm->mm);
-	vma = vma_lookup(vcpu->kvm->mm, address);
+	vma = find_vma(vcpu->kvm->mm, address);
 	if (!vma)
 		allowed = false;
-	else {
+	else if (address < vma->vm_start) {
+		vcpu->arch.protected_task_growdown_fault =
+			vma->vm_flags & VM_GROWSDOWN;
+		allowed = false;
+	} else {
 		if (vma->vm_flags & (VM_READ | VM_WRITE))
 			access |= ACC_READ_MASK;
 		if (vma->vm_flags & VM_WRITE)

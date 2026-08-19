@@ -1085,7 +1085,8 @@ void __weak kvm_arch_create_vm_debugfs(struct kvm *kvm)
 {
 }
 
-int __weak kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state)
+int __weak kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, bool reuse,
+					   void **state)
 {
 	return -EOPNOTSUPP;
 }

@@ -1107,6 +1107,8 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 	mm_pasid_init(mm);
 #if IS_ENABLED(CONFIG_KVM)
 	atomic64_set(&mm->protected_task_pgtable_gen, 0);
+	mutex_init(&mm->protected_task_vm_lock);
+	mm->protected_task_vm = NULL;
 	mutex_init(&mm->protected_task_image_lock);
 	mm->protected_task_arch_image = NULL;
 	spin_lock_init(&mm->protected_task_lock);

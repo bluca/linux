@@ -238,8 +238,9 @@ static bool kvm_protected_task_xstate_component(
 	return true;
 }
 
-static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
-					       struct kvm_protected_task_x86 *state)
+static void kvm_protected_task_restrict_cpuid(
+		struct kvm_vcpu *vcpu, struct kvm_protected_task_x86 *state,
+		bool apply)
 {
 	struct kvm_cpuid_entry2 *leaf1, *leaf7, *leaf71, *leaf80000008;
 	struct kvm_cpuid_entry2 *leafd0, *leafd1, *leafd2, *leafd5, *leafd6;
@@ -413,6 +414,8 @@ static void kvm_protected_task_restrict_cpuid(struct kvm_vcpu *vcpu,
 		     (state->la57 ? KVM_PT_CPUID_7_ECX_LA57 : 0))) ||
 		  (leaf7->edx & kvm_protected_task_cpuid_class_mask(
 					state, &kvm_pt_cpuid_7_0_edx))));
+	if (!apply)
+		return;
 
 	for (i = 0; i < vcpu->arch.cpuid_nent; i++) {
 		struct kvm_cpuid_entry2 *entry = &vcpu->arch.cpuid_entries[i];
@@ -1201,13 +1204,16 @@ static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 		mmap_read_unlock(current->mm);
 	}
 
-	if (!mapped || visible) {
+	if (!mapped || (visible &&
+			!vcpu->arch.protected_task_growdown_fault)) {
 		u32 error_code = X86_PF_USER | (mapped ? X86_PF_PROT : 0);
 
 		x86_force_sig_user_page_fault(regs, error_code, address,
 					      mapped ? SEGV_ACCERR : SEGV_MAPERR);
 		return 0;
 	}
+	if (visible)
+		return 0;
 
 	ret = kvm_map_user_memory_region(vcpu->kvm, next_slot,
 					 address, end);
@@ -1474,7 +1480,8 @@ static int kvm_protected_task_get_image(struct kvm_vcpu *vcpu,
 	return 0;
 }
 
-int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **statep)
+int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, bool reuse,
+				    void **statep)
 {
 	struct kvm_protected_task_x86 *state;
 	int ret;
@@ -1486,18 +1493,26 @@ int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **statep)
 	if (!state)
 		return -ENOMEM;
 
-	ret = kvm_vcpu_set_supported_cpuid(vcpu);
-	if (ret) {
-		kfree(state);
-		return ret;
+	if (reuse) {
+		vcpu_load(vcpu);
+		kvm_vcpu_reset(vcpu, true);
+		kvm_set_mp_state(vcpu, KVM_MP_STATE_RUNNABLE);
+		vcpu_put(vcpu);
+	} else {
+		ret = kvm_vcpu_set_supported_cpuid(vcpu);
+		if (ret) {
+			kfree(state);
+			return ret;
+		}
 	}
 	ret = kvm_apic_set_base(vcpu, 0, true);
 	if (ret) {
 		kfree(state);
 		return -EINVAL;
 	}
-	kvm_protected_task_restrict_cpuid(vcpu, state);
+	kvm_protected_task_restrict_cpuid(vcpu, state, !reuse);
 	kvm_protected_task_restrict_xstate(vcpu, state);
+	vcpu->arch.guest_fpu.xfd_err = 0;
 
 	*statep = state;
 	return 0;
@@ -1624,6 +1639,7 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 	kvm_protected_task_setup_pkru(vcpu, state);
 
 	vcpu->arch.protected_task_backing_fault = false;
+	vcpu->arch.protected_task_growdown_fault = false;
 	ret = kvm_vcpu_run(vcpu);
 	kvm_protected_task_vcpu_run_complete(vcpu);
 	run_complete = true;
@@ -1702,7 +1718,8 @@ int kvm_arch_protected_task_deactivate(struct kvm_vcpu *vcpu, void *arch_state)
 
 #else
 
-int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **state)
+int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, bool reuse,
+				    void **state)
 {
 	return -EOPNOTSUPP;
 }

@@ -830,6 +830,7 @@ struct kvm_vcpu_arch {
 	unsigned long cr2;
 	u64 protected_task_pf_error_code;
 	bool protected_task_backing_fault;
+	bool protected_task_growdown_fault;
 	unsigned long cr3;
 	unsigned long cr4;
 	unsigned long cr4_guest_owned_bits;

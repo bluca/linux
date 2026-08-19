@@ -12,6 +12,7 @@
 #include <linux/kvm_protected_task.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
@@ -27,13 +28,23 @@ struct kvm_protected_task_vcpu {
 	struct kvm_vcpu *vcpu;
 };
 
+struct kvm_protected_task_vm {
+	refcount_t refs;
+	struct kvm *kvm;
+	struct list_head idle_vcpus;
+	u64 pgtable_gen;
+	unsigned long next_vcpu_id;
+	int debug_id;
+	u32 next_slot;
+};
+
 struct kvm_protected_task_exec {
+	struct kvm_protected_task_vm *vm;
 	struct kvm *kvm;
 	struct kvm_vcpu *vcpu;
 	struct kvm_protected_task_vcpu *registered_vcpu;
 	void *arch_state;
 	u64 pgtable_gen;
-	int debug_id;
 	u32 next_slot;
 };
 
@@ -60,9 +71,8 @@ static void kvm_protected_task_unregister_vcpu(struct kvm_protected_task_exec *e
 	struct mm_struct *mm = exec->kvm->mm;
 
 	spin_lock(&mm->protected_task_lock);
-	list_del(&exec->registered_vcpu->node);
+	list_del_init(&exec->registered_vcpu->node);
 	spin_unlock(&mm->protected_task_lock);
-	kfree(exec->registered_vcpu);
 }
 
 static void kvm_protected_task_quiesce_mm(void *state)
@@ -154,14 +164,14 @@ void kvm_protected_task_vcpu_run_complete(struct kvm_vcpu *vcpu)
 		wake_up_all(&mm->protected_task_wait);
 }
 
-static int kvm_protected_task_map_range(struct kvm_protected_task_exec *exec,
+static int kvm_protected_task_map_range(struct kvm_protected_task_vm *vm,
 					unsigned long start, unsigned long end)
 {
 	const u64 max_size = (u64)KVM_MEM_MAX_NR_PAGES << PAGE_SHIFT;
 
 	while (start < end) {
 		struct kvm_userspace_memory_region2 region = {
-			.slot = exec->next_slot++,
+			.slot = vm->next_slot++,
 			.guest_phys_addr = start,
 			.userspace_addr = start,
 			.memory_size = min_t(u64, end - start, max_size),
@@ -171,7 +181,7 @@ static int kvm_protected_task_map_range(struct kvm_protected_task_exec *exec,
 		if (region.slot >= KVM_USER_MEM_SLOTS)
 			return -ENOSPC;
 
-		ret = kvm_set_user_memory_region(exec->kvm, &region);
+		ret = kvm_set_user_memory_region(vm->kvm, &region);
 		if (ret)
 			return ret;
 
@@ -181,7 +191,7 @@ static int kvm_protected_task_map_range(struct kvm_protected_task_exec *exec,
 	return 0;
 }
 
-static int kvm_protected_task_map_mm(struct kvm_protected_task_exec *exec,
+static int kvm_protected_task_map_mm(struct kvm_protected_task_vm *vm,
 				     struct mm_struct *mm)
 {
 	struct kvm_protected_task_range *ranges;
@@ -220,7 +230,7 @@ unlock:
 		goto free_ranges;
 
 	for (i = 0; i < nr; i++) {
-		ret = kvm_protected_task_map_range(exec, ranges[i].start,
+		ret = kvm_protected_task_map_range(vm, ranges[i].start,
 						   ranges[i].end);
 		if (ret)
 			break;
@@ -231,10 +241,117 @@ free_ranges:
 	return ret;
 }
 
-static int kvm_protected_task_create_exec(struct mm_struct *mm, void **state)
+static void kvm_protected_task_put_vm(struct kvm_protected_task_vm *vm)
+{
+	struct kvm_protected_task_vcpu *registered_vcpu, *tmp;
+	struct mm_struct *mm = vm->kvm->mm;
+
+	mutex_lock(&mm->protected_task_vm_lock);
+	if (!refcount_dec_and_test(&vm->refs)) {
+		mutex_unlock(&mm->protected_task_vm_lock);
+		return;
+	}
+	if (mm->protected_task_vm == vm)
+		WRITE_ONCE(mm->protected_task_vm, NULL);
+	mutex_unlock(&mm->protected_task_vm_lock);
+
+	list_for_each_entry_safe(registered_vcpu, tmp, &vm->idle_vcpus, node) {
+		list_del(&registered_vcpu->node);
+		kfree(registered_vcpu);
+	}
+	kvm_put_kvm(vm->kvm);
+	ida_free(&kvm_protected_task_debug_ids, vm->debug_id);
+	kfree(vm);
+}
+
+static void kvm_protected_task_retire_vm(struct kvm_protected_task_vm *vm)
+{
+	struct mm_struct *mm = vm->kvm->mm;
+
+	mutex_lock(&mm->protected_task_vm_lock);
+	if (mm->protected_task_vm == vm)
+		WRITE_ONCE(mm->protected_task_vm, NULL);
+	mutex_unlock(&mm->protected_task_vm_lock);
+}
+
+static int kvm_protected_task_get_vm(
+		struct mm_struct *mm, struct kvm_protected_task_vm *stale_vm,
+		struct kvm_protected_task_vm **vmp,
+		struct kvm_protected_task_vcpu **idle_vcpu,
+		unsigned long *vcpu_id)
+{
+	struct kvm_protected_task_vm *vm;
+	char fdname[sizeof("pt2147483647")];
+	u64 pgtable_gen;
+	int ret;
+
+	pgtable_gen = atomic64_read(&mm->protected_task_pgtable_gen);
+	mutex_lock(&mm->protected_task_vm_lock);
+	vm = mm->protected_task_vm;
+	if (vm && vm != stale_vm && vm->pgtable_gen == pgtable_gen &&
+	    (!list_empty(&vm->idle_vcpus) ||
+	     vm->next_vcpu_id < vm->kvm->max_vcpus)) {
+		refcount_inc(&vm->refs);
+		goto found;
+	}
+
+	vm = kzalloc_obj(*vm);
+	if (!vm) {
+		ret = -ENOMEM;
+		goto unlock;
+	}
+	vm->debug_id = ida_alloc(&kvm_protected_task_debug_ids, GFP_KERNEL);
+	if (vm->debug_id < 0) {
+		ret = vm->debug_id;
+		goto free_vm;
+	}
+	snprintf(fdname, sizeof(fdname), "pt%d", vm->debug_id);
+	vm->kvm = kvm_create_vm(0, fdname, mm);
+	if (IS_ERR(vm->kvm)) {
+		ret = PTR_ERR(vm->kvm);
+		goto free_debug_id;
+	}
+	vm->kvm->protected_task = true;
+	INIT_LIST_HEAD(&vm->idle_vcpus);
+
+	ret = kvm_protected_task_map_mm(vm, mm);
+	if (ret)
+		goto put_kvm;
+
+	refcount_set(&vm->refs, 1);
+	vm->pgtable_gen = pgtable_gen;
+	WRITE_ONCE(mm->protected_task_vm, vm);
+
+found:
+	*vmp = vm;
+	if (!list_empty(&vm->idle_vcpus)) {
+		*idle_vcpu = list_first_entry(&vm->idle_vcpus,
+						     struct kvm_protected_task_vcpu,
+						     node);
+		list_del_init(&(*idle_vcpu)->node);
+	} else
+		*vcpu_id = vm->next_vcpu_id++;
+	mutex_unlock(&mm->protected_task_vm_lock);
+	return 0;
+
+put_kvm:
+	kvm_put_kvm(vm->kvm);
+free_debug_id:
+	ida_free(&kvm_protected_task_debug_ids, vm->debug_id);
+free_vm:
+	kfree(vm);
+unlock:
+	mutex_unlock(&mm->protected_task_vm_lock);
+	return ret;
+}
+
+static int kvm_protected_task_create_exec(
+		struct mm_struct *mm, struct kvm_protected_task_vm *stale_vm,
+		void **state)
 {
 	struct kvm_protected_task_exec *exec;
-	char fdname[sizeof("pt2147483647")];
+	struct kvm_protected_task_vcpu *idle_vcpu = NULL;
+	unsigned long vcpu_id;
 	int ret;
 
 	ret = kvm_arch_protected_task_prepare_permissions();
@@ -250,41 +367,38 @@ static int kvm_protected_task_create_exec(struct mm_struct *mm, void **state)
 		goto free_exec;
 	}
 
-	exec->debug_id = ida_alloc(&kvm_protected_task_debug_ids, GFP_KERNEL);
-	if (exec->debug_id < 0) {
-		ret = exec->debug_id;
+	ret = kvm_protected_task_get_vm(mm, stale_vm, &exec->vm, &idle_vcpu,
+					&vcpu_id);
+	if (ret)
 		goto free_exec;
-	}
-	snprintf(fdname, sizeof(fdname), "pt%d", exec->debug_id);
-	exec->kvm = kvm_create_vm(0, fdname, mm);
-	if (IS_ERR(exec->kvm)) {
-		ret = PTR_ERR(exec->kvm);
-		goto free_debug_id;
-	}
-	exec->kvm->protected_task = true;
+	exec->kvm = exec->vm->kvm;
+	exec->next_slot = exec->vm->next_slot;
 
-	ret = kvm_protected_task_map_mm(exec, mm);
+	if (idle_vcpu) {
+		kfree(exec->registered_vcpu);
+		exec->registered_vcpu = idle_vcpu;
+		exec->vcpu = idle_vcpu->vcpu;
+	} else {
+		exec->vcpu = kvm_create_vcpu(exec->kvm, vcpu_id, NULL);
+		if (IS_ERR(exec->vcpu)) {
+			ret = PTR_ERR(exec->vcpu);
+			goto put_vm;
+		}
+		exec->registered_vcpu->vcpu = exec->vcpu;
+	}
+
+	ret = kvm_arch_protected_task_prepare(exec->vcpu, idle_vcpu,
+					      &exec->arch_state);
 	if (ret)
-		goto put_kvm;
-
-	exec->vcpu = kvm_create_vcpu(exec->kvm, 0, NULL);
-	if (IS_ERR(exec->vcpu)) {
-		ret = PTR_ERR(exec->vcpu);
-		goto put_kvm;
-	}
-
-	ret = kvm_arch_protected_task_prepare(exec->vcpu, &exec->arch_state);
-	if (ret)
-		goto put_kvm;
+		goto put_vm;
 	kvm_protected_task_register_vcpu(exec);
 
 	*state = exec;
 	return 0;
 
-put_kvm:
-	kvm_put_kvm(exec->kvm);
-free_debug_id:
-	ida_free(&kvm_protected_task_debug_ids, exec->debug_id);
+put_vm:
+	kvm_protected_task_retire_vm(exec->vm);
+	kvm_protected_task_put_vm(exec->vm);
 free_exec:
 	kfree(exec->registered_vcpu);
 	kfree(exec);
@@ -298,7 +412,7 @@ static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *cont
 		container_of(context, struct kvm_protected_task, context);
 	int ret;
 
-	ret = kvm_protected_task_create_exec(bprm->mm, state);
+	ret = kvm_protected_task_create_exec(bprm->mm, NULL, state);
 	if (ret)
 		return ret;
 	return protected_task->features & KVM_PROTECTED_TASK_FEATURE_EXEC ?
@@ -309,8 +423,10 @@ static void kvm_protected_task_release_exec_resources(struct kvm_protected_task_
 {
 	kvm_protected_task_unregister_vcpu(exec);
 	kvm_arch_protected_task_cleanup(exec->vcpu, exec->arch_state);
-	kvm_put_kvm(exec->kvm);
-	ida_free(&kvm_protected_task_debug_ids, exec->debug_id);
+	mutex_lock(&exec->kvm->mm->protected_task_vm_lock);
+	list_add(&exec->registered_vcpu->node, &exec->vm->idle_vcpus);
+	mutex_unlock(&exec->kvm->mm->protected_task_vm_lock);
+	kvm_protected_task_put_vm(exec->vm);
 }
 
 static void kvm_protected_task_release_exec(void *state)
@@ -338,7 +454,7 @@ static int kvm_protected_task_clone_exec(struct kvm_protected_task_context *cont
 	struct kvm_protected_task_exec *exec;
 	int ret;
 
-	ret = kvm_protected_task_create_exec(current->mm, (void **)&exec);
+	ret = kvm_protected_task_create_exec(current->mm, NULL, (void **)&exec);
 	if (ret)
 		return ret;
 	ret = kvm_protected_task_finalize_vcpu(exec, regs);
@@ -390,7 +506,8 @@ static int kvm_protected_task_refresh(struct kvm_protected_task_exec *exec,
 	struct kvm_protected_task_exec old_exec;
 	int ret;
 
-	ret = kvm_protected_task_create_exec(current->mm, (void **)&new_exec);
+	ret = kvm_protected_task_create_exec(current->mm, exec->vm,
+					     (void **)&new_exec);
 	if (ret)
 		return ret;
 	ret = kvm_protected_task_finalize_vcpu(new_exec, regs);
@@ -415,7 +532,8 @@ static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
 	kvm_protected_task_vcpu_run_begin(exec);
 	pgtable_gen = atomic64_read(&current->mm->protected_task_pgtable_gen);
 
-	if (unlikely(exec->pgtable_gen != pgtable_gen)) {
+	if (unlikely(exec->pgtable_gen != pgtable_gen ||
+		     READ_ONCE(current->mm->protected_task_vm) != exec->vm)) {
 		ret = kvm_protected_task_refresh(exec, regs);
 		if (ret)
 			goto complete;
