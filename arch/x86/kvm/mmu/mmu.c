@@ -4730,6 +4730,7 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 					     struct kvm_page_fault *fault)
 {
 	unsigned long address = fault->gfn << PAGE_SHIFT;
+	unsigned long huge_start = address & PMD_MASK;
 	struct vm_area_struct *vma;
 	u8 access = ACC_USER_MASK;
 	bool allowed;
@@ -4770,7 +4771,12 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 			  (vma->vm_flags & VM_WRITE)));
 
 		fault->max_access = access;
-		fault->max_level = PG_LEVEL_4K;
+		if (!(vma->vm_flags & VM_EXEC) &&
+		    huge_start >= vma->vm_start &&
+		    vma->vm_end - huge_start >= PMD_SIZE)
+			fault->max_level = PG_LEVEL_2M;
+		else
+			fault->max_level = PG_LEVEL_4K;
 	}
 	mmap_read_unlock(vcpu->kvm->mm);
 
@@ -8100,7 +8106,7 @@ static int kvm_mmu_start_lpage_recovery(struct once *once)
 
 int kvm_mmu_post_init_vm(struct kvm *kvm)
 {
-	/* Protected-task faults are restricted to 4 KiB mappings. */
+	/* Protected tasks do not create executable huge mappings. */
 	if (kvm->protected_task)
 		return 0;
 
