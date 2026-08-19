@@ -635,6 +635,7 @@ unsigned long vm_mmap_protected_task(unsigned long len)
 	const unsigned long flags = MAP_PRIVATE | MAP_ANONYMOUS;
 	const unsigned long prot = PROT_READ | PROT_WRITE;
 	struct mm_struct *mm = current->mm;
+	struct vm_area_struct *vma;
 	unsigned long populate, ret;
 
 	if (!IS_ENABLED(CONFIG_64BIT))
@@ -652,6 +653,16 @@ unsigned long vm_mmap_protected_task(unsigned long len)
 		      VM_KVM_PROTECTED | VM_DONTEXPAND | VM_DONTCOPY |
 		      VM_DONTDUMP,
 		      0, &populate, NULL);
+	if (!IS_ERR_VALUE(ret)) {
+		vma = vma_lookup(mm, ret);
+		VM_BUG_ON(!vma);
+		VM_BUG_ON_VMA(vma->vm_start != ret ||
+			      vma->vm_end != ret + len ||
+			      !(vma->vm_flags & VM_KVM_PROTECTED), vma);
+		vma_start_write(vma);
+		vma_set_flags(vma, VMA_LOCKED_BIT);
+		mm->locked_vm += vma_pages(vma);
+	}
 	mmap_write_unlock(mm);
 
 	return ret;

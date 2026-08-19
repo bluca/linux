@@ -1183,6 +1183,20 @@ folio_within_vma(struct folio *folio, struct vm_area_struct *vma)
  * folio_add_lru_vma() calling mlock_new_folio().
  */
 void mlock_folio(struct folio *folio);
+static inline bool vma_mlocks_folios(const struct vm_area_struct *vma)
+{
+	vm_flags_t flags = vma->vm_flags;
+
+	if (!(flags & VM_LOCKED))
+		return false;
+	if (!(flags & VM_SPECIAL))
+		return true;
+
+	/* Protected-task VMAs are kernel-owned and keep VM_DONTEXPAND. */
+	return (flags & (VM_SPECIAL | VM_KVM_PROTECTED)) ==
+		(VM_DONTEXPAND | VM_KVM_PROTECTED);
+}
+
 static inline void mlock_vma_folio(struct folio *folio,
 				struct vm_area_struct *vma)
 {
@@ -1194,7 +1208,7 @@ static inline void mlock_vma_folio(struct folio *folio,
 	 *    file->f_op->mmap() is using vm_insert_page(s), when VM_LOCKED may
 	 *    still be set while VM_SPECIAL bits are added: so ignore it then.
 	 */
-	if (unlikely((vma->vm_flags & (VM_LOCKED|VM_SPECIAL)) == VM_LOCKED))
+	if (unlikely(vma_mlocks_folios(vma)))
 		mlock_folio(folio);
 }
 
