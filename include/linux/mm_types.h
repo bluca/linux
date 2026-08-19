@@ -10,6 +10,7 @@
 #include <linux/spinlock.h>
 #include <linux/rbtree.h>
 #include <linux/maple_tree.h>
+#include <linux/mutex.h>
 #include <linux/rwsem.h>
 #include <linux/completion.h>
 #include <linux/cpumask.h>
@@ -1306,6 +1307,8 @@ struct mm_struct {
 
 #if IS_ENABLED(CONFIG_KVM)
 		atomic64_t protected_task_pgtable_gen;
+		struct mutex protected_task_image_lock;
+		void *protected_task_arch_image;
 		spinlock_t protected_task_lock;
 		struct list_head protected_task_vcpus;
 		wait_queue_head_t protected_task_wait;

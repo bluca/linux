@@ -327,9 +327,8 @@ static int kvm_protected_task_finalize_vcpu(void *state, struct pt_regs *regs)
 	int ret;
 
 	ret = kvm_arch_protected_task_finalize(exec->vcpu, exec->arch_state,
-					       regs, exec->next_slot++);
-	if (!ret)
-		exec->pgtable_gen = atomic64_read(&current->mm->protected_task_pgtable_gen);
+					       regs, exec->next_slot++,
+					       &exec->pgtable_gen);
 	return ret;
 }
 

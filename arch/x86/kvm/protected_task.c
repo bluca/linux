@@ -6,6 +6,7 @@
 #include <linux/mman.h>
 #include <linux/overflow.h>
 #include <linux/pkeys.h>
+#include <linux/refcount.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
@@ -148,12 +149,23 @@ static const struct kvm_pt_cpuid_classes kvm_pt_cpuid_80000008_ebx = {
 	.baseline = KVM_PT_CPUID_80000008_EBX,
 };
 
-struct kvm_protected_task_x86 {
-	unsigned long pgtable_addr;
-	unsigned long pgtable_size;
-	unsigned long pgtable_used;
+struct kvm_protected_task_x86_image {
+	refcount_t refs;
+	struct mm_struct *mm;
+	u64 pgtable_gen;
+	unsigned long address;
+	unsigned long size;
+	unsigned long used;
 	unsigned long pgd;
 	unsigned long syscall_stub;
+	unsigned long va_limit;
+	bool la57;
+	bool pku;
+	bool shstk;
+};
+
+struct kvm_protected_task_x86 {
+	struct kvm_protected_task_x86_image *image;
 	bool avx;
 	bool avx512;
 	bool pku;
@@ -926,7 +938,7 @@ static int kvm_protected_task_setup_sregs(struct kvm_vcpu *vcpu,
 	sregs.gs.base = x86_gsbase_read_task(current);
 	sregs.cr0 = X86_CR0_PE | X86_CR0_NE | X86_CR0_AM | X86_CR0_PG |
 		(state->shstk ? X86_CR0_WP : 0);
-	sregs.cr3 = state->pgd |
+	sregs.cr3 = state->image->pgd |
 		(state->lam ? mm_lam_cr3_mask(current->mm) : 0);
 	if (test_thread_flag(TIF_NOTSC))
 		cr4 |= X86_CR4_TSD;
@@ -987,7 +999,8 @@ static int kvm_protected_task_setup_msrs(struct kvm_vcpu *vcpu,
 	vcpu_load(vcpu);
 	ret = kvm_msr_write(vcpu, MSR_STAR, star);
 	if (!ret)
-		ret = kvm_msr_write(vcpu, MSR_LSTAR, state->syscall_stub);
+		ret = kvm_msr_write(vcpu, MSR_LSTAR,
+				    state->image->syscall_stub);
 	if (!ret)
 		ret = kvm_msr_write(vcpu, MSR_SYSCALL_MASK, mask);
 	if (!ret)
@@ -1268,103 +1281,197 @@ static int kvm_protected_task_handle_exception(struct kvm_vcpu *vcpu,
 		0 : -EIO;
 }
 
-static int kvm_protected_task_build_page_tables(struct kvm_vcpu *vcpu,
-						struct kvm_protected_task_x86 *state,
-						u32 slot)
+static bool kvm_protected_task_image_matches(
+		const struct kvm_protected_task_x86_image *image,
+		const struct kvm_protected_task_x86 *state, u64 pgtable_gen)
+{
+	return image->pgtable_gen == pgtable_gen &&
+		image->va_limit == state->va_limit &&
+		image->la57 == state->la57 && image->pku == state->pku &&
+		image->shstk == state->shstk;
+}
+
+static int kvm_protected_task_build_image(
+		struct kvm_protected_task_x86 *state, u64 pgtable_gen,
+		struct kvm_protected_task_x86_image **imagep)
 {
 	static const u8 syscall_stub[] = {
 		0xe6, KVM_PT_SYSCALL_PORT, /* out KVM_PT_SYSCALL_PORT, %al */
 		0x0f, 0x0b,              /* ud2 */
 	};
+	struct kvm_protected_task_x86_image *image;
 	struct kvm_protected_task_builder builder;
-	struct kvm_userspace_memory_region2 region = {
-		.slot = slot,
-		.flags = KVM_MEM_READONLY,
-	};
 	unsigned long address, pgd, size, stub_gpa;
 	u64 *stub_page;
 	int ret;
 
+	image = kzalloc_obj(*image);
+	if (!image)
+		return -ENOMEM;
+
 	ret = kvm_protected_task_validate_mm(current->mm, state);
 	if (ret)
-		return ret;
+		goto free_image_state;
 	ret = kvm_protected_task_image_size(current->mm, state, &size);
 	if (ret)
-		return ret;
+		goto free_image_state;
 
 	address = vm_mmap_protected_task(size);
-	if (IS_ERR_VALUE(address))
-		return address;
-	state->pgtable_addr = address;
-	state->pgtable_size = size;
+	if (IS_ERR_VALUE(address)) {
+		ret = address;
+		goto free_image_state;
+	}
+	image->mm = current->mm;
+	image->address = address;
+	image->size = size;
 	if (size > state->va_limit ||
-	    state->pgtable_addr > state->va_limit - size) {
+	    image->address > state->va_limit - size) {
 		ret = -EOPNOTSUPP;
-		goto out;
+		goto unmap_image;
 	}
 
 	builder.image = vzalloc(size);
 	if (!builder.image) {
 		ret = -ENOMEM;
-		goto out;
+		goto unmap_image;
 	}
-	builder.base = state->pgtable_addr;
+	builder.base = image->address;
 	builder.size = size;
 	builder.used = 0;
 	builder.va_limit = state->va_limit;
 	builder.la57 = state->la57;
 	if (!kvm_protected_task_alloc_table(&builder, &pgd)) {
 		ret = -ENOSPC;
-		goto free_image;
+		goto free_builder;
 	}
 
 	ret = kvm_protected_task_map_mm(&builder, current->mm,
-					state->pgtable_addr,
-					state->pgtable_addr + size);
+					image->address,
+					image->address + size);
 	if (ret)
-		goto free_image;
+		goto free_builder;
 	stub_page = kvm_protected_task_alloc_table(&builder, &stub_gpa);
 	if (!stub_page) {
 		ret = -ENOSPC;
-		goto free_image;
+		goto free_builder;
 	}
 	memcpy(stub_page, syscall_stub, sizeof(syscall_stub));
 	ret = kvm_protected_task_map_page(&builder, stub_gpa, stub_gpa,
 					  PAGE_SHIFT, VM_READ | VM_EXEC, 0);
 	if (ret)
-		goto free_image;
-	if (copy_to_user((void __user *)state->pgtable_addr, builder.image,
+		goto free_builder;
+	if (copy_to_user((void __user *)image->address, builder.image,
 			 builder.used)) {
 		ret = -EFAULT;
-		goto free_image;
+		goto free_builder;
 	}
-	state->pgtable_used = builder.used;
-	state->pgd = pgd;
-	state->syscall_stub = stub_gpa;
+	image->used = builder.used;
+	image->pgd = pgd;
+	image->syscall_stub = stub_gpa;
 	if (builder.used < size) {
-		ret = vm_unlock_protected_task_tail(state->pgtable_addr, size,
+		ret = vm_unlock_protected_task_tail(image->address, size,
 						    builder.used);
 		if (ret)
-			goto free_image;
+			goto free_builder;
 	}
 
 	/* Only the protected memslot may force-access the hidden image. */
-	ret = vm_mprotect(state->pgtable_addr, size, PROT_NONE);
+	ret = vm_mprotect(image->address, size, PROT_NONE);
 	if (ret)
-		goto free_image;
-	ret = do_mseal(state->pgtable_addr, size, 0);
+		goto free_builder;
+	ret = do_mseal(image->address, size, 0);
 	if (ret)
-		goto free_image;
+		goto free_builder;
 
-	region.guest_phys_addr = state->pgtable_addr;
-	region.userspace_addr = state->pgtable_addr;
-	region.memory_size = builder.used;
-	ret = kvm_set_protected_task_memory_region(vcpu->kvm, &region);
+	image->pgtable_gen = pgtable_gen;
+	image->va_limit = state->va_limit;
+	image->la57 = state->la57;
+	image->pku = state->pku;
+	image->shstk = state->shstk;
+	refcount_set(&image->refs, 1);
+	*imagep = image;
+	ret = 0;
 
-free_image:
+free_builder:
 	vfree(builder.image);
-out:
+	if (!ret)
+		return 0;
+unmap_image:
+	WARN_ON_ONCE(vm_munmap_protected_task(image->address, image->size));
+free_image_state:
+	kfree(image);
 	return ret;
+}
+
+static int kvm_protected_task_put_image(struct kvm_protected_task_x86 *state)
+{
+	struct kvm_protected_task_x86_image *image = state->image;
+	struct mm_struct *mm;
+	int ret = 0;
+
+	if (!image)
+		return 0;
+	mm = image->mm;
+	if (WARN_ON_ONCE(current->mm != mm))
+		return -EIO;
+
+	state->image = NULL;
+	mutex_lock(&mm->protected_task_image_lock);
+	if (refcount_dec_and_test(&image->refs)) {
+		if (mm->protected_task_arch_image == image)
+			mm->protected_task_arch_image = NULL;
+		mutex_unlock(&mm->protected_task_image_lock);
+		ret = vm_munmap_protected_task(image->address, image->size);
+		kfree(image);
+		return ret;
+	}
+	mutex_unlock(&mm->protected_task_image_lock);
+	return 0;
+}
+
+static int kvm_protected_task_get_image(struct kvm_vcpu *vcpu,
+					struct kvm_protected_task_x86 *state,
+					u32 slot, u64 *pgtable_gen)
+{
+	struct mm_struct *mm = vcpu->kvm->mm;
+	struct kvm_protected_task_x86_image *image;
+	struct kvm_userspace_memory_region2 region = {
+		.slot = slot,
+		.flags = KVM_MEM_READONLY,
+	};
+	u64 generation;
+	int ret = 0;
+
+	if (WARN_ON_ONCE(current->mm != mm))
+		return -EIO;
+	generation = atomic64_read(&mm->protected_task_pgtable_gen);
+	mutex_lock(&mm->protected_task_image_lock);
+	image = mm->protected_task_arch_image;
+	if (image && image->pgtable_gen == generation) {
+		if (!kvm_protected_task_image_matches(image, state, generation))
+			ret = -EIO;
+		else
+			refcount_inc(&image->refs);
+	} else {
+		ret = kvm_protected_task_build_image(state, generation, &image);
+		if (!ret)
+			mm->protected_task_arch_image = image;
+	}
+	mutex_unlock(&mm->protected_task_image_lock);
+	if (ret)
+		return ret;
+
+	state->image = image;
+	region.guest_phys_addr = image->address;
+	region.userspace_addr = image->address;
+	region.memory_size = image->used;
+	ret = kvm_set_protected_task_memory_region(vcpu->kvm, &region);
+	if (ret) {
+		WARN_ON_ONCE(kvm_protected_task_put_image(state));
+		return ret;
+	}
+	*pgtable_gen = image->pgtable_gen;
+	return 0;
 }
 
 int kvm_arch_protected_task_prepare(struct kvm_vcpu *vcpu, void **statep)
@@ -1451,7 +1558,8 @@ unsigned long kvm_arch_protected_task_elf_hwcap(struct kvm_vcpu *vcpu,
 }
 
 int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *arch_state,
-				     struct pt_regs *regs, u32 slot)
+				     struct pt_regs *regs, u32 slot,
+				     u64 *pgtable_gen)
 {
 	struct kvm_protected_task_x86 *state = arch_state;
 	int ret;
@@ -1462,7 +1570,7 @@ int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *arch_state,
 	if (WARN_ON_ONCE(current->mm != vcpu->kvm->mm))
 		return -EIO;
 
-	ret = kvm_protected_task_build_page_tables(vcpu, state, slot);
+	ret = kvm_protected_task_get_image(vcpu, state, slot, pgtable_gen);
 	if (ret)
 		return ret;
 	ret = kvm_protected_task_setup_sregs(vcpu, state);
@@ -1575,7 +1683,7 @@ void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *arch_state)
 	if (!state)
 		return;
 	WARN_ON_ONCE(kvm_protected_task_deactivate_fpu(vcpu, state));
-	if (state->pgtable_addr && current->mm == vcpu->kvm->mm)
+	if (state->image && current->mm == vcpu->kvm->mm)
 		WARN_ON_ONCE(kvm_arch_protected_task_deactivate(vcpu, state));
 	kfree(state);
 }
@@ -1585,15 +1693,10 @@ int kvm_arch_protected_task_deactivate(struct kvm_vcpu *vcpu, void *arch_state)
 	struct kvm_protected_task_x86 *state = arch_state;
 	int ret;
 
-	if (!state->pgtable_addr)
-		return 0;
 	if (WARN_ON_ONCE(current->mm != vcpu->kvm->mm))
 		return -EIO;
 
-	ret = vm_munmap_protected_task(state->pgtable_addr,
-					       state->pgtable_size);
-	if (!ret)
-		state->pgtable_addr = 0;
+	ret = kvm_protected_task_put_image(state);
 	return ret;
 }
 
@@ -1632,7 +1735,8 @@ bool kvm_arch_protected_task_needs_pgtable_update(struct kvm_vcpu *vcpu,
 }
 
 int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *state,
-				     struct pt_regs *regs, u32 slot)
+				     struct pt_regs *regs, u32 slot,
+				     u64 *pgtable_gen)
 {
 	return -EOPNOTSUPP;
 }

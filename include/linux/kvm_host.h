@@ -1826,7 +1826,8 @@ unsigned long kvm_arch_protected_task_elf_hwcap(struct kvm_vcpu *vcpu,
 						unsigned int type,
 						unsigned long value);
 int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu,
-				     void *state, struct pt_regs *regs, u32 slot);
+				     void *state, struct pt_regs *regs, u32 slot,
+				     u64 *pgtable_gen);
 int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,
 				struct pt_regs *regs, u32 *next_slot);
 int kvm_arch_protected_task_deactivate(struct kvm_vcpu *vcpu, void *state);

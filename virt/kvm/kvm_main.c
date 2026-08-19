@@ -1114,7 +1114,7 @@ bool __weak kvm_arch_protected_task_needs_pgtable_update(struct kvm_vcpu *vcpu,
 
 int __weak kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu,
 					    void *state, struct pt_regs *regs,
-					    u32 slot)
+					    u32 slot, u64 *pgtable_gen)
 {
 	return -EOPNOTSUPP;
 }
