@@ -1139,21 +1139,54 @@ static size_t get_protected_kvm_vcpus(const char *vm_name)
 	return n;
 }
 
+static bool wait_for_protected_kvm_vcpus(pid_t pid, size_t min_vcpus,
+					 size_t max_vcpus,
+					 char vm_names[][NAME_MAX + 1],
+					 size_t max_names)
+{
+	for (int i = 0; i < 1000; i++) {
+		size_t nr_vms, nr_vcpus;
+
+		nr_vms = get_protected_kvm_vms(pid, vm_names, max_names);
+		if (nr_vms == 1) {
+			nr_vcpus = get_protected_kvm_vcpus(vm_names[0]);
+			if (nr_vcpus >= min_vcpus && nr_vcpus <= max_vcpus)
+				return true;
+		}
+		usleep(1000);
+	}
+	return false;
+}
+
 static void *run_vcpu_reuse_thread(void *arg)
 {
 	return (void *)(uintptr_t)(syscall(SYS_gettid) <= 0);
 }
 
+static void *run_vcpu_high_water_thread(void *arg)
+{
+	if (syscall(SYS_gettid) <= 0)
+		return (void *)1;
+	barrier_wait();
+	barrier_wait();
+	return NULL;
+}
+
 static int run_vcpu_reuse_target(void)
 {
+	enum {
+		NR_SEQUENTIAL_THREADS = 5000,
+		NR_CONCURRENT_THREADS = 64,
+		MAX_IDLE_VCPUS = 16,
+	};
 	char vm_names[2][NAME_MAX + 1];
-	const int nr_threads = 1100;
+	pthread_t threads[NR_CONCURRENT_THREADS];
 	size_t nr_vms, nr_vcpus;
 	void *thread_result;
 	pthread_t thread;
 	int i, ret;
 
-	for (i = 0; i < nr_threads; i++) {
+	for (i = 0; i < NR_SEQUENTIAL_THREADS; i++) {
 		ret = pthread_create(&thread, NULL, run_vcpu_reuse_thread, NULL);
 		if (ret)
 			return 10;
@@ -1162,13 +1195,42 @@ static int run_vcpu_reuse_target(void)
 			return 11;
 	}
 
+	if (!wait_for_protected_kvm_vcpus(getpid(), 1, MAX_IDLE_VCPUS + 1,
+					 vm_names, ARRAY_SIZE(vm_names)))
+		return 12;
+
+	ret = pthread_barrier_init(&thread_barrier, NULL,
+				   NR_CONCURRENT_THREADS + 1);
+	if (ret)
+		return 14;
+	for (i = 0; i < NR_CONCURRENT_THREADS; i++) {
+		ret = pthread_create(&threads[i], NULL,
+				     run_vcpu_high_water_thread, NULL);
+		if (ret)
+			return 15;
+	}
+	barrier_wait();
 	nr_vms = get_protected_kvm_vms(getpid(), vm_names,
 					ARRAY_SIZE(vm_names));
 	if (nr_vms != 1)
-		return 12;
+		return 16;
 	nr_vcpus = get_protected_kvm_vcpus(vm_names[0]);
-	if (nr_vcpus != 2)
-		return 13;
+	if (nr_vcpus != NR_CONCURRENT_THREADS + 1)
+		return 17;
+	barrier_wait();
+	for (i = 0; i < NR_CONCURRENT_THREADS; i++) {
+		ret = pthread_join(threads[i], &thread_result);
+		if (ret || thread_result)
+			return 18;
+	}
+	ret = pthread_barrier_destroy(&thread_barrier);
+	if (ret)
+		return 19;
+	if (syscall(SYS_gettid) <= 0)
+		return 20;
+	if (!wait_for_protected_kvm_vcpus(getpid(), 1, 1, vm_names,
+					 ARRAY_SIZE(vm_names)))
+		return 21;
 	return 0;
 }
 
