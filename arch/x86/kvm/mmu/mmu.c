@@ -602,33 +602,44 @@ static void walk_shadow_page_lockless_end(struct kvm_vcpu *vcpu)
 	}
 }
 
+static int mmu_topup_memory_cache(struct kvm_vcpu *vcpu,
+				  struct kvm_mmu_memory_cache *cache, int min)
+{
+	if (vcpu->kvm->protected_task)
+		return __kvm_mmu_topup_memory_cache(cache, min, min);
+
+	return kvm_mmu_topup_memory_cache(cache, min);
+}
+
 static int mmu_topup_memory_caches(struct kvm_vcpu *vcpu, bool maybe_indirect)
 {
 	int r;
 
 	/* 1 rmap, 1 parent PTE per level, and the prefetched rmaps. */
-	r = kvm_mmu_topup_memory_cache(&vcpu->arch.mmu_pte_list_desc_cache,
-				       1 + PT64_ROOT_MAX_LEVEL + PTE_PREFETCH_NUM);
+	r = mmu_topup_memory_cache(vcpu, &vcpu->arch.mmu_pte_list_desc_cache,
+				   1 + PT64_ROOT_MAX_LEVEL + PTE_PREFETCH_NUM);
 	if (r)
 		return r;
 	if (kvm_has_mirrored_tdp(vcpu->kvm)) {
-		r = kvm_mmu_topup_memory_cache(&vcpu->arch.mmu_external_spt_cache,
-					       PT64_ROOT_MAX_LEVEL);
+		r = mmu_topup_memory_cache(vcpu,
+					   &vcpu->arch.mmu_external_spt_cache,
+					   PT64_ROOT_MAX_LEVEL);
 		if (r)
 			return r;
 	}
-	r = kvm_mmu_topup_memory_cache(&vcpu->arch.mmu_shadow_page_cache,
-				       PT64_ROOT_MAX_LEVEL);
+	r = mmu_topup_memory_cache(vcpu, &vcpu->arch.mmu_shadow_page_cache,
+				   PT64_ROOT_MAX_LEVEL);
 	if (r)
 		return r;
 	if (maybe_indirect) {
-		r = kvm_mmu_topup_memory_cache(&vcpu->arch.mmu_shadowed_info_cache,
-					       PT64_ROOT_MAX_LEVEL);
+		r = mmu_topup_memory_cache(vcpu,
+					   &vcpu->arch.mmu_shadowed_info_cache,
+					   PT64_ROOT_MAX_LEVEL);
 		if (r)
 			return r;
 	}
-	return kvm_mmu_topup_memory_cache(&vcpu->arch.mmu_page_header_cache,
-					  PT64_ROOT_MAX_LEVEL);
+	return mmu_topup_memory_cache(vcpu, &vcpu->arch.mmu_page_header_cache,
+				      PT64_ROOT_MAX_LEVEL);
 }
 
 static void mmu_free_memory_caches(struct kvm_vcpu *vcpu)

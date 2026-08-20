@@ -4346,7 +4346,8 @@ static void kvm_create_vcpu_debugfs(struct kvm_vcpu *vcpu)
 	debugfs_create_file("pid", 0444, debugfs_dentry, vcpu,
 			    &vcpu_get_pid_fops);
 
-	kvm_arch_create_vcpu_debugfs(vcpu, debugfs_dentry);
+	if (!vcpu->kvm->protected_task)
+		kvm_arch_create_vcpu_debugfs(vcpu, debugfs_dentry);
 }
 #endif
 

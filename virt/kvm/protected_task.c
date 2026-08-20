@@ -28,10 +28,13 @@ struct kvm_protected_task_vcpu {
 	struct kvm_vcpu *vcpu;
 };
 
+#define KVM_PROTECTED_TASK_IDLE_VCPU_LIMIT 16U
+
 struct kvm_protected_task_vm {
 	refcount_t refs;
 	struct kvm *kvm;
 	struct list_head idle_vcpus;
+	unsigned int nr_idle_vcpus;
 	u64 pgtable_gen;
 	unsigned long next_vcpu_id;
 	int debug_id;
@@ -72,6 +75,17 @@ static void kvm_protected_task_unregister_vcpu(struct kvm_protected_task_exec *e
 
 	spin_lock(&mm->protected_task_lock);
 	list_del_init(&exec->registered_vcpu->node);
+	spin_unlock(&mm->protected_task_lock);
+}
+
+static void kvm_protected_task_kick_vcpus(struct mm_struct *mm)
+{
+	struct kvm_protected_task_vcpu *registered_vcpu;
+
+	spin_lock(&mm->protected_task_lock);
+	list_for_each_entry(registered_vcpu, &mm->protected_task_vcpus, node)
+		kvm_make_request_and_kick(KVM_REQ_PROTECTED_TASK_EXIT,
+					  registered_vcpu->vcpu);
 	spin_unlock(&mm->protected_task_lock);
 }
 
@@ -241,19 +255,9 @@ free_ranges:
 	return ret;
 }
 
-static void kvm_protected_task_put_vm(struct kvm_protected_task_vm *vm)
+static void kvm_protected_task_free_vm(struct kvm_protected_task_vm *vm)
 {
 	struct kvm_protected_task_vcpu *registered_vcpu, *tmp;
-	struct mm_struct *mm = vm->kvm->mm;
-
-	mutex_lock(&mm->protected_task_vm_lock);
-	if (!refcount_dec_and_test(&vm->refs)) {
-		mutex_unlock(&mm->protected_task_vm_lock);
-		return;
-	}
-	if (mm->protected_task_vm == vm)
-		WRITE_ONCE(mm->protected_task_vm, NULL);
-	mutex_unlock(&mm->protected_task_vm_lock);
 
 	list_for_each_entry_safe(registered_vcpu, tmp, &vm->idle_vcpus, node) {
 		list_del(&registered_vcpu->node);
@@ -262,6 +266,30 @@ static void kvm_protected_task_put_vm(struct kvm_protected_task_vm *vm)
 	kvm_put_kvm(vm->kvm);
 	ida_free(&kvm_protected_task_debug_ids, vm->debug_id);
 	kfree(vm);
+}
+
+static bool kvm_protected_task_put_vm_locked(struct kvm_protected_task_vm *vm)
+{
+	struct mm_struct *mm = vm->kvm->mm;
+
+	lockdep_assert_held(&mm->protected_task_vm_lock);
+	if (!refcount_dec_and_test(&vm->refs))
+		return false;
+	if (mm->protected_task_vm == vm)
+		WRITE_ONCE(mm->protected_task_vm, NULL);
+	return true;
+}
+
+static void kvm_protected_task_put_vm(struct kvm_protected_task_vm *vm)
+{
+	struct mm_struct *mm = vm->kvm->mm;
+	bool free_vm;
+
+	mutex_lock(&mm->protected_task_vm_lock);
+	free_vm = kvm_protected_task_put_vm_locked(vm);
+	mutex_unlock(&mm->protected_task_vm_lock);
+	if (free_vm)
+		kvm_protected_task_free_vm(vm);
 }
 
 static void kvm_protected_task_retire_vm(struct kvm_protected_task_vm *vm)
@@ -329,6 +357,7 @@ found:
 						     struct kvm_protected_task_vcpu,
 						     node);
 		list_del_init(&(*idle_vcpu)->node);
+		vm->nr_idle_vcpus--;
 	} else
 		*vcpu_id = vm->next_vcpu_id++;
 	mutex_unlock(&mm->protected_task_vm_lock);
@@ -387,7 +416,7 @@ static int kvm_protected_task_create_exec(
 		exec->registered_vcpu->vcpu = exec->vcpu;
 	}
 
-	ret = kvm_arch_protected_task_prepare(exec->vcpu, idle_vcpu,
+	ret = kvm_arch_protected_task_prepare(exec->vcpu, !!idle_vcpu,
 					      &exec->arch_state);
 	if (ret)
 		goto put_vm;
@@ -421,12 +450,26 @@ static int kvm_protected_task_stage_exec(struct kvm_protected_task_context *cont
 
 static void kvm_protected_task_release_exec_resources(struct kvm_protected_task_exec *exec)
 {
+	struct mm_struct *mm = exec->kvm->mm;
+	bool free_vm, retire_vm = false;
+
 	kvm_protected_task_unregister_vcpu(exec);
 	kvm_arch_protected_task_cleanup(exec->vcpu, exec->arch_state);
-	mutex_lock(&exec->kvm->mm->protected_task_vm_lock);
+	mutex_lock(&mm->protected_task_vm_lock);
 	list_add(&exec->registered_vcpu->node, &exec->vm->idle_vcpus);
-	mutex_unlock(&exec->kvm->mm->protected_task_vm_lock);
-	kvm_protected_task_put_vm(exec->vm);
+	exec->vm->nr_idle_vcpus++;
+	free_vm = kvm_protected_task_put_vm_locked(exec->vm);
+	if (!free_vm && mm->protected_task_vm == exec->vm &&
+	    exec->vm->nr_idle_vcpus > KVM_PROTECTED_TASK_IDLE_VCPU_LIMIT &&
+	    refcount_read(&exec->vm->refs) == 1) {
+		WRITE_ONCE(mm->protected_task_vm, NULL);
+		retire_vm = true;
+	}
+	mutex_unlock(&mm->protected_task_vm_lock);
+	if (retire_vm)
+		kvm_protected_task_kick_vcpus(mm);
+	if (free_vm)
+		kvm_protected_task_free_vm(exec->vm);
 }
 
 static void kvm_protected_task_release_exec(void *state)
