@@ -13542,7 +13542,7 @@ static int kvm_alloc_memslot_metadata(struct kvm *kvm,
 				      struct kvm_memory_slot *slot)
 {
 	unsigned long npages = slot->npages;
-	int i, r;
+	int level, r;
 
 	/*
 	 * Clear out the previous array pointers for the KVM_MR_MOVE case.  The
@@ -13557,11 +13557,11 @@ static int kvm_alloc_memslot_metadata(struct kvm *kvm,
 			return r;
 	}
 
-	for (i = 1; i < KVM_NR_PAGE_SIZES; ++i) {
+	for (level = PG_LEVEL_2M;
+	     level <= kvm_mmu_max_hugepage_level(kvm); level++) {
 		struct kvm_lpage_info *linfo;
 		unsigned long ugfn;
 		int lpages;
-		int level = i + 1;
 
 		lpages = __kvm_mmu_slot_lpages(slot, npages, level);
 
@@ -13569,7 +13569,7 @@ static int kvm_alloc_memslot_metadata(struct kvm *kvm,
 		if (!linfo)
 			goto out_free;
 
-		slot->arch.lpage_info[i - 1] = linfo;
+		slot->arch.lpage_info[level - PG_LEVEL_2M] = linfo;
 
 		if (slot->base_gfn & (KVM_PAGES_PER_HPAGE(level) - 1))
 			linfo[0].disallow_lpage = 1;
@@ -13600,9 +13600,9 @@ static int kvm_alloc_memslot_metadata(struct kvm *kvm,
 out_free:
 	memslot_rmap_free(slot);
 
-	for (i = 1; i < KVM_NR_PAGE_SIZES; ++i) {
-		vfree(slot->arch.lpage_info[i - 1]);
-		slot->arch.lpage_info[i - 1] = NULL;
+	for (level = PG_LEVEL_2M; level <= KVM_MAX_HUGEPAGE_LEVEL; level++) {
+		vfree(slot->arch.lpage_info[level - PG_LEVEL_2M]);
+		slot->arch.lpage_info[level - PG_LEVEL_2M] = NULL;
 	}
 	return -ENOMEM;
 }

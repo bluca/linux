@@ -274,6 +274,11 @@ static inline bool kvm_memslots_have_rmaps(struct kvm *kvm)
 	return !tdp_mmu_enabled || kvm_shadow_root_allocated(kvm);
 }
 
+static inline int kvm_mmu_max_hugepage_level(struct kvm *kvm)
+{
+	return kvm->protected_task ? PG_LEVEL_2M : KVM_MAX_HUGEPAGE_LEVEL;
+}
+
 static inline gfn_t gfn_to_index(gfn_t gfn, gfn_t base_gfn, int level)
 {
 	/* KVM_HPAGE_GFN_SHIFT(PG_LEVEL_4K) must be 0. */

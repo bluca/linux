@@ -742,6 +742,8 @@ static bool kvm_gfn_is_lpage_allowed(struct kvm *kvm,
 	const struct kvm_memory_slot *other_slot;
 
 	BUILD_BUG_ON(KVM_MAX_NR_ADDRESS_SPACES > 2);
+	if (level > kvm_mmu_max_hugepage_level(kvm))
+		return false;
 
 	if (lpage_info_slot(gfn, slot, level)->disallow_lpage)
 		return false;
@@ -770,6 +772,8 @@ static void update_gfn_disallow_lpage_count(const struct kvm_memory_slot *slot,
 	int old, i;
 
 	for (i = PG_LEVEL_2M; i <= KVM_MAX_HUGEPAGE_LEVEL; ++i) {
+		if (!slot->arch.lpage_info[i - PG_LEVEL_2M])
+			break;
 		linfo = lpage_info_slot(gfn, slot, i);
 
 		old = linfo->disallow_lpage;
@@ -3429,7 +3433,8 @@ int kvm_mmu_max_mapping_level(struct kvm *kvm, struct kvm_page_fault *fault,
 		is_private = kvm_mem_is_private(kvm, gfn);
 	}
 
-	max_level = min(max_level, max_huge_page_level);
+	max_level = min3(max_level, max_huge_page_level,
+			 kvm_mmu_max_hugepage_level(kvm));
 	for ( ; max_level > PG_LEVEL_4K; max_level--) {
 		linfo = lpage_info_slot(gfn, slot, max_level);
 		if (!linfo->disallow_lpage)
