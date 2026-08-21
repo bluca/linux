@@ -1985,6 +1985,7 @@ int kvm_vcpu_set_supported_cpuid(struct kvm_vcpu *vcpu)
 					 KVM_MAX_CPUID_ENTRIES),
 		.maxnent = KVM_MAX_CPUID_ENTRIES,
 	};
+	struct kvm_cpuid_entry2 *entries;
 	int i, ret;
 
 	if (!array.entries)
@@ -1996,6 +1997,15 @@ int kvm_vcpu_set_supported_cpuid(struct kvm_vcpu *vcpu)
 		if (ret)
 			goto free_entries;
 	}
+
+	entries = kmemdup_array(array.entries, array.nent, sizeof(*entries),
+				GFP_KERNEL);
+	if (!entries) {
+		ret = -ENOMEM;
+		goto free_entries;
+	}
+	kvfree(array.entries);
+	array.entries = entries;
 
 	ret = kvm_set_cpuid(vcpu, array.entries, array.nent);
 	if (!ret)
