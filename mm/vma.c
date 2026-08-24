@@ -2506,14 +2506,8 @@ static int __mmap_new_file_vma(struct mmap_state *map,
 
 	error = mmap_file(vma->vm_file, vma);
 	if (error) {
-		UNMAP_STATE(unmap, vmi, vma, vma->vm_start, vma->vm_end,
-			    map->prev, map->next);
 		fput(vma->vm_file);
 		vma->vm_file = NULL;
-
-		vma_iter_set(vmi, vma->vm_end);
-		/* Undo any partial mapping done by a device driver. */
-		unmap_region(&unmap);
 		return error;
 	}
 
@@ -2575,6 +2569,9 @@ static int __mmap_new_vma(struct mmap_state *map, struct vm_area_struct **vmap,
 		error = shmem_zero_setup(vma);
 	else
 		vma_set_anonymous(vma);
+
+	if (!error && map_deny_write_exec(&map->vma_flags, &vma->flags))
+		error = -EACCES;
 
 	if (error)
 		goto free_iter_vma;
@@ -2850,14 +2847,6 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 	const vma_flags_t vma_flags = legacy_to_vma_flags(vm_flags);
 
 	mmap_assert_write_locked(current->mm);
-
-	/* Check to see if MDWE is applicable. */
-	if (map_deny_write_exec(&vma_flags, &vma_flags))
-		return -EACCES;
-
-	/* Allow architectures to sanity-check the vm_flags. */
-	if (!arch_validate_flags(vm_flags))
-		return -EINVAL;
 
 	/* Map writable and ensure this isn't a sealed memfd. */
 	if (file && is_shared_maywrite(&vma_flags)) {
