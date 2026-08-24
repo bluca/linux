@@ -1114,8 +1114,7 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 	spin_lock_init(&mm->protected_task_lock);
 	INIT_LIST_HEAD(&mm->protected_task_vcpus);
 	init_waitqueue_head(&mm->protected_task_wait);
-	mm->protected_task_run_count = 0;
-	mm->protected_task_quiescing = false;
+	atomic_set(&mm->protected_task_run_state, 0);
 #endif
 	RCU_INIT_POINTER(mm->exe_file, NULL);
 	mmu_notifier_subscriptions_init(mm);

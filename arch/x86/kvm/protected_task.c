@@ -9,6 +9,7 @@
 #include <linux/refcount.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
+#include <linux/thread_info.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 
@@ -41,7 +42,6 @@
 #define KVM_PT_PML4_SHIFT	39
 #define KVM_PT_PML5_SHIFT	48
 #define KVM_PT_NONLEAF_FLAGS	(_PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_ACCESSED)
-#define KVM_PT_SYSCALL_PORT	0xec
 #define KVM_PT_CPUID_1_ECX_BASELINE (BIT(0) | BIT(1) | BIT(9) | BIT(19) | \
 				     BIT(20) | BIT(22) | BIT(23) | BIT(25) | BIT(30))
 #define KVM_PT_CPUID_1_ECX_XSAVE BIT(26)
@@ -175,12 +175,25 @@ struct kvm_protected_task_x86 {
 	bool amx;
 	bool avx10;
 	bool fpu_active;
+	bool sregs_valid;
+	bool task_msrs_valid;
+	bool debugregs_valid;
+	bool fast_syscall_return;
 	u8 avx10_version;
 	u8 avx10_max_subleaf;
 	u8 amx_max_subleaf;
 	u32 avx10_1_ecx;
 	u32 amx_1e_1_eax;
 	unsigned long va_limit;
+	unsigned long fsbase;
+	unsigned long gsbase;
+	unsigned long debugreg[HBP_NUM];
+	unsigned long dr7;
+	u64 cr3;
+	u64 cr4;
+	u64 misc_features;
+	u64 spec_ctrl;
+	u64 virt_spec_ctrl;
 	unsigned int static_user_size;
 	unsigned int dynamic_user_size;
 };
@@ -920,28 +933,43 @@ static void kvm_protected_task_set_data_segment(struct kvm_segment *segment)
 	segment->g = 1;
 }
 
+void kvm_arch_protected_task_prepare_run(struct kvm_vcpu *vcpu)
+{
+	struct kvm_segment segment;
+
+	if (vcpu->arch.protected_task_fast_return) {
+		vcpu->arch.emulate_regs_need_sync_from_vcpu = true;
+		vcpu->arch.emulate_regs_need_sync_to_vcpu = false;
+		kvm_rax_write_raw(vcpu, vcpu->arch.protected_task_return_rax);
+		kvm_rip_write(vcpu, vcpu->arch.protected_task_return_rip);
+		kvm_set_rflags(vcpu, vcpu->arch.protected_task_return_rflags |
+			       X86_EFLAGS_FIXED);
+		vcpu->arch.exception.pending = false;
+		vcpu->arch.exception_vmexit.pending = false;
+		vcpu->arch.protected_task_fast_return = false;
+	}
+
+	kvm_protected_task_set_code_segment(&segment);
+	kvm_set_segment(vcpu, &segment, VCPU_SREG_CS);
+	kvm_protected_task_set_data_segment(&segment);
+	kvm_set_segment(vcpu, &segment, VCPU_SREG_SS);
+}
+
 static int kvm_protected_task_setup_sregs(struct kvm_vcpu *vcpu,
 					  struct kvm_protected_task_x86 *state)
 {
 	struct kvm_sregs sregs;
+	unsigned long fsbase, gsbase;
+	u64 cr3;
 	u64 cr4 = X86_CR4_PAE | X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT;
 	int ret;
 
-	ret = kvm_arch_vcpu_ioctl_get_sregs(vcpu, &sregs);
-	if (ret)
-		return ret;
+	if (state->sregs_valid)
+		return 0;
 
-	kvm_protected_task_set_code_segment(&sregs.cs);
-	kvm_protected_task_set_data_segment(&sregs.ds);
-	kvm_protected_task_set_data_segment(&sregs.es);
-	kvm_protected_task_set_data_segment(&sregs.fs);
-	kvm_protected_task_set_data_segment(&sregs.gs);
-	kvm_protected_task_set_data_segment(&sregs.ss);
-	sregs.fs.base = x86_fsbase_read_task(current);
-	sregs.gs.base = x86_gsbase_read_task(current);
-	sregs.cr0 = X86_CR0_PE | X86_CR0_NE | X86_CR0_AM | X86_CR0_PG |
-		(state->shstk ? X86_CR0_WP : 0);
-	sregs.cr3 = state->image->pgd |
+	fsbase = x86_fsbase_read_task(current);
+	gsbase = x86_gsbase_read_task(current);
+	cr3 = state->image->pgd |
 		(state->lam ? mm_lam_cr3_mask(current->mm) : 0);
 	if (test_thread_flag(TIF_NOTSC))
 		cr4 |= X86_CR4_TSD;
@@ -953,20 +981,47 @@ static int kvm_protected_task_setup_sregs(struct kvm_vcpu *vcpu,
 		cr4 |= X86_CR4_CET;
 	if (state->la57)
 		cr4 |= X86_CR4_LA57;
+
+	ret = kvm_arch_vcpu_ioctl_get_sregs(vcpu, &sregs);
+	if (ret)
+		return ret;
+
+	kvm_protected_task_set_code_segment(&sregs.cs);
+	kvm_protected_task_set_data_segment(&sregs.ds);
+	kvm_protected_task_set_data_segment(&sregs.es);
+	kvm_protected_task_set_data_segment(&sregs.fs);
+	kvm_protected_task_set_data_segment(&sregs.gs);
+	kvm_protected_task_set_data_segment(&sregs.ss);
+	sregs.fs.base = fsbase;
+	sregs.gs.base = gsbase;
+	sregs.cr0 = X86_CR0_PE | X86_CR0_NE | X86_CR0_AM | X86_CR0_PG |
+		(state->shstk ? X86_CR0_WP : 0);
+	sregs.cr3 = cr3;
 	sregs.cr4 = cr4;
 	sregs.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NX;
 
 	ret = kvm_arch_vcpu_ioctl_set_sregs(vcpu, &sregs);
-	if (ret || !(state->avx || state->pku || state->shstk || state->amx))
+	if (ret)
 		return ret;
-	return __kvm_set_xcr(vcpu, XCR_XFEATURE_ENABLED_MASK,
-				 kvm_protected_task_xcr0(state)) ? -EINVAL : 0;
+	if ((state->avx || state->pku || state->shstk || state->amx) &&
+	    __kvm_set_xcr(vcpu, XCR_XFEATURE_ENABLED_MASK,
+			  kvm_protected_task_xcr0(state)))
+		return -EINVAL;
+
+	state->fsbase = fsbase;
+	state->gsbase = gsbase;
+	state->cr3 = cr3;
+	state->cr4 = cr4;
+	state->sregs_valid = true;
+	return 0;
 }
 
 static int kvm_protected_task_setup_regs(struct kvm_vcpu *vcpu,
 					 struct pt_regs *regs)
 {
-	struct kvm_regs kvm_regs = {
+	struct kvm_regs *kvm_regs = &vcpu->run->s.regs.regs;
+
+	*kvm_regs = (struct kvm_regs) {
 		.rax = regs->ax,
 		.rbx = regs->bx,
 		.rcx = regs->cx,
@@ -986,8 +1041,10 @@ static int kvm_protected_task_setup_regs(struct kvm_vcpu *vcpu,
 		.rip = regs->ip,
 		.rflags = regs->flags,
 	};
-
-	return kvm_arch_vcpu_ioctl_set_regs(vcpu, &kvm_regs);
+	vcpu->arch.protected_task_fast_return = false;
+	vcpu->run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+	vcpu->run->kvm_valid_regs |= KVM_SYNC_X86_REGS;
+	return 0;
 }
 
 static int kvm_protected_task_setup_msrs(struct kvm_vcpu *vcpu,
@@ -1023,49 +1080,50 @@ static int kvm_protected_task_setup_msrs(struct kvm_vcpu *vcpu,
 static int kvm_protected_task_sync_regs(struct kvm_vcpu *vcpu,
 					struct pt_regs *regs, bool syscall)
 {
-	struct kvm_regs kvm_regs;
-	int ret;
+	struct kvm_regs *kvm_regs = &vcpu->run->s.regs.regs;
 
-	ret = kvm_arch_vcpu_ioctl_get_regs(vcpu, &kvm_regs);
-	if (ret)
-		return ret;
-
-	regs->r15 = kvm_regs.r15;
-	regs->r14 = kvm_regs.r14;
-	regs->r13 = kvm_regs.r13;
-	regs->r12 = kvm_regs.r12;
-	regs->bp = kvm_regs.rbp;
-	regs->bx = kvm_regs.rbx;
-	regs->r11 = kvm_regs.r11;
-	regs->r10 = kvm_regs.r10;
-	regs->r9 = kvm_regs.r9;
-	regs->r8 = kvm_regs.r8;
-	regs->cx = kvm_regs.rcx;
-	regs->dx = kvm_regs.rdx;
-	regs->si = kvm_regs.rsi;
-	regs->di = kvm_regs.rdi;
-	regs->sp = kvm_regs.rsp;
+	regs->r15 = kvm_regs->r15;
+	regs->r14 = kvm_regs->r14;
+	regs->r13 = kvm_regs->r13;
+	regs->r12 = kvm_regs->r12;
+	regs->bp = kvm_regs->rbp;
+	regs->bx = kvm_regs->rbx;
+	regs->r11 = kvm_regs->r11;
+	regs->r10 = kvm_regs->r10;
+	regs->r9 = kvm_regs->r9;
+	regs->r8 = kvm_regs->r8;
+	regs->cx = kvm_regs->rcx;
+	regs->dx = kvm_regs->rdx;
+	regs->si = kvm_regs->rsi;
+	regs->di = kvm_regs->rdi;
+	regs->sp = kvm_regs->rsp;
 	regs->cs = __USER_CS;
 	regs->ss = __USER_DS;
 	if (syscall) {
-		regs->orig_ax = kvm_regs.rax;
-		regs->ax = kvm_regs.rax;
-		regs->ip = kvm_regs.rcx;
-		regs->flags = kvm_regs.r11;
+		regs->orig_ax = kvm_regs->rax;
+		regs->ax = kvm_regs->rax;
+		regs->ip = kvm_regs->rcx;
+		regs->flags = kvm_regs->r11;
 	} else {
 		regs->orig_ax = -1;
-		regs->ax = kvm_regs.rax;
-		regs->ip = kvm_regs.rip;
-		regs->flags = kvm_regs.rflags;
+		regs->ax = kvm_regs->rax;
+		regs->ip = kvm_regs->rip;
+		regs->flags = kvm_regs->rflags;
 	}
 
 	return 0;
 }
 
-static bool kvm_protected_task_syscall_uses_fpu(unsigned long nr)
+static bool kvm_protected_task_syscall_uses_fpu(unsigned long nr,
+						 unsigned long work)
 {
 	return nr == __NR_arch_prctl || nr == __NR_clone || nr == __NR_clone3 ||
-	       nr == __NR_fork || nr == __NR_rt_sigreturn || nr == __NR_vfork;
+	       nr == __NR_fork || nr == __NR_pkey_alloc ||
+	       nr == __NR_rt_sigreturn || nr == __NR_vfork ||
+	       work & (SYSCALL_WORK_SECCOMP |
+		       SYSCALL_WORK_SYSCALL_TRACE |
+		       SYSCALL_WORK_SYSCALL_EMU |
+		       SYSCALL_WORK_SYSCALL_EXIT_TRAP);
 }
 
 /* Native signal setup and rt_sigreturn operate on current's active fpstate. */
@@ -1083,49 +1141,66 @@ static int kvm_protected_task_activate_fpu(struct kvm_vcpu *vcpu,
 	return ret;
 }
 
-static int kvm_protected_task_setup_task_msrs(struct kvm_vcpu *vcpu)
+static int kvm_protected_task_setup_task_msrs(
+		struct kvm_vcpu *vcpu, struct kvm_protected_task_x86 *state)
 {
-	u64 readback, value;
+	u64 misc_features, readback, spec_ctrl, virt_spec_ctrl = 0;
 	int ret;
 
-	vcpu_load(vcpu);
-	value = test_thread_flag(TIF_NOCPUID) ?
+	if (state->task_msrs_valid)
+		return 0;
+
+	misc_features = test_thread_flag(TIF_NOCPUID) ?
 		MSR_MISC_FEATURES_ENABLES_CPUID_FAULT : 0;
+	spec_ctrl = spec_ctrl_current();
+	if (static_cpu_has(X86_FEATURE_VIRT_SSBD))
+		virt_spec_ctrl = test_thread_flag(TIF_SSBD) ? SPEC_CTRL_SSBD : 0;
+
+	vcpu_load(vcpu);
 	ret = kvm_msr_write(vcpu, MSR_PLATFORM_INFO,
 			    MSR_PLATFORM_INFO_CPUID_FAULT);
 	if (!ret)
-		ret = kvm_msr_write(vcpu, MSR_MISC_FEATURES_ENABLES, value);
+		ret = kvm_msr_write(vcpu, MSR_MISC_FEATURES_ENABLES,
+				    misc_features);
 	if (!ret)
 		ret = kvm_msr_read(vcpu, MSR_MISC_FEATURES_ENABLES, &readback);
-	if (!ret && readback != value)
+	if (!ret && readback != misc_features)
 		ret = -EIO;
-	value = spec_ctrl_current();
 	if (!ret)
-		ret = kvm_msr_write(vcpu, MSR_IA32_SPEC_CTRL, value);
+		ret = kvm_msr_write(vcpu, MSR_IA32_SPEC_CTRL, spec_ctrl);
 	if (!ret)
 		ret = kvm_msr_read(vcpu, MSR_IA32_SPEC_CTRL, &readback);
-	if (!ret && readback != value)
+	if (!ret && readback != spec_ctrl)
 		ret = -EIO;
 	if (static_cpu_has(X86_FEATURE_VIRT_SSBD)) {
-		value = test_thread_flag(TIF_SSBD) ? SPEC_CTRL_SSBD : 0;
 		if (!ret)
 			ret = kvm_msr_write(vcpu, MSR_AMD64_VIRT_SPEC_CTRL,
-					    value);
+					    virt_spec_ctrl);
 		if (!ret)
 			ret = kvm_msr_read(vcpu, MSR_AMD64_VIRT_SPEC_CTRL,
 					   &readback);
-		if (!ret && readback != value)
+		if (!ret && readback != virt_spec_ctrl)
 			ret = -EIO;
 	}
 	vcpu_put(vcpu);
+	if (ret)
+		return ret;
 
-	return ret;
+	state->misc_features = misc_features;
+	state->spec_ctrl = spec_ctrl;
+	state->virt_spec_ctrl = virt_spec_ctrl;
+	state->task_msrs_valid = true;
+	return 0;
 }
 
-static int kvm_protected_task_setup_debugregs(struct kvm_vcpu *vcpu)
+static int kvm_protected_task_setup_debugregs(
+		struct kvm_vcpu *vcpu, struct kvm_protected_task_x86 *state)
 {
 	unsigned long db[HBP_NUM], dr7;
 	int i, ret = 0;
+
+	if (state->debugregs_valid)
+		return 0;
 
 	x86_ptrace_get_hw_breakpoints(current, db, &dr7);
 	vcpu_load(vcpu);
@@ -1134,8 +1209,13 @@ static int kvm_protected_task_setup_debugregs(struct kvm_vcpu *vcpu)
 	if (!ret)
 		ret = kvm_set_dr(vcpu, 7, dr7);
 	vcpu_put(vcpu);
+	if (ret)
+		return ret;
 
-	return ret;
+	memcpy(state->debugreg, db, sizeof(db));
+	state->dr7 = dr7;
+	state->debugregs_valid = true;
+	return 0;
 }
 
 static int kvm_protected_task_deactivate_fpu(struct kvm_vcpu *vcpu,
@@ -1298,13 +1378,10 @@ static bool kvm_protected_task_image_matches(
 }
 
 static int kvm_protected_task_build_image(
-		struct kvm_protected_task_x86 *state, u64 pgtable_gen,
+		struct kvm_vcpu *vcpu, struct kvm_protected_task_x86 *state,
+		u64 pgtable_gen,
 		struct kvm_protected_task_x86_image **imagep)
 {
-	static const u8 syscall_stub[] = {
-		0xe6, KVM_PT_SYSCALL_PORT, /* out KVM_PT_SYSCALL_PORT, %al */
-		0x0f, 0x0b,              /* ud2 */
-	};
 	struct kvm_protected_task_x86_image *image;
 	struct kvm_protected_task_builder builder;
 	unsigned long address, pgd, size, stub_gpa;
@@ -1361,7 +1438,7 @@ static int kvm_protected_task_build_image(
 		ret = -ENOSPC;
 		goto free_builder;
 	}
-	memcpy(stub_page, syscall_stub, sizeof(syscall_stub));
+	kvm_x86_call(patch_hypercall)(vcpu, (u8 *)stub_page);
 	ret = kvm_protected_task_map_page(&builder, stub_gpa, stub_gpa,
 					  PAGE_SHIFT, VM_READ | VM_EXEC, 0);
 	if (ret)
@@ -1459,7 +1536,8 @@ static int kvm_protected_task_get_image(struct kvm_vcpu *vcpu,
 		else
 			refcount_inc(&image->refs);
 	} else {
-		ret = kvm_protected_task_build_image(state, generation, &image);
+		ret = kvm_protected_task_build_image(vcpu, state, generation,
+						     &image);
 		if (!ret)
 			mm->protected_task_arch_image = image;
 	}
@@ -1573,10 +1651,13 @@ unsigned long kvm_arch_protected_task_elf_hwcap(struct kvm_vcpu *vcpu,
 }
 
 int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *arch_state,
+				     struct kvm_vcpu *source_vcpu,
+				     void *source_arch_state,
 				     struct pt_regs *regs, u32 slot,
 				     u64 *pgtable_gen)
 {
 	struct kvm_protected_task_x86 *state = arch_state;
+	struct kvm_protected_task_x86 *source = source_arch_state;
 	int ret;
 
 	/* Only x86-64 is supported, reject x32/i*86 */
@@ -1594,22 +1675,50 @@ int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *arch_state,
 	ret = kvm_protected_task_setup_msrs(vcpu, state);
 	if (ret)
 		return ret;
-	ret = kvm_protected_task_setup_task_msrs(vcpu);
+	ret = kvm_protected_task_setup_task_msrs(vcpu, state);
 	if (ret)
 		return ret;
-	ret = kvm_protected_task_setup_debugregs(vcpu);
+	ret = kvm_protected_task_setup_debugregs(vcpu, state);
 	if (ret)
 		return ret;
-	ret = fpu_copy_task_fpstate_to_guest(&vcpu->arch.guest_fpu,
-			kvm_protected_task_xcr0(state),
-			&vcpu->arch.pkru);
-	if (!ret && state->shstk)
-		ret = fpu_copy_task_supervisor_state_to_guest(
-				&vcpu->arch.guest_fpu, XFEATURE_MASK_CET_USER);
+	if (source_vcpu) {
+		kvm_protected_task_sync_dynamic_xstate(vcpu, state,
+				source_vcpu->arch.guest_fpu.fpstate->user_xfeatures &
+				XFEATURE_MASK_XTILE_DATA);
+		if (source->fpu_active)
+			kvm_protected_task_setup_pkru(source_vcpu, source);
+		ret = kvm_protected_task_deactivate_fpu(source_vcpu, source);
+		if (!ret)
+			ret = fpu_copy_guest_fpstate_to_guest(
+				&vcpu->arch.guest_fpu,
+				&source_vcpu->arch.guest_fpu,
+				kvm_protected_task_profile_xfeatures(state),
+				source_vcpu->arch.pkru, &vcpu->arch.pkru);
+	} else {
+		ret = fpu_copy_task_fpstate_to_guest(&vcpu->arch.guest_fpu,
+				kvm_protected_task_xcr0(state),
+				&vcpu->arch.pkru);
+		if (!ret && state->shstk)
+			ret = fpu_copy_task_supervisor_state_to_guest(
+					&vcpu->arch.guest_fpu,
+					XFEATURE_MASK_CET_USER);
+	}
 	if (ret)
 		return ret;
 	kvm_protected_task_sync_dynamic_xstate(vcpu, state, false);
 	return kvm_protected_task_setup_regs(vcpu, regs);
+}
+
+int kvm_arch_protected_task_prepare_user_work(struct kvm_vcpu *vcpu,
+					      void *arch_state)
+{
+	struct kvm_protected_task_x86 *state = arch_state;
+
+	state->fast_syscall_return = false;
+	state->sregs_valid = false;
+	state->task_msrs_valid = false;
+	state->debugregs_valid = false;
+	return kvm_protected_task_activate_fpu(vcpu, state);
 }
 
 int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
@@ -1627,20 +1736,29 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 	ret = kvm_protected_task_setup_sregs(vcpu, state);
 	if (ret)
 		goto out;
-	ret = kvm_protected_task_setup_task_msrs(vcpu);
+	ret = kvm_protected_task_setup_task_msrs(vcpu, state);
 	if (ret)
 		goto out;
-	ret = kvm_protected_task_setup_debugregs(vcpu);
+	ret = kvm_protected_task_setup_debugregs(vcpu, state);
 	if (ret)
 		goto out;
-	ret = kvm_protected_task_setup_regs(vcpu, regs);
-	if (ret)
-		goto out;
+	if (state->fast_syscall_return &&
+	    !(vcpu->guest_debug & KVM_GUESTDBG_SINGLESTEP)) {
+		state->fast_syscall_return = false;
+		vcpu->arch.protected_task_return_rax = regs->ax;
+		vcpu->arch.protected_task_return_rip = regs->ip;
+		vcpu->arch.protected_task_return_rflags = regs->flags;
+		vcpu->arch.protected_task_fast_return = true;
+	} else {
+		ret = kvm_protected_task_setup_regs(vcpu, regs);
+		if (ret)
+			goto out;
+	}
 	kvm_protected_task_setup_pkru(vcpu, state);
 
 	vcpu->arch.protected_task_backing_fault = false;
 	vcpu->arch.protected_task_growdown_fault = false;
-	ret = kvm_vcpu_run(vcpu);
+	ret = kvm_protected_task_vcpu_run(vcpu);
 	kvm_protected_task_vcpu_run_complete(vcpu);
 	run_complete = true;
 	kvm_protected_task_sync_pkru(vcpu, state);
@@ -1653,24 +1771,46 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 		goto out;
 
 	switch (vcpu->run->exit_reason) {
-	case KVM_EXIT_IO:
-		if (vcpu->run->io.direction != KVM_EXIT_IO_OUT ||
-		    vcpu->run->io.size != 1 || vcpu->run->io.count != 1 ||
-		    vcpu->run->io.port != KVM_PT_SYSCALL_PORT) {
+	case KVM_EXIT_HYPERCALL:
+	{
+		unsigned long modifying_work, nr, work;
+
+		ret = kvm_protected_task_sync_regs(vcpu, regs, false);
+		if (ret)
+			break;
+		if (regs->ip != state->image->syscall_stub) {
 			ret = -EIO;
 			break;
 		}
-		ret = kvm_protected_task_sync_regs(vcpu, regs, true);
-		if (ret)
-			break;
-		if (kvm_protected_task_syscall_uses_fpu(regs->orig_ax)) {
+		nr = regs->ax;
+		work = READ_ONCE(current_thread_info()->syscall_work);
+		regs->orig_ax = nr;
+		regs->ip = regs->cx;
+		regs->flags = regs->r11;
+		if (kvm_protected_task_syscall_uses_fpu(nr, work)) {
 			ret = kvm_protected_task_activate_fpu(vcpu, state);
 			if (ret)
 				break;
 		}
 		do_protected_syscall_64(regs);
+		modifying_work = work &
+			(SYSCALL_WORK_SECCOMP |
+			 SYSCALL_WORK_SYSCALL_TRACE |
+			 SYSCALL_WORK_SYSCALL_EMU |
+			 SYSCALL_WORK_SYSCALL_USER_DISPATCH |
+			 SYSCALL_WORK_SYSCALL_EXIT_TRAP);
+		state->fast_syscall_return = nr != __NR_rt_sigreturn &&
+			!modifying_work;
+		if (nr == __NR_arch_prctl || nr == __NR_prctl ||
+		    nr == __NR_seccomp || nr == __NR_rt_sigreturn ||
+		    modifying_work) {
+			state->sregs_valid = false;
+			state->task_msrs_valid = false;
+			state->debugregs_valid = false;
+		}
 		ret = 0;
 		break;
+	}
 	case KVM_EXIT_MEMORY_FAULT:
 		ret = kvm_protected_task_handle_memory_fault(vcpu, regs,
 						     next_slot);
@@ -1685,7 +1825,6 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 	}
 
 out:
-	ret = kvm_protected_task_activate_fpu(vcpu, state) ?: ret;
 release:
 	if (!run_complete)
 		kvm_protected_task_vcpu_run_complete(vcpu);
@@ -1751,11 +1890,23 @@ bool kvm_arch_protected_task_needs_pgtable_update(struct kvm_vcpu *vcpu,
 	return false;
 }
 
+void kvm_arch_protected_task_prepare_run(struct kvm_vcpu *vcpu)
+{
+}
+
 int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu, void *state,
+				     struct kvm_vcpu *source_vcpu,
+				     void *source_state,
 				     struct pt_regs *regs, u32 slot,
 				     u64 *pgtable_gen)
 {
 	return -EOPNOTSUPP;
+}
+
+int kvm_arch_protected_task_prepare_user_work(struct kvm_vcpu *vcpu,
+					      void *state)
+{
+	return 0;
 }
 
 int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,

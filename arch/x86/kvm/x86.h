@@ -55,6 +55,7 @@ struct kvm_host_values {
 };
 
 void kvm_spurious_fault(void);
+void kvm_arch_protected_task_prepare_run(struct kvm_vcpu *vcpu);
 
 #define SIZE_OF_MEMSLOTS_HASHTABLE \
 	(sizeof(((struct kvm_memslots *)0)->id_hash) * 2 * KVM_MAX_NR_ADDRESS_SPACES)

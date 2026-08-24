@@ -1810,6 +1810,7 @@ struct kvm_vcpu *kvm_create_vcpu(struct kvm *kvm, unsigned long id,
 
 /* Run @vcpu on current; the caller must hold a reference to @vcpu->kvm. */
 int kvm_vcpu_run(struct kvm_vcpu *vcpu);
+int kvm_protected_task_vcpu_run(struct kvm_vcpu *vcpu);
 
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type);
 void kvm_arch_destroy_vm(struct kvm *kvm);
@@ -1827,8 +1828,11 @@ unsigned long kvm_arch_protected_task_elf_hwcap(struct kvm_vcpu *vcpu,
 						unsigned int type,
 						unsigned long value);
 int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu,
-				     void *state, struct pt_regs *regs, u32 slot,
-				     u64 *pgtable_gen);
+				     void *state, struct kvm_vcpu *source_vcpu,
+				     void *source_state, struct pt_regs *regs,
+				     u32 slot, u64 *pgtable_gen);
+int kvm_arch_protected_task_prepare_user_work(struct kvm_vcpu *vcpu,
+					      void *state);
 int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,
 				struct pt_regs *regs, u32 *next_slot);
 int kvm_arch_protected_task_deactivate(struct kvm_vcpu *vcpu, void *state);

@@ -835,7 +835,11 @@ struct kvm_vcpu_arch {
 	unsigned long cr4;
 	unsigned long cr4_guest_owned_bits;
 	unsigned long cr4_guest_rsvd_bits;
+	unsigned long protected_task_return_rax;
+	unsigned long protected_task_return_rip;
+	unsigned long protected_task_return_rflags;
 	unsigned long cr8;
+	bool protected_task_fast_return;
 	u32 host_pkru;
 	u32 pkru;
 	u32 hflags;

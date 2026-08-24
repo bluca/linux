@@ -1114,10 +1114,19 @@ bool __weak kvm_arch_protected_task_needs_pgtable_update(struct kvm_vcpu *vcpu,
 }
 
 int __weak kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu,
-					    void *state, struct pt_regs *regs,
-					    u32 slot, u64 *pgtable_gen)
+					    void *state,
+					    struct kvm_vcpu *source_vcpu,
+					    void *source_state,
+					    struct pt_regs *regs, u32 slot,
+					    u64 *pgtable_gen)
 {
 	return -EOPNOTSUPP;
+}
+
+int __weak kvm_arch_protected_task_prepare_user_work(struct kvm_vcpu *vcpu,
+						     void *state)
+{
+	return 0;
 }
 
 int __weak kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,
@@ -4621,20 +4630,10 @@ static int kvm_wait_for_vcpu_online(struct kvm_vcpu *vcpu)
 	return 0;
 }
 
-int kvm_vcpu_run(struct kvm_vcpu *vcpu)
+static int kvm_vcpu_update_pid(struct kvm_vcpu *vcpu)
 {
 	struct pid *oldpid;
 	int r;
-
-	if (vcpu->kvm->mm != current->mm || vcpu->kvm->vm_dead)
-		return -EIO;
-
-	r = kvm_wait_for_vcpu_online(vcpu);
-	if (r)
-		return r;
-
-	if (mutex_lock_killable(&vcpu->mutex))
-		return -EINTR;
 
 	/*
 	 * Note, vcpu->pid is primarily protected by vcpu->mutex. The
@@ -4648,7 +4647,7 @@ int kvm_vcpu_run(struct kvm_vcpu *vcpu)
 
 		r = kvm_arch_vcpu_run_pid_change(vcpu);
 		if (r)
-			goto out;
+			return r;
 
 		newpid = get_task_pid(current, PIDTYPE_PID);
 		write_lock(&vcpu->pid_lock);
@@ -4657,6 +4656,27 @@ int kvm_vcpu_run(struct kvm_vcpu *vcpu)
 
 		put_pid(oldpid);
 	}
+	return 0;
+}
+
+int kvm_vcpu_run(struct kvm_vcpu *vcpu)
+{
+	int r;
+
+	if (vcpu->kvm->mm != current->mm || vcpu->kvm->vm_dead)
+		return -EIO;
+
+	r = kvm_wait_for_vcpu_online(vcpu);
+	if (r)
+		return r;
+
+	if (mutex_lock_killable(&vcpu->mutex))
+		return -EINTR;
+
+	r = kvm_vcpu_update_pid(vcpu);
+	if (r)
+		goto out;
+
 	vcpu->wants_to_run = !READ_ONCE(vcpu->run->immediate_exit__unsafe);
 	r = kvm_arch_vcpu_ioctl_run(vcpu);
 	vcpu->wants_to_run = false;
@@ -4670,6 +4690,29 @@ int kvm_vcpu_run(struct kvm_vcpu *vcpu)
 	trace_kvm_userspace_exit(vcpu->run->exit_reason, r);
 out:
 	mutex_unlock(&vcpu->mutex);
+	return r;
+}
+
+int kvm_protected_task_vcpu_run(struct kvm_vcpu *vcpu)
+{
+	int r;
+
+	if (WARN_ON_ONCE(!vcpu->kvm->protected_task) ||
+	    vcpu->kvm->mm != current->mm || vcpu->kvm->vm_dead)
+		return -EIO;
+	if (WARN_ON_ONCE(vcpu->vcpu_idx >=
+			 atomic_read(&vcpu->kvm->online_vcpus)))
+		return -EIO;
+
+	r = kvm_vcpu_update_pid(vcpu);
+	if (r)
+		return r;
+
+	vcpu->wants_to_run = true;
+	r = kvm_arch_vcpu_ioctl_run(vcpu);
+	vcpu->wants_to_run = false;
+	rseq_virt_userspace_exit();
+	trace_kvm_userspace_exit(vcpu->run->exit_reason, r);
 	return r;
 }
 

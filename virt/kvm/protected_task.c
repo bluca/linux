@@ -29,6 +29,7 @@ struct kvm_protected_task_vcpu {
 };
 
 #define KVM_PROTECTED_TASK_IDLE_VCPU_LIMIT 16U
+#define KVM_PROTECTED_TASK_QUIESCING ((int)BIT(31))
 
 struct kvm_protected_task_vm {
 	refcount_t refs;
@@ -97,11 +98,13 @@ static void kvm_protected_task_quiesce_mm(void *state)
 
 	for (;;) {
 		wait_event(mm->protected_task_wait,
-			   !READ_ONCE(mm->protected_task_quiescing));
+			   atomic_read_acquire(
+				   &mm->protected_task_run_state) >= 0);
 
 		spin_lock(&mm->protected_task_lock);
-		if (!mm->protected_task_quiescing) {
-			WRITE_ONCE(mm->protected_task_quiescing, true);
+		if (atomic_read(&mm->protected_task_run_state) >= 0) {
+			atomic_or(KVM_PROTECTED_TASK_QUIESCING,
+				  &mm->protected_task_run_state);
 			list_for_each_entry(registered_vcpu,
 					    &mm->protected_task_vcpus, node) {
 				if (registered_vcpu->vcpu == exec->vcpu)
@@ -117,7 +120,8 @@ static void kvm_protected_task_quiesce_mm(void *state)
 	}
 
 	wait_event(mm->protected_task_wait,
-		   !READ_ONCE(mm->protected_task_run_count));
+		   atomic_read(&mm->protected_task_run_state) ==
+			   KVM_PROTECTED_TASK_QUIESCING);
 }
 
 static void kvm_protected_task_resume_mm(void *state)
@@ -126,8 +130,9 @@ static void kvm_protected_task_resume_mm(void *state)
 	struct mm_struct *mm = exec->kvm->mm;
 
 	spin_lock(&mm->protected_task_lock);
-	WARN_ON_ONCE(!mm->protected_task_quiescing);
-	WRITE_ONCE(mm->protected_task_quiescing, false);
+	WARN_ON_ONCE(atomic_read(&mm->protected_task_run_state) !=
+		     KVM_PROTECTED_TASK_QUIESCING);
+	atomic_set_release(&mm->protected_task_run_state, 0);
 	spin_unlock(&mm->protected_task_lock);
 	wake_up_all(&mm->protected_task_wait);
 }
@@ -137,44 +142,33 @@ static void kvm_protected_task_vcpu_run_begin(struct kvm_protected_task_exec *ex
 	struct mm_struct *mm = exec->kvm->mm;
 
 	for (;;) {
-		wait_event(mm->protected_task_wait,
-			   !READ_ONCE(mm->protected_task_quiescing));
-
-		spin_lock(&mm->protected_task_lock);
-		if (!mm->protected_task_quiescing) {
-			mm->protected_task_run_count++;
-			spin_unlock(&mm->protected_task_lock);
+		if (likely(atomic_inc_unless_negative(
+				   &mm->protected_task_run_state)))
 			return;
-		}
-		spin_unlock(&mm->protected_task_lock);
+
+		wait_event(mm->protected_task_wait,
+			   atomic_read_acquire(
+				   &mm->protected_task_run_state) >= 0);
 	}
 }
 
 static bool kvm_protected_task_vcpu_run_blocked(struct kvm_protected_task_exec *exec)
 {
 	struct mm_struct *mm = exec->kvm->mm;
-	bool blocked;
 
-	spin_lock(&mm->protected_task_lock);
-	blocked = mm->protected_task_quiescing;
-	spin_unlock(&mm->protected_task_lock);
-	return blocked;
+	return atomic_read_acquire(&mm->protected_task_run_state) < 0;
 }
 
 void kvm_protected_task_vcpu_run_complete(struct kvm_vcpu *vcpu)
 {
 	struct mm_struct *mm = vcpu->kvm->mm;
-	bool wake;
+	int state;
 
-	spin_lock(&mm->protected_task_lock);
-	if (WARN_ON_ONCE(!mm->protected_task_run_count)) {
-		spin_unlock(&mm->protected_task_lock);
+	state = atomic_read(&mm->protected_task_run_state);
+	if (WARN_ON_ONCE(!(state & ~KVM_PROTECTED_TASK_QUIESCING)))
 		return;
-	}
-	mm->protected_task_run_count--;
-	wake = !mm->protected_task_run_count;
-	spin_unlock(&mm->protected_task_lock);
-	if (wake)
+	state = atomic_dec_return(&mm->protected_task_run_state);
+	if (state == KVM_PROTECTED_TASK_QUIESCING)
 		wake_up_all(&mm->protected_task_wait);
 }
 
@@ -480,15 +474,32 @@ static void kvm_protected_task_release_exec(void *state)
 	kfree(exec);
 }
 
-static int kvm_protected_task_finalize_vcpu(void *state, struct pt_regs *regs)
+static int kvm_protected_task_finalize_vcpu_from(
+		struct kvm_protected_task_exec *exec,
+		struct kvm_protected_task_exec *source,
+		struct pt_regs *regs)
 {
-	struct kvm_protected_task_exec *exec = state;
 	int ret;
 
 	ret = kvm_arch_protected_task_finalize(exec->vcpu, exec->arch_state,
+					       source ? source->vcpu : NULL,
+					       source ? source->arch_state : NULL,
 					       regs, exec->next_slot++,
 					       &exec->pgtable_gen);
 	return ret;
+}
+
+static int kvm_protected_task_finalize_vcpu(void *state, struct pt_regs *regs)
+{
+	return kvm_protected_task_finalize_vcpu_from(state, NULL, regs);
+}
+
+static void kvm_protected_task_prepare_exec_user_work(void *state)
+{
+	struct kvm_protected_task_exec *exec = state;
+
+	WARN_ON_ONCE(kvm_arch_protected_task_prepare_user_work(
+			exec->vcpu, exec->arch_state));
 }
 
 static int kvm_protected_task_clone_exec(struct kvm_protected_task_context *context,
@@ -553,7 +564,7 @@ static int kvm_protected_task_refresh(struct kvm_protected_task_exec *exec,
 					     (void **)&new_exec);
 	if (ret)
 		return ret;
-	ret = kvm_protected_task_finalize_vcpu(new_exec, regs);
+	ret = kvm_protected_task_finalize_vcpu_from(new_exec, exec, regs);
 	if (ret) {
 		kvm_protected_task_release_exec(new_exec);
 		return ret;
@@ -619,6 +630,7 @@ static const struct kvm_protected_task_ops kvm_protected_task_ops = {
 	.end_mm_update = kvm_protected_task_resume_mm,
 	.deactivate_exec = kvm_protected_task_deactivate_vcpu,
 	.finalize_exec = kvm_protected_task_finalize_vcpu,
+	.prepare_user_work = kvm_protected_task_prepare_exec_user_work,
 	.run = kvm_protected_task_run_vcpu,
 	.cleanup_exec = kvm_protected_task_release_exec,
 };

@@ -247,6 +247,7 @@ struct kvm_page_fault {
 	 */
 	bool huge_page_disallowed;
 	bool force_gup;
+	bool protected_fault_around;
 
 	/*
 	 * Maximum page size that can be created for this fault; input to
@@ -277,6 +278,7 @@ struct kvm_page_fault {
 
 	/* The memslot containing gfn. May be NULL. */
 	struct kvm_memory_slot *slot;
+	gfn_t protected_vma_end;
 
 	/* Outputs of kvm_mmu_faultin_pfn().  */
 	unsigned long mmu_seq;

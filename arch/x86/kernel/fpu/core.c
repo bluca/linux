@@ -20,6 +20,7 @@
 #include <linux/hardirq.h>
 #include <linux/kvm_types.h>
 #include <linux/pkeys.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include "context.h"
@@ -431,6 +432,27 @@ void fpu_copy_guest_fpstate_to_uabi(struct fpu_guest *gfpu, void *buf,
 }
 EXPORT_SYMBOL_FOR_KVM(fpu_copy_guest_fpstate_to_uabi);
 
+int fpu_copy_guest_fpstate_to_guest(struct fpu_guest *dst,
+				    struct fpu_guest *src,
+				    u64 xfeatures, u32 src_pkru, u32 *dst_pkru)
+{
+	struct fpstate *dst_state = dst->fpstate;
+	struct fpstate *src_state = src->fpstate;
+
+	if (dst_state->is_confidential || src_state->is_confidential ||
+	    dst_state->size != src_state->size ||
+	    dst_state->xfeatures != src_state->xfeatures ||
+	    dst_state->user_size != src_state->user_size ||
+	    dst_state->user_xfeatures != src_state->user_xfeatures ||
+	    (src_state->regs.xsave.header.xfeatures & ~xfeatures))
+		return -EINVAL;
+
+	memcpy(&dst_state->regs, &src_state->regs, src_state->size);
+	*dst_pkru = src_pkru;
+	return 0;
+}
+EXPORT_SYMBOL_FOR_KVM(fpu_copy_guest_fpstate_to_guest);
+
 int fpu_copy_uabi_to_guest_fpstate(struct fpu_guest *gfpu, const void *buf,
 				   u64 xcr0, u32 *vpkru)
 {
@@ -475,7 +497,7 @@ int fpu_copy_task_fpstate_to_guest(struct fpu_guest *gfpu, u64 xcr0,
 	void *buf;
 	int ret;
 
-	buf = vzalloc(gfpu->uabi_size);
+	buf = kvzalloc(gfpu->uabi_size, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
@@ -485,7 +507,7 @@ int fpu_copy_task_fpstate_to_guest(struct fpu_guest *gfpu, u64 xcr0,
 		.left = gfpu->uabi_size,
 	}, fpu->fpstate, xcr0, current->thread.pkru, XSTATE_COPY_XSAVE);
 	ret = fpu_copy_uabi_to_guest_fpstate(gfpu, buf, xcr0, vpkru);
-	vfree(buf);
+	kvfree(buf);
 	return ret;
 }
 EXPORT_SYMBOL_FOR_KVM(fpu_copy_task_fpstate_to_guest);

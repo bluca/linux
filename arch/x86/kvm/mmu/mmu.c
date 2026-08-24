@@ -48,6 +48,7 @@
 #include <linux/kstrtox.h>
 #include <linux/kthread.h>
 #include <linux/pkeys.h>
+#include <linux/userfaultfd_k.h>
 #include <linux/wordpart.h>
 
 #include <asm/page.h>
@@ -4749,14 +4750,18 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 	unsigned long huge_start = address & PMD_MASK;
 	struct vm_area_struct *vma;
 	u8 access = ACC_USER_MASK;
-	bool allowed;
+	bool allowed, vma_locked;
 
 	if (fault->slot &&
 	    fault->slot->flags & KVM_MEMSLOT_PROTECTED_TASK)
 		return true;
 
-	mmap_read_lock(vcpu->kvm->mm);
-	vma = find_vma(vcpu->kvm->mm, address);
+	vma = lock_vma_under_rcu(vcpu->kvm->mm, address);
+	vma_locked = !!vma;
+	if (!vma) {
+		mmap_read_lock(vcpu->kvm->mm);
+		vma = find_vma(vcpu->kvm->mm, address);
+	}
 	if (!vma)
 		allowed = false;
 	else if (address < vma->vm_start) {
@@ -4789,7 +4794,9 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 			((fault->exec && (vma->vm_flags & VM_EXEC)) ||
 			 (!fault->write && !fault->exec &&
 			  (vma->vm_flags & VM_WRITE)));
-
+		fault->protected_fault_around = fault->write &&
+			vma_is_anon_shmem(vma) && !userfaultfd_armed(vma);
+		fault->protected_vma_end = vma->vm_end >> PAGE_SHIFT;
 		fault->max_access = access;
 		if (!(vma->vm_flags & VM_EXEC) &&
 		    huge_start >= vma->vm_start &&
@@ -4798,7 +4805,10 @@ static bool kvm_protected_task_fault_allowed(struct kvm_vcpu *vcpu,
 		else
 			fault->max_level = PG_LEVEL_4K;
 	}
-	mmap_read_unlock(vcpu->kvm->mm);
+	if (vma_locked)
+		vma_end_read(vma);
+	else
+		mmap_read_unlock(vcpu->kvm->mm);
 
 	return allowed;
 }
@@ -5060,6 +5070,9 @@ int kvm_handle_page_fault(struct kvm_vcpu *vcpu, u64 error_code,
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_handle_page_fault);
 
 #ifdef CONFIG_X86_64
+static int kvm_tdp_page_prefault(struct kvm_vcpu *vcpu, gpa_t gpa,
+				 u64 error_code, u8 *level);
+
 static int kvm_tdp_mmu_page_fault(struct kvm_vcpu *vcpu,
 				  struct kvm_page_fault *fault)
 {
@@ -5098,8 +5111,25 @@ out_unlock:
 int kvm_tdp_page_fault(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault)
 {
 #ifdef CONFIG_X86_64
-	if (tdp_mmu_enabled)
-		return kvm_tdp_mmu_page_fault(vcpu, fault);
+	if (tdp_mmu_enabled) {
+		int r = kvm_tdp_mmu_page_fault(vcpu, fault);
+
+		if (r == RET_PF_FIXED && vcpu->kvm->protected_task &&
+		    !fault->prefetch && fault->protected_fault_around) {
+			gfn_t end = min_t(gfn_t,
+					    ALIGN(fault->gfn + 1,
+						  PTE_PREFETCH_NUM),
+					    fault->protected_vma_end);
+			gfn_t gfn;
+
+			for (gfn = fault->gfn + 1; gfn < end; gfn++)
+				if (kvm_tdp_page_prefault(vcpu,
+						gfn << PAGE_SHIFT,
+						fault->error_code, NULL))
+					break;
+		}
+		return r;
+	}
 #endif
 
 	return direct_page_fault(vcpu, fault);

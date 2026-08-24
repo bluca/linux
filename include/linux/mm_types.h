@@ -1314,8 +1314,7 @@ struct mm_struct {
 		spinlock_t protected_task_lock;
 		struct list_head protected_task_vcpus;
 		wait_queue_head_t protected_task_wait;
-		unsigned int protected_task_run_count;
-		bool protected_task_quiescing;
+		atomic_t protected_task_run_state;
 #endif
 
 		mm_flags_t flags; /* Must use mm_flags_* hlpers to access */

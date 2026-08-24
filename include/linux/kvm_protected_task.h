@@ -30,6 +30,7 @@ struct kvm_protected_task_ops {
 	void (*end_mm_update)(void *state);
 	void (*deactivate_exec)(void *state);
 	int (*finalize_exec)(void *state, struct pt_regs *regs);
+	void (*prepare_user_work)(void *state);
 	int (*run)(void *state, struct pt_regs *regs);
 	void (*cleanup_exec)(void *state);
 };
@@ -57,6 +58,7 @@ unsigned long kvm_protected_task_elf_hwcap(struct linux_binprm *bprm,
 void kvm_protected_task_deactivate_exec(void);
 void kvm_protected_task_commit_exec(struct linux_binprm *bprm);
 int kvm_protected_task_finalize_exec(struct pt_regs *regs);
+void kvm_protected_task_prepare_user_work(void);
 bool kvm_protected_task_run(struct pt_regs *regs);
 void kvm_protected_task_exit(struct task_struct *task);
 int kvm_protected_task_create_fd(void __user *argp);

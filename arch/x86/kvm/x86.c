@@ -10513,6 +10513,11 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(____kvm_emulate_hypercall);
 
 int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 {
+	if (vcpu->kvm->protected_task) {
+		vcpu->run->exit_reason = KVM_EXIT_HYPERCALL;
+		return 0;
+	}
+
 	if (kvm_xen_hypercall_enabled(vcpu->kvm))
 		return kvm_xen_hypercall(vcpu);
 
@@ -11980,6 +11985,8 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 		return r;
 
 	vcpu_load(vcpu);
+	if (unlikely(vcpu->kvm->protected_task))
+		kvm_arch_protected_task_prepare_run(vcpu);
 	kvm_sigset_activate(vcpu);
 	kvm_run->flags = 0;
 	kvm_load_guest_fpu(vcpu);
@@ -13617,6 +13624,8 @@ void kvm_arch_memslots_updated(struct kvm *kvm, u64 gen)
 	 * mmio generation may have reached its maximum value.
 	 */
 	kvm_mmu_invalidate_mmio_sptes(kvm, gen);
+	if (kvm->protected_task)
+		return;
 
 	/* Force re-initialization of steal_time cache */
 	kvm_for_each_vcpu(i, vcpu, kvm)

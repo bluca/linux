@@ -295,6 +295,19 @@ int kvm_protected_task_finalize_exec(struct pt_regs *regs)
 #endif
 }
 
+void kvm_protected_task_prepare_user_work(void)
+{
+#if IS_ENABLED(CONFIG_KVM)
+	struct kvm_protected_task_context *context;
+
+	if (!current->protected_task_active || !current->protected_task_state)
+		return;
+
+	context = current->protected_task_active->private_data;
+	context->ops->prepare_user_work(current->protected_task_state);
+#endif
+}
+
 bool kvm_protected_task_run(struct pt_regs *regs)
 {
 #if IS_ENABLED(CONFIG_KVM)
