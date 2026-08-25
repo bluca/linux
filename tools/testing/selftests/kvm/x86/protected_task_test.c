@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -22,6 +23,7 @@
 #include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/rseq.h>
 #include <sys/uio.h>
 #include <sys/user.h>
@@ -34,6 +36,7 @@
 #include <linux/kvm.h>
 #include <linux/mempolicy.h>
 #include <linux/ptrace.h>
+#include <linux/sched.h>
 #include <linux/userfaultfd.h>
 
 #include "kvm_util.h"
@@ -679,6 +682,7 @@ static void *protected_cancel_thread(void *arg)
 		pthread_testcancel();
 		sched_yield();
 	}
+	return NULL;
 }
 
 static int run_robust_cancel_test(void)
@@ -814,6 +818,518 @@ static int run_process_rseq_target(bool reexec)
 	args = (struct protected_rseq_args) { .data = &exec_data };
 	protected_rseq_action(current_rseq(), PROTECTED_RSEQ_EXEC, &args);
 	return 42;
+}
+
+enum {
+	PROCESS_LIFECYCLE_WORKERS = 64,
+	PROCESS_LIFECYCLE_CANCEL_WORKERS = 8,
+	PROCESS_LIFECYCLE_FORK_WORKERS = 16,
+	PROCESS_LIFECYCLE_STACK_SIZE = 1 << 20,
+};
+
+struct process_lifecycle_group {
+	bool protected;
+	atomic_int workers_ready;
+	atomic_int nested_ready;
+	atomic_int cancel_ready;
+	atomic_bool release;
+	atomic_bool failed;
+};
+
+struct process_lifecycle_exec {
+	bool protected;
+	pid_t pid;
+};
+
+struct process_lifecycle_fork_group {
+	bool protected;
+	pid_t pid;
+	atomic_int ready;
+	atomic_bool start;
+	atomic_bool failed;
+};
+
+struct process_lifecycle_namespace {
+	bool protected;
+	ino_t user_namespace;
+	ino_t pid_namespace;
+};
+
+struct process_lifecycle_daemon_record {
+	pid_t pid;
+	pid_t parent;
+	pid_t session;
+	int result;
+};
+
+static bool process_lifecycle_mode_mismatch(bool protected)
+{
+	return protected_entry_probe() == protected;
+}
+
+static void *process_lifecycle_nested_thread(void *arg)
+{
+	struct process_lifecycle_group *group = arg;
+
+	if (process_lifecycle_mode_mismatch(group->protected))
+		atomic_store_explicit(&group->failed, true, memory_order_relaxed);
+	atomic_fetch_add_explicit(&group->nested_ready, 1, memory_order_release);
+	while (!atomic_load_explicit(&group->release, memory_order_acquire))
+		sched_yield();
+	return NULL;
+}
+
+static void *process_lifecycle_worker(void *arg)
+{
+	struct process_lifecycle_group *group = arg;
+	void *result = NULL;
+	pthread_t nested;
+	int ret;
+
+	if (process_lifecycle_mode_mismatch(group->protected))
+		atomic_store_explicit(&group->failed, true, memory_order_relaxed);
+	ret = pthread_create(&nested, NULL, process_lifecycle_nested_thread, group);
+	if (ret) {
+		atomic_store_explicit(&group->failed, true, memory_order_relaxed);
+		atomic_fetch_add_explicit(&group->nested_ready, 1,
+					  memory_order_release);
+	}
+	atomic_fetch_add_explicit(&group->workers_ready, 1, memory_order_release);
+	while (!atomic_load_explicit(&group->release, memory_order_acquire))
+		sched_yield();
+	if (!ret && (pthread_join(nested, &result) || result))
+		atomic_store_explicit(&group->failed, true, memory_order_relaxed);
+	return NULL;
+}
+
+static void *process_lifecycle_cancel_thread(void *arg)
+{
+	struct process_lifecycle_group *group = arg;
+
+	if (process_lifecycle_mode_mismatch(group->protected))
+		atomic_store_explicit(&group->failed, true, memory_order_relaxed);
+	atomic_fetch_add_explicit(&group->cancel_ready, 1, memory_order_release);
+	for (;;) {
+		pthread_testcancel();
+		sched_yield();
+	}
+}
+
+static int run_process_lifecycle_threads(bool protected)
+{
+	struct process_lifecycle_group group = {
+		.protected = protected,
+	};
+	pthread_t cancel_threads[PROCESS_LIFECYCLE_CANCEL_WORKERS];
+	pthread_t workers[PROCESS_LIFECYCLE_WORKERS];
+	void *result;
+	int i;
+
+	if (process_lifecycle_mode_mismatch(protected))
+		return 1;
+	for (i = 0; i < PROCESS_LIFECYCLE_WORKERS; i++)
+		if (pthread_create(&workers[i], NULL, process_lifecycle_worker,
+				   &group))
+			return 2;
+	for (i = 0; i < PROCESS_LIFECYCLE_CANCEL_WORKERS; i++)
+		if (pthread_create(&cancel_threads[i], NULL,
+				   process_lifecycle_cancel_thread, &group))
+			return 3;
+
+	while (atomic_load_explicit(&group.workers_ready,
+				    memory_order_acquire) < PROCESS_LIFECYCLE_WORKERS ||
+	       atomic_load_explicit(&group.nested_ready,
+				    memory_order_acquire) < PROCESS_LIFECYCLE_WORKERS ||
+	       atomic_load_explicit(&group.cancel_ready,
+				    memory_order_acquire) < PROCESS_LIFECYCLE_CANCEL_WORKERS)
+		sched_yield();
+
+	for (i = 0; i < PROCESS_LIFECYCLE_CANCEL_WORKERS; i++)
+		if (pthread_cancel(cancel_threads[i]))
+			atomic_store_explicit(&group.failed, true,
+					      memory_order_relaxed);
+	for (i = 0; i < PROCESS_LIFECYCLE_CANCEL_WORKERS; i++)
+		if (pthread_join(cancel_threads[i], &result) ||
+		    result != PTHREAD_CANCELED)
+			atomic_store_explicit(&group.failed, true,
+					      memory_order_relaxed);
+
+	atomic_store_explicit(&group.release, true, memory_order_release);
+	for (i = 0; i < PROCESS_LIFECYCLE_WORKERS; i++)
+		if (pthread_join(workers[i], &result) || result)
+			atomic_store_explicit(&group.failed, true,
+					      memory_order_relaxed);
+	return atomic_load_explicit(&group.failed, memory_order_relaxed) ? 4 : 0;
+}
+
+static int run_process_lifecycle_leaf(bool protected, pid_t parent_pid)
+{
+	if (process_lifecycle_mode_mismatch(protected))
+		return 1;
+	if (syscall(SYS_gettid) != getpid())
+		return 2;
+	if (getppid() != parent_pid)
+		return 3;
+	return 0;
+}
+
+static void *process_lifecycle_fork_thread(void *arg)
+{
+	struct process_lifecycle_fork_group *group = arg;
+	char parent_string[32];
+	char *const argv[] = {
+		"protected_task_test",
+		"--process-lifecycle-leaf",
+		group->protected ? "protected" : "native",
+		parent_string,
+		NULL,
+	};
+	int status;
+	pid_t child;
+
+	snprintf(parent_string, sizeof(parent_string), "%d", group->pid);
+	atomic_fetch_add_explicit(&group->ready, 1, memory_order_release);
+	while (!atomic_load_explicit(&group->start, memory_order_acquire))
+		sched_yield();
+
+	child = fork();
+	if (!child) {
+		execv("/proc/self/exe", argv);
+		_exit(127);
+	}
+	if (child < 0 || waitpid(child, &status, 0) != child ||
+	    !WIFEXITED(status) || WEXITSTATUS(status))
+		atomic_store_explicit(&group->failed, true, memory_order_relaxed);
+	return NULL;
+}
+
+static int run_process_lifecycle_fork_exec(bool protected)
+{
+	struct process_lifecycle_fork_group group = {
+		.protected = protected,
+		.pid = getpid(),
+	};
+	pthread_t threads[PROCESS_LIFECYCLE_FORK_WORKERS];
+	void *result;
+	int i;
+
+	for (i = 0; i < PROCESS_LIFECYCLE_FORK_WORKERS; i++)
+		if (pthread_create(&threads[i], NULL,
+				   process_lifecycle_fork_thread, &group))
+			return 1;
+	while (atomic_load_explicit(&group.ready, memory_order_acquire) <
+	       PROCESS_LIFECYCLE_FORK_WORKERS)
+		sched_yield();
+	atomic_store_explicit(&group.start, true, memory_order_release);
+	for (i = 0; i < PROCESS_LIFECYCLE_FORK_WORKERS; i++)
+		if (pthread_join(threads[i], &result) || result)
+			atomic_store_explicit(&group.failed, true,
+					      memory_order_relaxed);
+	return atomic_load_explicit(&group.failed, memory_order_relaxed) ? 2 : 0;
+}
+
+static void process_lifecycle_signal_handler(int signal)
+{
+}
+
+static int run_process_lifecycle_clone3(bool protected)
+{
+	struct sigaction action = {
+		.sa_handler = process_lifecycle_signal_handler,
+	};
+	struct sigaction current, old_action;
+	struct clone_args args = {
+		.flags = CLONE_PIDFD | CLONE_PARENT_SETTID |
+			 CLONE_CLEAR_SIGHAND,
+		.exit_signal = SIGCHLD,
+	};
+	siginfo_t info = {};
+	int failure = 0, parent_tid = -1, pidfd = -1;
+	pid_t child;
+
+	sigemptyset(&action.sa_mask);
+	if (sigaction(SIGUSR2, &action, &old_action))
+		return 1;
+	args.pidfd = (uintptr_t)&pidfd;
+	args.parent_tid = (uintptr_t)&parent_tid;
+	child = syscall(SYS_clone3, &args, sizeof(args));
+	if (!child) {
+		if (process_lifecycle_mode_mismatch(protected))
+			_exit(1);
+		if (sigaction(SIGUSR2, NULL, &current) ||
+		    current.sa_handler != SIG_DFL)
+			_exit(2);
+		_exit(0);
+	}
+	if (child < 0)
+		failure = 2;
+	else if (pidfd < 0 || parent_tid != child ||
+		 !(fcntl(pidfd, F_GETFD) & FD_CLOEXEC))
+		failure = 3;
+	else if (waitid(P_PIDFD, pidfd, &info, WEXITED) ||
+		 info.si_code != CLD_EXITED || info.si_pid != child ||
+		 info.si_status)
+		failure = 4;
+	if (pidfd >= 0 && close(pidfd) && !failure)
+		failure = 5;
+	if (sigaction(SIGUSR2, NULL, &current) && !failure)
+		failure = 6;
+	else if (!failure && current.sa_handler != process_lifecycle_signal_handler)
+		failure = 7;
+	if (sigaction(SIGUSR2, &old_action, NULL) && !failure)
+		failure = 8;
+	return failure;
+}
+
+static int process_lifecycle_namespace_child(void *arg)
+{
+	struct process_lifecycle_namespace *state = arg;
+	struct stat namespace;
+	int status;
+	pid_t child;
+
+	if (process_lifecycle_mode_mismatch(state->protected))
+		return 1;
+	if (stat("/proc/self/ns/user", &namespace) ||
+	    namespace.st_ino == state->user_namespace)
+		return 2;
+	if (unshare(CLONE_NEWPID))
+		return 3;
+	if (stat("/proc/self/ns/pid_for_children", &namespace) ||
+	    namespace.st_ino == state->pid_namespace)
+		return 4;
+
+	child = fork();
+	if (!child) {
+		if (process_lifecycle_mode_mismatch(state->protected))
+			_exit(1);
+		if (getpid() != 1 || syscall(SYS_gettid) != 1)
+			_exit(2);
+		if (stat("/proc/self/ns/pid", &namespace) ||
+		    namespace.st_ino == state->pid_namespace)
+			_exit(3);
+		_exit(0);
+	}
+	if (child < 0 || waitpid(child, &status, 0) != child ||
+	    !WIFEXITED(status) || WEXITSTATUS(status))
+		return 5;
+	return 0;
+}
+
+static int run_process_lifecycle_namespaces(bool protected)
+{
+	struct process_lifecycle_namespace state = {
+		.protected = protected,
+	};
+	struct stat namespace;
+	void *stack;
+	int status;
+	pid_t child;
+
+	if (stat("/proc/self/ns/user", &namespace))
+		return 1;
+	state.user_namespace = namespace.st_ino;
+	if (stat("/proc/self/ns/pid", &namespace))
+		return 2;
+	state.pid_namespace = namespace.st_ino;
+	stack = mmap(NULL, PROCESS_LIFECYCLE_STACK_SIZE,
+		     PROT_READ | PROT_WRITE,
+		     MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
+	if (stack == MAP_FAILED)
+		return 3;
+	child = clone(process_lifecycle_namespace_child,
+		      stack + PROCESS_LIFECYCLE_STACK_SIZE,
+		      CLONE_NEWUSER | SIGCHLD, &state);
+	if (child < 0 || waitpid(child, &status, 0) != child ||
+	    !WIFEXITED(status) || WEXITSTATUS(status)) {
+		munmap(stack, PROCESS_LIFECYCLE_STACK_SIZE);
+		return 4;
+	}
+	if (munmap(stack, PROCESS_LIFECYCLE_STACK_SIZE))
+		return 5;
+	return 0;
+}
+
+static int process_lifecycle_read(int fd, void *data, size_t size)
+{
+	char *p = data;
+
+	while (size) {
+		ssize_t n = read(fd, p, size);
+
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			return -1;
+		p += n;
+		size -= n;
+	}
+	return 0;
+}
+
+static int process_lifecycle_write(int fd, const void *data, size_t size)
+{
+	const char *p = data;
+
+	while (size) {
+		ssize_t n = write(fd, p, size);
+
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			return -1;
+		p += n;
+		size -= n;
+	}
+	return 0;
+}
+
+static int run_process_lifecycle_daemon(bool protected)
+{
+	struct process_lifecycle_daemon_record record;
+	struct pollfd pollfd = {
+		.events = POLLIN,
+	};
+	char pid_file[] = "/tmp/protected-process-XXXXXX";
+	char pid_string[32], value;
+	int control[2], fd, ready[2], status;
+	pid_t child;
+
+	fd = mkstemp(pid_file);
+	if (fd < 0 || close(fd) || pipe(control) || pipe(ready))
+		return 1;
+	child = fork();
+	if (!child) {
+		pid_t daemon;
+
+		close(control[1]);
+		close(ready[0]);
+		if (setsid() < 0)
+			_exit(1);
+		daemon = fork();
+		if (daemon)
+			_exit(daemon < 0 ? 2 : 0);
+		if (process_lifecycle_read(control[0], &value, sizeof(value)))
+			_exit(3);
+		record = (struct process_lifecycle_daemon_record) {
+			.pid = getpid(),
+			.parent = getppid(),
+			.session = getsid(0),
+			.result = process_lifecycle_mode_mismatch(protected),
+		};
+		fd = open(pid_file, O_WRONLY | O_TRUNC | O_CLOEXEC);
+		if (fd < 0)
+			record.result = 4;
+		else {
+			int length = snprintf(pid_string, sizeof(pid_string), "%d\n",
+					      record.pid);
+
+			if (process_lifecycle_write(fd, pid_string, length) || close(fd))
+				record.result = 5;
+		}
+		if (process_lifecycle_write(ready[1], &record, sizeof(record)) ||
+		    process_lifecycle_read(control[0], &value, sizeof(value)))
+			_exit(6);
+		_exit(record.result);
+	}
+	close(control[0]);
+	close(ready[1]);
+	if (child < 0 || waitpid(child, &status, 0) != child ||
+	    !WIFEXITED(status) || WEXITSTATUS(status))
+		return 2;
+	value = 1;
+	if (process_lifecycle_write(control[1], &value, sizeof(value)) ||
+	    process_lifecycle_read(ready[0], &record, sizeof(record)))
+		return 3;
+	if (record.result || record.pid == child || record.pid == getpid() ||
+	    record.parent != 1 || record.session != child)
+		return 4;
+	fd = open(pid_file, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 5;
+	memset(pid_string, 0, sizeof(pid_string));
+	if (read(fd, pid_string, sizeof(pid_string) - 1) <= 0 || close(fd) ||
+	    strtol(pid_string, NULL, 10) != record.pid)
+		return 6;
+	pollfd.fd = syscall(SYS_pidfd_open, record.pid, 0);
+	if (pollfd.fd < 0)
+		return 7;
+	if (process_lifecycle_write(control[1], &value, sizeof(value)) ||
+	    poll(&pollfd, 1, 5000) != 1 || !(pollfd.revents & POLLIN))
+		return 8;
+	if (close(pollfd.fd) || close(control[1]) || close(ready[0]) ||
+	    unlink(pid_file))
+		return 9;
+	return 0;
+}
+
+static int process_lifecycle_reexec(bool protected, unsigned int generation,
+				    pid_t pid)
+{
+	char generation_string[32];
+	char pid_string[32];
+
+	snprintf(generation_string, sizeof(generation_string), "%u", generation);
+	snprintf(pid_string, sizeof(pid_string), "%d", pid);
+	execl("/proc/self/exe", "protected_task_test",
+	      "--process-lifecycle-target", protected ? "protected" : "native",
+	      generation_string, pid_string, NULL);
+	return errno ?: EIO;
+}
+
+static void *process_lifecycle_exec_thread(void *arg)
+{
+	struct process_lifecycle_exec *exec = arg;
+	int ret;
+
+	ret = process_lifecycle_reexec(exec->protected, 1, exec->pid);
+	return (void *)(uintptr_t)ret;
+}
+
+static int run_process_lifecycle_target(bool protected,
+					unsigned int generation,
+					pid_t original_pid)
+{
+	struct process_lifecycle_exec exec = {
+		.protected = protected,
+		.pid = original_pid,
+	};
+	void *result;
+	pthread_t thread;
+	int ret;
+
+	if (process_lifecycle_mode_mismatch(protected))
+		return 1;
+	if (getpid() != original_pid || syscall(SYS_gettid) != original_pid)
+		return 5;
+	if (generation) {
+		if (generation == 4)
+			return 0;
+		ret = process_lifecycle_reexec(protected, generation + 1,
+					       original_pid);
+		return 20 + !!ret;
+	}
+
+	ret = run_process_lifecycle_threads(protected);
+	if (ret)
+		return ret;
+	ret = run_process_lifecycle_fork_exec(protected);
+	if (ret)
+		return 10 + ret;
+	ret = run_process_lifecycle_clone3(protected);
+	if (ret)
+		return 20 + ret;
+	ret = run_process_lifecycle_namespaces(protected);
+	if (ret)
+		return 30 + ret;
+	ret = run_process_lifecycle_daemon(protected);
+	if (ret)
+		return 40 + ret;
+	if (pthread_create(&thread, NULL, process_lifecycle_exec_thread, &exec))
+		return 50;
+	if (pthread_join(thread, &result))
+		return 51;
+	return 52 + !!result;
 }
 
 static void assert_ioctl_errno(int fd, unsigned long request, void *arg,
@@ -1797,6 +2313,46 @@ static void test_protected_process_state(int kvm_fd)
 {
 	run_process_state_target(kvm_fd, false);
 	run_process_state_target(kvm_fd, true);
+}
+
+static void run_process_lifecycle_control(int kvm_fd, bool protected)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "process-lifecycle fork() failed: %d", errno);
+	if (!child) {
+		if (protected) {
+			int fd, ret;
+
+			fd = create_context_with_features(kvm_fd,
+						  KVM_PROTECTED_TASK_FEATURE_EXEC);
+			ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+			TEST_ASSERT(ret == 0,
+				    KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		}
+		execl("/proc/self/exe", "protected_task_test",
+		      "--process-lifecycle-target",
+		      protected ? "protected" : "native", NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() for %s process-lifecycle target failed: %d",
+		    protected ? "protected" : "native", errno);
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "%s process-lifecycle target failed: %#x",
+		    protected ? "Protected" : "Native", status);
+}
+
+static void test_protected_process_lifecycle(int kvm_fd)
+{
+	run_process_lifecycle_control(kvm_fd, false);
+	run_process_lifecycle_control(kvm_fd, true);
 }
 
 static int run_dso_stress_target(void)
@@ -4440,6 +4996,7 @@ static void test_protected_exec(int kvm_fd)
 int main(int argc, char *argv[])
 {
 	struct kvm_protected_task_info first_info, second_info;
+	bool process_lifecycle_only;
 	int kvm_fd, first_fd, second_fd;
 
 	if (argc == 2 && !strcmp(argv[1], "--entry-target"))
@@ -4448,6 +5005,41 @@ int main(int argc, char *argv[])
 		return run_process_rseq_target(false);
 	if (argc == 2 && !strcmp(argv[1], "--process-rseq-reexec-target"))
 		return run_process_rseq_target(true);
+	if ((argc == 3 || argc == 5) &&
+	    !strcmp(argv[1], "--process-lifecycle-target")) {
+		unsigned long generation = 0;
+		long original_pid = getpid();
+		char *end;
+
+		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
+			return 127;
+		if (argc == 5) {
+			errno = 0;
+			generation = strtoul(argv[3], &end, 10);
+			if (errno || *end || generation > 4)
+				return 127;
+			errno = 0;
+			original_pid = strtol(argv[4], &end, 10);
+			if (errno || *end || original_pid <= 0 ||
+			    original_pid > INT_MAX)
+				return 127;
+		}
+		return run_process_lifecycle_target(!strcmp(argv[2], "protected"),
+						    generation, original_pid);
+	}
+	if (argc == 4 && !strcmp(argv[1], "--process-lifecycle-leaf")) {
+		long parent_pid;
+		char *end;
+
+		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
+			return 127;
+		errno = 0;
+		parent_pid = strtol(argv[3], &end, 10);
+		if (errno || *end || parent_pid <= 0 || parent_pid > INT_MAX)
+			return 127;
+		return run_process_lifecycle_leaf(!strcmp(argv[2], "protected"),
+						  parent_pid);
+	}
 	if (argc == 3 && !strcmp(argv[1], "--oom-target"))
 		return run_oom_target(atoi(argv[2]));
 	if (argc == 2 && !strcmp(argv[1], "--io-permission-exec-target"))
@@ -4468,10 +5060,17 @@ int main(int argc, char *argv[])
 		return run_memory_hotplug_target(atoi(argv[2]));
 	if (argc == 2 && !strcmp(argv[1], "--uffd-invalidation-target"))
 		return run_uffd_invalidation_target();
+	process_lifecycle_only = argc == 2 &&
+		!strcmp(argv[1], "--process-lifecycle-test");
 
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
 			   KVM_CAP_PROTECTED_TASK) == 1);
+	if (process_lifecycle_only) {
+		test_protected_process_lifecycle(kvm_fd);
+		close(kvm_fd);
+		return 0;
+	}
 
 	test_create_validation(kvm_fd);
 	first_fd = create_context(kvm_fd);
@@ -4494,6 +5093,7 @@ int main(int argc, char *argv[])
 	test_io_permissions_reject_exec(kvm_fd);
 	test_protected_entry_returns(kvm_fd);
 	test_protected_process_state(kvm_fd);
+	test_protected_process_lifecycle(kvm_fd);
 	test_swap_reclaim(kvm_fd);
 	test_numa_stress(kvm_fd);
 	test_memory_hotplug(kvm_fd);
