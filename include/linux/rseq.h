@@ -106,6 +106,19 @@ static inline void rseq_force_update(void)
 	}
 }
 
+static inline void rseq_virt_user_enter(void)
+{
+	if (IS_ENABLED(CONFIG_GENERIC_IRQ_ENTRY))
+		current->rseq.event.user_irq = true;
+}
+
+static inline void rseq_virt_user_exit(void)
+{
+	if (IS_ENABLED(CONFIG_GENERIC_IRQ_ENTRY) &&
+	    !current->rseq.event.sched_switch)
+		current->rseq.event.user_irq = false;
+}
+
 /*
  * KVM/HYPERV invoke resume_user_mode_work() before entering guest mode,
  * which clears TIF_NOTIFY_RESUME on architectures that don't use the
@@ -179,6 +192,8 @@ static inline void rseq_signal_deliver(struct ksignal *ksig, struct pt_regs *reg
 static inline void rseq_sched_switch_event(struct task_struct *t) { }
 static inline void rseq_sched_set_ids_changed(struct task_struct *t) { }
 static inline void rseq_force_update(void) { }
+static inline void rseq_virt_user_enter(void) { }
+static inline void rseq_virt_user_exit(void) { }
 static inline void rseq_virt_userspace_exit(void) { }
 static inline void rseq_fork(struct task_struct *t, u64 clone_flags) { }
 static inline void rseq_execve(struct task_struct *t) { }

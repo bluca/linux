@@ -4709,6 +4709,8 @@ int kvm_protected_task_vcpu_run(struct kvm_vcpu *vcpu)
 		return r;
 
 	vcpu->wants_to_run = true;
+	rseq_virt_user_exit();
+	rseq_virt_user_enter();
 	r = kvm_arch_vcpu_ioctl_run(vcpu);
 	vcpu->wants_to_run = false;
 	rseq_virt_userspace_exit();

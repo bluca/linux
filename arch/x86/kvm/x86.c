@@ -2251,7 +2251,8 @@ static inline bool kvm_vcpu_exit_request(struct kvm_vcpu *vcpu)
 	xfer_to_guest_mode_prepare();
 
 	return READ_ONCE(vcpu->mode) == EXITING_GUEST_MODE ||
-	       kvm_request_pending(vcpu) || xfer_to_guest_mode_work_pending();
+	       kvm_request_pending(vcpu) || xfer_to_guest_mode_work_pending() ||
+	       (vcpu->kvm->protected_task && test_thread_flag(TIF_RSEQ));
 }
 
 static fastpath_t __handle_fastpath_wrmsr(struct kvm_vcpu *vcpu, u32 msr, u64 data)
@@ -11731,6 +11732,11 @@ static int vcpu_run(struct kvm_vcpu *vcpu)
 
 		if (r <= 0)
 			break;
+		if (unlikely(vcpu->kvm->protected_task &&
+			     test_thread_flag(TIF_RSEQ))) {
+			r = -EINTR;
+			break;
+		}
 
 		kvm_clear_request(KVM_REQ_UNBLOCK, vcpu);
 		if (kvm_xen_has_pending_events(vcpu))
