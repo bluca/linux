@@ -22,12 +22,14 @@
 #include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/socket.h>
+#include <sys/rseq.h>
 #include <sys/uio.h>
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <asm/prctl.h>
+#include <linux/futex.h>
 #include <linux/io_uring.h>
 #include <linux/kvm.h>
 #include <linux/mempolicy.h>
@@ -198,6 +200,620 @@ static int run_entry_target(void)
 	if (run_entry_restart())
 		return 1;
 	return run_entry_task_work();
+}
+
+enum protected_rseq_action {
+	PROTECTED_RSEQ_PREEMPT = 1,
+	PROTECTED_RSEQ_MIGRATE,
+	PROTECTED_RSEQ_SIGNAL,
+	PROTECTED_RSEQ_FORK,
+	PROTECTED_RSEQ_EXEC,
+	PROTECTED_RSEQ_EXIT,
+};
+
+struct protected_rseq_args {
+	void *data;
+	long result;
+	int aborted;
+};
+
+struct protected_rseq_preempt {
+	int start;
+	int done;
+};
+
+struct protected_rseq_migration {
+	int start;
+	int done;
+	int ready;
+	int result;
+	pid_t tid;
+	size_t size;
+	cpu_set_t mask;
+};
+
+struct protected_rseq_signal {
+	int start;
+	int result;
+	volatile sig_atomic_t *seen;
+	pid_t tgid;
+	pid_t tid;
+};
+
+struct protected_rseq_fork {
+	int state;
+	int release;
+	size_t size;
+	cpu_set_t mask;
+};
+
+struct protected_rseq_exec {
+	const char *path;
+	char *const *argv;
+	char *const *envp;
+};
+
+extern const struct rseq_cs protected_rseq_cs;
+extern int protected_rseq_action(struct rseq *rseq, int action,
+				 struct protected_rseq_args *args);
+
+_Static_assert(offsetof(struct protected_rseq_args, data) == 0);
+_Static_assert(offsetof(struct protected_rseq_args, result) == 8);
+_Static_assert(offsetof(struct protected_rseq_args, aborted) == 16);
+_Static_assert(offsetof(struct protected_rseq_preempt, start) == 0);
+_Static_assert(offsetof(struct protected_rseq_preempt, done) == 4);
+_Static_assert(offsetof(struct protected_rseq_migration, start) == 0);
+_Static_assert(offsetof(struct protected_rseq_migration, done) == 4);
+_Static_assert(offsetof(struct protected_rseq_migration, size) == 24);
+_Static_assert(offsetof(struct protected_rseq_migration, mask) == 32);
+_Static_assert(offsetof(struct protected_rseq_signal, start) == 0);
+_Static_assert(offsetof(struct protected_rseq_signal, seen) == 8);
+_Static_assert(offsetof(struct protected_rseq_signal, tgid) == 16);
+_Static_assert(offsetof(struct protected_rseq_signal, tid) == 20);
+_Static_assert(offsetof(struct protected_rseq_fork, state) == 0);
+_Static_assert(offsetof(struct protected_rseq_fork, release) == 4);
+_Static_assert(offsetof(struct protected_rseq_fork, size) == 8);
+_Static_assert(offsetof(struct protected_rseq_fork, mask) == 16);
+_Static_assert(offsetof(struct protected_rseq_exec, path) == 0);
+_Static_assert(offsetof(struct protected_rseq_exec, argv) == 8);
+_Static_assert(offsetof(struct protected_rseq_exec, envp) == 16);
+
+asm(
+".pushsection __rseq_cs, \"aw\"\n"
+".balign 32\n"
+".global protected_rseq_cs\n"
+".type protected_rseq_cs, @object\n"
+"protected_rseq_cs:\n"
+".long 0, 0\n"
+".quad .Lprotected_rseq_start\n"
+".quad .Lprotected_rseq_post_commit - .Lprotected_rseq_start\n"
+".quad .Lprotected_rseq_abort\n"
+".size protected_rseq_cs, .-protected_rseq_cs\n"
+".popsection\n"
+".pushsection __rseq_cs_ptr_array, \"aw\"\n"
+".quad protected_rseq_cs\n"
+".popsection\n"
+".pushsection .text\n"
+".balign 16\n"
+".global protected_rseq_action\n"
+".type protected_rseq_action, @function\n"
+"protected_rseq_action:\n"
+"mov %rdi, %r8\n"
+"mov %rdx, %r9\n"
+"lea protected_rseq_cs(%rip), %rax\n"
+"mov %rax, 8(%r8)\n"
+"movl $0, 16(%r9)\n"
+"mov $-11, %rax\n"
+".Lprotected_rseq_start:\n"
+"cmp $1, %esi\n"
+"je .Lprotected_rseq_preempt\n"
+"cmp $2, %esi\n"
+"je .Lprotected_rseq_migrate\n"
+"cmp $3, %esi\n"
+"je .Lprotected_rseq_signal\n"
+"cmp $4, %esi\n"
+"je .Lprotected_rseq_fork\n"
+"cmp $5, %esi\n"
+"je .Lprotected_rseq_exec\n"
+"cmp $6, %esi\n"
+"je .Lprotected_rseq_exit\n"
+"mov $-22, %rax\n"
+"jmp .Lprotected_rseq_post_commit\n"
+".Lprotected_rseq_preempt:\n"
+"mov 0(%r9), %r10\n"
+"xor %eax, %eax\n"
+"movl $1, 0(%r10)\n"
+".Lprotected_rseq_preempt_wait:\n"
+"pause\n"
+"cmpl $0, 4(%r10)\n"
+"je .Lprotected_rseq_preempt_wait\n"
+"jmp .Lprotected_rseq_post_commit\n"
+".Lprotected_rseq_migrate:\n"
+"mov 0(%r9), %r10\n"
+"xor %eax, %eax\n"
+"movl $1, 0(%r10)\n"
+".Lprotected_rseq_migrate_wait:\n"
+"pause\n"
+"cmpl $0, 4(%r10)\n"
+"je .Lprotected_rseq_migrate_wait\n"
+"jmp .Lprotected_rseq_post_commit\n"
+".Lprotected_rseq_signal:\n"
+"mov 0(%r9), %r10\n"
+"xor %eax, %eax\n"
+"movl $1, 0(%r10)\n"
+"mov 8(%r10), %r11\n"
+".Lprotected_rseq_signal_wait:\n"
+"pause\n"
+"cmpl $0, 0(%r11)\n"
+"je .Lprotected_rseq_signal_wait\n"
+"jmp .Lprotected_rseq_post_commit\n"
+".Lprotected_rseq_fork:\n"
+"mov $57, %eax\n"
+"syscall\n"
+"test %rax, %rax\n"
+"jne .Lprotected_rseq_post_commit\n"
+"mov 0(%r9), %r10\n"
+"movl $1, 0(%r10)\n"
+".Lprotected_rseq_fork_wait:\n"
+"pause\n"
+"cmpl $0, 4(%r10)\n"
+"je .Lprotected_rseq_fork_wait\n"
+"jmp .Lprotected_rseq_post_commit\n"
+".Lprotected_rseq_exec:\n"
+"mov 0(%r9), %r10\n"
+"mov 0(%r10), %rdi\n"
+"mov 8(%r10), %rsi\n"
+"mov 16(%r10), %rdx\n"
+"mov $59, %eax\n"
+"syscall\n"
+"jmp .Lprotected_rseq_post_commit\n"
+".Lprotected_rseq_exit:\n"
+"xor %edi, %edi\n"
+"mov $60, %eax\n"
+"syscall\n"
+"ud2\n"
+".Lprotected_rseq_post_commit:\n"
+"mov %rax, 8(%r9)\n"
+"movq $0, 8(%r8)\n"
+"xor %eax, %eax\n"
+"ret\n"
+".pushsection __rseq_failure, \"ax\"\n"
+".byte 0x0f, 0xb9, 0x3d\n"
+".long 0x53053053\n"
+".Lprotected_rseq_abort:\n"
+"movl $1, 16(%r9)\n"
+"mov %rax, 8(%r9)\n"
+"movq $0, 8(%r8)\n"
+"xor %eax, %eax\n"
+"ret\n"
+".popsection\n"
+".size protected_rseq_action, .-protected_rseq_action\n"
+".popsection\n"
+);
+
+static struct rseq *current_rseq(void)
+{
+	if (__rseq_size < offsetof(struct rseq, rseq_cs) + sizeof(uint64_t) ||
+	    __rseq_flags)
+		return NULL;
+	return (void *)((char *)__builtin_thread_pointer() + __rseq_offset);
+}
+
+static volatile sig_atomic_t protected_rseq_signal_seen;
+
+static void protected_rseq_signal_handler(int signal)
+{
+	if (signal != SIGUSR1)
+		_exit(211);
+	protected_rseq_signal_seen = 1;
+}
+
+static int validate_current_rseq(void)
+{
+	struct rseq *rseq = current_rseq();
+
+	return !rseq || rseq->rseq_cs ||
+		rseq->cpu_id == RSEQ_CPU_ID_UNINITIALIZED ||
+		rseq->cpu_id == RSEQ_CPU_ID_REGISTRATION_FAILED;
+}
+
+static void *protected_rseq_preempt_thread(void *arg)
+{
+	struct protected_rseq_preempt *preempt = arg;
+
+	while (!__atomic_load_n(&preempt->start, __ATOMIC_ACQUIRE))
+		sched_yield();
+	__atomic_store_n(&preempt->done, 1, __ATOMIC_RELEASE);
+	return NULL;
+}
+
+static void *protected_rseq_migration_thread(void *arg)
+{
+	struct protected_rseq_migration *migration = arg;
+
+	if (sched_setaffinity(0, migration->size, &migration->mask))
+		migration->result = -errno;
+	__atomic_store_n(&migration->ready, 1, __ATOMIC_RELEASE);
+	if (migration->result)
+		return NULL;
+
+	while (!__atomic_load_n(&migration->start, __ATOMIC_ACQUIRE))
+		sched_yield();
+	if (sched_setaffinity(migration->tid, migration->size, &migration->mask))
+		migration->result = -errno;
+	__atomic_store_n(&migration->done, 1, __ATOMIC_RELEASE);
+	return NULL;
+}
+
+static void *protected_rseq_signal_thread(void *arg)
+{
+	struct protected_rseq_signal *signal_data = arg;
+
+	while (!__atomic_load_n(&signal_data->start, __ATOMIC_ACQUIRE))
+		sched_yield();
+	if (syscall(SYS_tgkill, signal_data->tgid, signal_data->tid, SIGUSR1)) {
+		signal_data->result = -errno;
+		__atomic_store_n(signal_data->seen, 1, __ATOMIC_RELEASE);
+	}
+	return NULL;
+}
+
+static int run_protected_rseq_tests(void)
+{
+	struct protected_rseq_preempt preempt = {};
+	struct protected_rseq_migration migration = {};
+	struct protected_rseq_fork *fork_data;
+	struct protected_rseq_signal signal_data = {
+		.seen = &protected_rseq_signal_seen,
+		.tgid = getpid(),
+		.tid = syscall(SYS_gettid),
+	};
+	struct protected_rseq_args args = {};
+	struct sigaction action = {
+		.sa_handler = protected_rseq_signal_handler,
+	};
+	cpu_set_t original, single;
+	pthread_t thread;
+	struct rseq *rseq;
+	int cpus[2], force_errno = 0, nr_cpus = 0, restore_ret, ret, status;
+
+	if (validate_current_rseq() || sched_getaffinity(0, sizeof(original),
+						    &original))
+		return 1;
+	for (int cpu = 0; cpu < CPU_SETSIZE && nr_cpus < ARRAY_SIZE(cpus); cpu++)
+		if (CPU_ISSET(cpu, &original))
+			cpus[nr_cpus++] = cpu;
+	if (!nr_cpus)
+		return 2;
+
+	CPU_ZERO(&single);
+	CPU_SET(cpus[0], &single);
+	if (sched_setaffinity(0, sizeof(single), &single))
+		return 3;
+	rseq = current_rseq();
+	if (pthread_create(&thread, NULL, protected_rseq_preempt_thread, &preempt))
+		return 4;
+	args.data = &preempt;
+	ret = protected_rseq_action(rseq, PROTECTED_RSEQ_PREEMPT, &args);
+	__atomic_store_n(&preempt.start, 1, __ATOMIC_RELEASE);
+	if (pthread_join(thread, NULL))
+		return 4;
+	if (ret)
+		return 5;
+	if (!args.aborted)
+		return 27;
+	if (args.result)
+		return 28;
+	if (!__atomic_load_n(&preempt.done, __ATOMIC_ACQUIRE))
+		return 29;
+
+	if (nr_cpus > 1) {
+		migration.tid = syscall(SYS_gettid);
+		migration.size = sizeof(migration.mask);
+		CPU_ZERO(&migration.mask);
+		CPU_SET(cpus[1], &migration.mask);
+		if (pthread_create(&thread, NULL, protected_rseq_migration_thread,
+				   &migration))
+			return 6;
+		while (!__atomic_load_n(&migration.ready, __ATOMIC_ACQUIRE))
+			sched_yield();
+		if (migration.result) {
+			pthread_join(thread, NULL);
+			return 6;
+		}
+		args = (struct protected_rseq_args) { .data = &migration };
+		ret = protected_rseq_action(rseq, PROTECTED_RSEQ_MIGRATE, &args);
+		__atomic_store_n(&migration.start, 1, __ATOMIC_RELEASE);
+		if (pthread_join(thread, NULL) || ret)
+			return 7;
+		if (!args.aborted)
+			return 13;
+		if (args.result || migration.result)
+			return 14;
+		if (sched_getcpu() != cpus[1])
+			return 15;
+	}
+	if (sched_setaffinity(0, sizeof(original), &original))
+		return 8;
+
+	sigemptyset(&action.sa_mask);
+	if (sigaction(SIGUSR1, &action, NULL))
+		return 9;
+	protected_rseq_signal_seen = 0;
+	if (pthread_create(&thread, NULL, protected_rseq_signal_thread,
+			   &signal_data))
+		return 10;
+	args = (struct protected_rseq_args) { .data = &signal_data };
+	ret = protected_rseq_action(rseq, PROTECTED_RSEQ_SIGNAL, &args);
+	__atomic_store_n(&signal_data.start, 1, __ATOMIC_RELEASE);
+	if (pthread_join(thread, NULL) || ret)
+		return 10;
+	if (!args.aborted)
+		return 16;
+	if (args.result || signal_data.result)
+		return 17;
+	if (!protected_rseq_signal_seen)
+		return 18;
+
+	fork_data = mmap(NULL, sizeof(*fork_data), PROT_READ | PROT_WRITE,
+			 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	if (fork_data == MAP_FAILED)
+		return 19;
+	fork_data->size = sizeof(fork_data->mask);
+	CPU_ZERO(&fork_data->mask);
+	if (nr_cpus > 1)
+		CPU_SET(cpus[1], &fork_data->mask);
+	if (sched_setaffinity(0, sizeof(single), &single)) {
+		munmap(fork_data, sizeof(*fork_data));
+		return 19;
+	}
+
+	args = (struct protected_rseq_args) { .data = fork_data };
+	ret = protected_rseq_action(rseq, PROTECTED_RSEQ_FORK, &args);
+	if (!args.result) {
+		__atomic_store_n(&fork_data->state, 2, __ATOMIC_RELEASE);
+		if (!args.aborted)
+			_exit(1);
+		_exit(validate_current_rseq() ? 2 : 0);
+	}
+	if (ret || args.result < 0) {
+		sched_setaffinity(0, sizeof(original), &original);
+		munmap(fork_data, sizeof(*fork_data));
+		return ret ? 11 : 12;
+	}
+
+	while (!__atomic_load_n(&fork_data->state, __ATOMIC_ACQUIRE))
+		sched_yield();
+	if (__atomic_load_n(&fork_data->state, __ATOMIC_ACQUIRE) == 1) {
+		if (nr_cpus > 1)
+			ret = sched_setaffinity(args.result, fork_data->size,
+					    &fork_data->mask);
+		else
+			ret = syscall(SYS_tgkill, args.result, args.result, SIGUSR1);
+		if (ret)
+			force_errno = errno;
+	}
+	__atomic_store_n(&fork_data->release, 1, __ATOMIC_RELEASE);
+	ret = waitpid(args.result, &status, 0);
+	restore_ret = sched_setaffinity(0, sizeof(original), &original);
+	if (munmap(fork_data, sizeof(*fork_data)))
+		return 26;
+	if (force_errno && force_errno != ESRCH)
+		return 24;
+	if (restore_ret)
+		return 25;
+	if (ret != args.result)
+		return 19;
+	if (!WIFEXITED(status))
+		return 20;
+	if (WEXITSTATUS(status))
+		return 20 + WEXITSTATUS(status);
+	if (rseq->rseq_cs)
+		return 23;
+	return 0;
+}
+
+static void *protected_rseq_exit_thread(void *arg)
+{
+	struct protected_rseq_args args = {};
+	struct rseq *rseq = current_rseq();
+
+	if (!rseq || rseq->rseq_cs) {
+		*(int *)arg = 1;
+		return NULL;
+	}
+	protected_rseq_action(rseq, PROTECTED_RSEQ_EXIT, &args);
+	*(int *)arg = 2;
+	return NULL;
+}
+
+static void *protected_rseq_reuse_thread(void *arg)
+{
+	*(int *)arg = validate_current_rseq();
+	return NULL;
+}
+
+struct protected_cancel_state {
+	pthread_mutex_t mutex;
+	atomic_bool ready;
+};
+
+struct protected_robust_entry {
+	struct robust_list list;
+	int futex;
+};
+
+struct protected_fatal_state {
+	struct robust_list_head head;
+	struct protected_robust_entry entry;
+	atomic_bool ready;
+	atomic_int clear_tid;
+};
+
+static int init_robust_mutex(pthread_mutex_t *mutex, bool shared)
+{
+	pthread_mutexattr_t attr;
+	int ret;
+
+	ret = pthread_mutexattr_init(&attr);
+	if (ret)
+		return ret;
+	ret = pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
+	if (!ret && shared)
+		ret = pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+	if (!ret)
+		ret = pthread_mutex_init(mutex, &attr);
+	if (pthread_mutexattr_destroy(&attr) && !ret)
+		ret = EINVAL;
+	return ret;
+}
+
+static void *protected_cancel_thread(void *arg)
+{
+	struct protected_cancel_state *state = arg;
+
+	if (pthread_mutex_lock(&state->mutex))
+		return (void *)1;
+	atomic_store_explicit(&state->ready, true, memory_order_release);
+	for (;;) {
+		pthread_testcancel();
+		sched_yield();
+	}
+}
+
+static int run_robust_cancel_test(void)
+{
+	struct protected_cancel_state state = {};
+	void *result;
+	pthread_t thread;
+	int ret;
+
+	ret = init_robust_mutex(&state.mutex, false);
+	if (ret || pthread_create(&thread, NULL, protected_cancel_thread, &state))
+		return 1;
+	while (!atomic_load_explicit(&state.ready, memory_order_acquire))
+		sched_yield();
+	if (pthread_cancel(thread) || pthread_join(thread, &result) ||
+	    result != PTHREAD_CANCELED)
+		return 2;
+	ret = pthread_mutex_lock(&state.mutex);
+	if (ret != EOWNERDEAD || pthread_mutex_consistent(&state.mutex) ||
+	    pthread_mutex_unlock(&state.mutex) ||
+	    pthread_mutex_destroy(&state.mutex))
+		return 3;
+	return 0;
+}
+
+static int protected_fatal_child(void *arg)
+{
+	const struct timespec delay = { .tv_nsec = 20 * 1000 * 1000 };
+	struct protected_fatal_state *state = arg;
+	pid_t tid = syscall(SYS_gettid);
+
+	atomic_store_explicit(&state->clear_tid, tid, memory_order_release);
+	__atomic_store_n(&state->entry.futex, tid, __ATOMIC_RELEASE);
+	if (syscall(SYS_set_tid_address, &state->clear_tid) != tid ||
+	    syscall(SYS_set_robust_list, &state->head, sizeof(state->head)))
+		return 1;
+	atomic_store_explicit(&state->ready, true, memory_order_release);
+	if (syscall(SYS_nanosleep, &delay, NULL) ||
+	    syscall(SYS_tgkill, syscall(SYS_getpid), tid, SIGKILL))
+		return 2;
+	return 3;
+}
+
+static int run_robust_fatal_test(void)
+{
+	const size_t stack_size = 1 << 20;
+	struct protected_fatal_state *state;
+	void *stack;
+	int ret, status, tid;
+	pid_t child;
+
+	state = mmap(NULL, sizeof(*state), PROT_READ | PROT_WRITE,
+		     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	if (state == MAP_FAILED)
+		return 1;
+	memset(state, 0, sizeof(*state));
+	state->head.list.next = &state->entry.list;
+	state->head.futex_offset = (char *)&state->entry.futex -
+				   (char *)&state->entry.list;
+	state->entry.list.next = &state->head.list;
+	stack = mmap(NULL, stack_size, PROT_READ | PROT_WRITE,
+		     MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
+	if (stack == MAP_FAILED)
+		return 2;
+
+	child = clone(protected_fatal_child, stack + stack_size,
+		      CLONE_VM | SIGCHLD, state);
+	if (child < 0)
+		return 3;
+
+	while (!atomic_load_explicit(&state->ready, memory_order_acquire))
+		sched_yield();
+	tid = atomic_load_explicit(&state->clear_tid, memory_order_acquire);
+	do {
+		ret = syscall(SYS_futex, &state->clear_tid, FUTEX_WAIT, tid,
+			      NULL, NULL, 0);
+	} while (ret < 0 && errno == EINTR);
+	if (ret < 0 && (errno != EAGAIN ||
+			atomic_load_explicit(&state->clear_tid,
+					     memory_order_acquire)))
+		return 4;
+	if (waitpid(child, &status, 0) != child || !WIFSIGNALED(status) ||
+	    WTERMSIG(status) != SIGKILL ||
+	    atomic_load_explicit(&state->clear_tid, memory_order_acquire))
+		return 5;
+	if (__atomic_load_n(&state->entry.futex, __ATOMIC_ACQUIRE) !=
+	    FUTEX_OWNER_DIED ||
+	    munmap(stack, stack_size) ||
+	    munmap(state, sizeof(*state)))
+		return 6;
+	return 0;
+}
+
+static int run_process_rseq_target(bool reexec)
+{
+	struct protected_rseq_exec exec_data;
+	struct protected_rseq_args args;
+	char *const argv[] = {
+		"protected_task_test",
+		"--process-rseq-reexec-target",
+		NULL,
+	};
+	extern char **environ;
+	pthread_t thread;
+	int result = 0;
+
+	if (validate_current_rseq())
+		return 20;
+	if (reexec)
+		return 0;
+	result = run_protected_rseq_tests();
+	if (result)
+		return 20 + result;
+
+	if (pthread_create(&thread, NULL, protected_rseq_exit_thread, &result) ||
+	    pthread_join(thread, NULL) || result)
+		return 40;
+	if (pthread_create(&thread, NULL, protected_rseq_reuse_thread, &result) ||
+	    pthread_join(thread, NULL) || result)
+		return 41;
+	result = run_robust_cancel_test();
+	if (result)
+		return 50 + result;
+	result = run_robust_fatal_test();
+	if (result)
+		return 60 + result;
+
+	exec_data = (struct protected_rseq_exec) {
+		.path = "/proc/self/exe",
+		.argv = argv,
+		.envp = environ,
+	};
+	args = (struct protected_rseq_args) { .data = &exec_data };
+	protected_rseq_action(current_rseq(), PROTECTED_RSEQ_EXEC, &args);
+	return 42;
 }
 
 static void assert_ioctl_errno(int fd, unsigned long request, void *arg,
@@ -1142,6 +1758,45 @@ static void test_protected_entry_returns(int kvm_fd)
 	}
 	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
 		    "Protected entry target failed: %#x", status);
+}
+
+static void run_process_state_target(int kvm_fd, bool protected)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "process-state fork() failed: %d", errno);
+	if (!child) {
+		if (protected) {
+			int fd, ret;
+
+			fd = create_context_with_features(kvm_fd,
+						  KVM_PROTECTED_TASK_FEATURE_EXEC);
+			ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+			TEST_ASSERT(ret == 0,
+				    KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		}
+		execl("/proc/self/exe", "protected_task_test",
+		      "--process-state-target", NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() for %s process-state target failed: %d",
+		    protected ? "protected" : "native", errno);
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "%s process-state target failed: %#x",
+		    protected ? "Protected" : "Native", status);
+}
+
+static void test_protected_process_state(int kvm_fd)
+{
+	run_process_state_target(kvm_fd, false);
+	run_process_state_target(kvm_fd, true);
 }
 
 static int run_dso_stress_target(void)
@@ -3789,6 +4444,10 @@ int main(int argc, char *argv[])
 
 	if (argc == 2 && !strcmp(argv[1], "--entry-target"))
 		return run_entry_target();
+	if (argc == 2 && !strcmp(argv[1], "--process-state-target"))
+		return run_process_rseq_target(false);
+	if (argc == 2 && !strcmp(argv[1], "--process-rseq-reexec-target"))
+		return run_process_rseq_target(true);
 	if (argc == 3 && !strcmp(argv[1], "--oom-target"))
 		return run_oom_target(atoi(argv[2]));
 	if (argc == 2 && !strcmp(argv[1], "--io-permission-exec-target"))
@@ -3834,6 +4493,7 @@ int main(int argc, char *argv[])
 	test_close_while_armed(second_fd);
 	test_io_permissions_reject_exec(kvm_fd);
 	test_protected_entry_returns(kvm_fd);
+	test_protected_process_state(kvm_fd);
 	test_swap_reclaim(kvm_fd);
 	test_numa_stress(kvm_fd);
 	test_memory_hotplug(kvm_fd);
