@@ -4,8 +4,10 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <elf.h>
+#include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <limits.h>
 #include <poll.h>
 #include <pthread.h>
@@ -21,27 +23,37 @@
 #include <sys/ioctl.h>
 #include <sys/io.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/ptrace.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/auxv.h>
 #include <sys/rseq.h>
 #include <sys/uio.h>
 #include <sys/user.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include <asm/prctl.h>
+#include <linux/capability.h>
 #include <linux/futex.h>
 #include <linux/io_uring.h>
 #include <linux/kvm.h>
+#include <linux/landlock.h>
 #include <linux/mempolicy.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
+#include <linux/seccomp.h>
+#include <linux/securebits.h>
 #include <linux/userfaultfd.h>
+#include <uapi/linux/filter.h>
 
 #include "kvm_util.h"
 #include "test_util.h"
 #include "cgroup_util.h"
+
+static void get_exec_helper_path(char path[PATH_MAX]);
 
 static int protected_entry_probe(void)
 {
@@ -913,6 +925,7 @@ static void *process_lifecycle_cancel_thread(void *arg)
 		pthread_testcancel();
 		sched_yield();
 	}
+	return NULL;
 }
 
 static int run_process_lifecycle_threads(bool protected)
@@ -1330,6 +1343,161 @@ static int run_process_lifecycle_target(bool protected,
 	if (pthread_join(thread, &result))
 		return 51;
 	return 52 + !!result;
+}
+
+static int run_process_security_target(bool protected, int expected_securebits)
+{
+	struct __user_cap_header_struct header = {
+		.version = _LINUX_CAPABILITY_VERSION_3,
+	};
+	struct __user_cap_data_struct data[_LINUX_CAPABILITY_U32S_3] = {};
+	unsigned int mask = 1U << CAP_NET_RAW;
+
+	if (process_lifecycle_mode_mismatch(protected))
+		return 1;
+	if (prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1)
+		return 2;
+	if (prctl(PR_GET_SECUREBITS, 0, 0, 0, 0) != expected_securebits)
+		return 3;
+	if (prctl(PR_GET_SECCOMP, 0, 0, 0, 0) != SECCOMP_MODE_FILTER)
+		return 4;
+	errno = 0;
+	if (syscall(SYS_getppid) != -1 || errno != EACCES)
+		return 5;
+	if (syscall(SYS_getpgid, 0) != getpgrp())
+		return 6;
+	if (prctl(PR_CAPBSET_READ, CAP_NET_RAW, 0, 0, 0) != 0)
+		return 7;
+	if (syscall(SYS_capget, &header, data))
+		return 8;
+	if ((data[0].effective | data[0].permitted) & mask)
+		return 9;
+	return 0;
+}
+
+static int run_process_security_strict_target(bool protected)
+{
+	if (process_lifecycle_mode_mismatch(protected))
+		return 1;
+	if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT, 0, 0, 0))
+		return 2;
+	syscall(SYS_getpid);
+	return 3;
+}
+
+static int run_process_security_landlock_target(bool protected,
+						 const char *path)
+{
+	int fd;
+
+	if (process_lifecycle_mode_mismatch(protected))
+		return 1;
+	errno = 0;
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		close(fd);
+		return 2;
+	}
+	return errno == EACCES ? 0 : 3;
+}
+
+static int run_process_security_credential_target(bool protected)
+{
+	uid_t ruid, euid, suid;
+	gid_t rgid, egid, sgid;
+	int signal;
+
+	if (process_lifecycle_mode_mismatch(protected))
+		return 1;
+	if (getresuid(&ruid, &euid, &suid) ||
+	    getresgid(&rgid, &egid, &sgid))
+		return 2;
+	if (ruid != TEST_UID || euid || suid ||
+	    rgid != TEST_UID || egid || sgid)
+		return 3;
+	if (getauxval(AT_SECURE) != 1)
+		return 4;
+	if (getenv("LD_PRELOAD") || getenv("LD_LIBRARY_PATH"))
+		return 5;
+	if (!getenv("PROCESS_SECURITY_MARKER") ||
+	    secure_getenv("PROCESS_SECURITY_MARKER"))
+		return 6;
+	if (prctl(PR_GET_PDEATHSIG, &signal) || signal)
+		return 7;
+	return 0;
+}
+
+static int install_process_security_filter(void)
+{
+	struct sock_filter filter[] = {
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+			 offsetof(struct seccomp_data, nr)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getppid, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EACCES),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getpgid, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_LOG),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_fprog program = {
+		.len = ARRAY_SIZE(filter),
+		.filter = filter,
+	};
+
+	return syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &program);
+}
+
+static int create_process_security_executable(const char *source_path,
+					      char path[PATH_MAX], bool setid)
+{
+	struct vfs_cap_data capabilities = {
+		.magic_etc = htole32(VFS_CAP_REVISION_2 |
+					  VFS_CAP_FLAGS_EFFECTIVE),
+		.data[0].permitted = htole32(1U << CAP_NET_BIND_SERVICE),
+	};
+	char buffer[16384];
+	int source = -1, target = -1, result = 0;
+
+	strcpy(path, "/protected-task-security-XXXXXX");
+	target = mkstemp(path);
+	if (target < 0)
+		return -errno;
+	source = open(source_path, O_RDONLY | O_CLOEXEC);
+	if (source < 0) {
+		result = -errno;
+		goto out;
+	}
+	for (;;) {
+		ssize_t size = read(source, buffer, sizeof(buffer));
+
+		if (size < 0 && errno == EINTR)
+			continue;
+		if (size < 0) {
+			result = -errno;
+			goto out;
+		}
+		if (!size)
+			break;
+		if (process_lifecycle_write(target, buffer, size)) {
+			result = -errno;
+			goto out;
+		}
+	}
+	if (fchmod(target, setid ? 06755 : 0755)) {
+		result = -errno;
+		goto out;
+	}
+	if (!setid && fsetxattr(target, "security.capability", &capabilities,
+				       XATTR_CAPS_SZ_2, 0))
+		result = -errno;
+
+out:
+	if (source >= 0)
+		close(source);
+	if (close(target) && !result)
+		result = -errno;
+	if (result)
+		unlink(path);
+	return result;
 }
 
 static void assert_ioctl_errno(int fd, unsigned long request, void *arg,
@@ -2353,6 +2521,306 @@ static void test_protected_process_lifecycle(int kvm_fd)
 {
 	run_process_lifecycle_control(kvm_fd, false);
 	run_process_lifecycle_control(kvm_fd, true);
+}
+
+static void run_process_security_control(int kvm_fd, bool protected)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	char securebits_string[32];
+	int securebits, status;
+	pid_t child;
+
+	securebits = prctl(PR_GET_SECUREBITS, 0, 0, 0, 0);
+	TEST_ASSERT(securebits >= 0, "PR_GET_SECUREBITS failed: %d", errno);
+	securebits |= SECBIT_NO_CAP_AMBIENT_RAISE |
+		SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED;
+	snprintf(securebits_string, sizeof(securebits_string), "%d", securebits);
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "process-security fork() failed: %d", errno);
+	if (!child) {
+		int fd = -1, ret;
+
+		if (protected)
+			fd = create_context_with_features(kvm_fd,
+					  KVM_PROTECTED_TASK_FEATURE_EXEC);
+		TEST_ASSERT(prctl(PR_SET_SECUREBITS, securebits, 0, 0, 0) == 0,
+			    "PR_SET_SECUREBITS failed: %d", errno);
+		TEST_ASSERT(prctl(PR_CAPBSET_DROP, CAP_NET_RAW, 0, 0, 0) == 0,
+			    "PR_CAPBSET_DROP failed: %d", errno);
+		TEST_ASSERT(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0,
+			    "PR_SET_NO_NEW_PRIVS failed: %d", errno);
+		TEST_ASSERT(install_process_security_filter() == 0,
+			    "SECCOMP_SET_MODE_FILTER failed: %d", errno);
+		if (protected) {
+			ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+			TEST_ASSERT(ret == 0,
+				    KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		}
+		execl("/proc/self/exe", "protected_task_test",
+		      "--process-security-target",
+		      protected ? "protected" : "native", securebits_string,
+		      NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() for %s process-security target failed: %d",
+		    protected ? "protected" : "native", errno);
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "%s process-security target failed: %#x",
+		    protected ? "Protected" : "Native", status);
+}
+
+static void run_process_security_strict_control(int kvm_fd, bool protected)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "strict-seccomp fork() failed: %d", errno);
+	if (!child) {
+		if (protected) {
+			int fd, ret;
+
+			fd = create_context_with_features(kvm_fd,
+						  KVM_PROTECTED_TASK_FEATURE_EXEC);
+			ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+			TEST_ASSERT(ret == 0,
+				    KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		}
+		execl("/proc/self/exe", "protected_task_test",
+		      "--process-security-strict-target",
+		      protected ? "protected" : "native", NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() for %s strict-seccomp target failed: %d",
+		    protected ? "protected" : "native", errno);
+	TEST_ASSERT(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL,
+		    "%s strict-seccomp target produced unexpected status: %#x",
+		    protected ? "Protected" : "Native", status);
+}
+
+static int process_security_landlock_allow(int ruleset_fd, const char *path)
+{
+	struct landlock_path_beneath_attr rule = {
+		.allowed_access = LANDLOCK_ACCESS_FS_READ_FILE,
+	};
+	int ret;
+
+	rule.parent_fd = open(path, O_PATH | O_DIRECTORY | O_CLOEXEC);
+	if (rule.parent_fd < 0)
+		return -errno;
+	ret = syscall(SYS_landlock_add_rule, ruleset_fd,
+		      LANDLOCK_RULE_PATH_BENEATH, &rule, 0);
+	if (ret)
+		ret = -errno;
+	if (close(rule.parent_fd) && !ret)
+		ret = -errno;
+	return ret;
+}
+
+static void run_process_security_landlock_control(
+		int kvm_fd, bool protected, const char *self, const char *path)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "Landlock fork() failed: %d", errno);
+	if (!child) {
+		struct landlock_ruleset_attr ruleset = {
+			.handled_access_fs = LANDLOCK_ACCESS_FS_READ_FILE,
+		};
+		int fd = -1, ret, ruleset_fd;
+
+		if (protected)
+			fd = create_context_with_features(kvm_fd,
+					  KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ruleset_fd = syscall(SYS_landlock_create_ruleset, &ruleset,
+				     sizeof(ruleset), 0);
+		TEST_ASSERT(ruleset_fd >= 0,
+			    "landlock_create_ruleset() failed: %d", errno);
+		ret = process_security_landlock_allow(ruleset_fd, "/usr");
+		TEST_ASSERT(!ret, "Failed to allow /usr through Landlock: %d",
+			    -ret);
+		ret = process_security_landlock_allow(ruleset_fd, "/etc");
+		TEST_ASSERT(!ret, "Failed to allow /etc through Landlock: %d",
+			    -ret);
+		ret = process_security_landlock_allow(ruleset_fd, "/dev");
+		TEST_ASSERT(!ret, "Failed to allow /dev through Landlock: %d",
+			    -ret);
+		ret = process_security_landlock_allow(ruleset_fd, "/proc");
+		TEST_ASSERT(!ret, "Failed to allow /proc through Landlock: %d",
+			    -ret);
+		ret = process_security_landlock_allow(ruleset_fd, "/sys");
+		TEST_ASSERT(!ret, "Failed to allow /sys through Landlock: %d",
+			    -ret);
+		TEST_ASSERT(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0,
+			    "PR_SET_NO_NEW_PRIVS failed: %d", errno);
+		TEST_ASSERT(syscall(SYS_landlock_restrict_self, ruleset_fd, 0) == 0,
+			    "landlock_restrict_self() failed: %d", errno);
+		TEST_ASSERT(close(ruleset_fd) == 0,
+			    "Failed to close Landlock ruleset: %d", errno);
+		if (protected) {
+			ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+			TEST_ASSERT(ret == 0,
+				    KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		}
+		execl(self, "protected_task_test",
+		      "--process-security-landlock-target",
+		      protected ? "protected" : "native", path, NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() for %s Landlock target failed: %d",
+		    protected ? "protected" : "native", errno);
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "%s Landlock target failed: %#x",
+		    protected ? "Protected" : "Native", status);
+}
+
+static void test_protected_process_landlock(int kvm_fd)
+{
+	char path[] = "/protected-task-landlock-XXXXXX";
+	char self[PATH_MAX];
+	long abi;
+	int fd;
+
+	abi = syscall(SYS_landlock_create_ruleset, NULL, 0,
+		      LANDLOCK_CREATE_RULESET_VERSION);
+	if (abi < 0 && (errno == ENOSYS || errno == EOPNOTSUPP)) {
+		print_skip("Landlock is unavailable");
+		return;
+	}
+	TEST_ASSERT(abi >= 1, "Landlock ABI query failed: %d", errno);
+	fd = mkstemp(path);
+	TEST_ASSERT(fd >= 0, "Failed to create Landlock target: %d", errno);
+	TEST_ASSERT(write(fd, "x", 1) == 1,
+		    "Failed to write Landlock target: %d", errno);
+	TEST_ASSERT(close(fd) == 0,
+		    "Failed to close Landlock target: %d", errno);
+	fd = readlink("/proc/self/exe", self, sizeof(self) - 1);
+	TEST_ASSERT(fd > 0, "readlink(/proc/self/exe) failed: %d", errno);
+	self[fd] = '\0';
+	run_process_security_landlock_control(kvm_fd, false, self, path);
+	run_process_security_landlock_control(kvm_fd, true, self, path);
+	TEST_ASSERT(unlink(path) == 0,
+		    "Failed to remove Landlock target: %d", errno);
+}
+
+static void run_process_security_credential_control(
+		int kvm_fd, bool protected, const char *path, const char *mode)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "%s credential fork() failed: %d", mode,
+		    errno);
+	if (!child) {
+		int fd = -1, ret;
+
+		if (protected)
+			fd = create_context_with_features(kvm_fd,
+					  KVM_PROTECTED_TASK_FEATURE_EXEC);
+		TEST_ASSERT(setgroups(0, NULL) == 0,
+			    "setgroups() failed: %d", errno);
+		TEST_ASSERT(setresgid(TEST_UID, TEST_UID, TEST_UID) == 0,
+			    "setresgid() failed: %d", errno);
+		TEST_ASSERT(setresuid(TEST_UID, TEST_UID, TEST_UID) == 0,
+			    "setresuid() failed: %d", errno);
+		TEST_ASSERT(prctl(PR_SET_PDEATHSIG, SIGUSR1) == 0,
+			    "PR_SET_PDEATHSIG failed: %d", errno);
+		if (protected) {
+			ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+			TEST_ASSERT(ret == 0,
+				    KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		}
+		if (!strcmp(mode, "setid")) {
+			TEST_ASSERT(setenv("LD_PRELOAD", "/protected-task-unused.so", 1) == 0,
+				    "Failed to set LD_PRELOAD: %d", errno);
+			TEST_ASSERT(setenv("LD_LIBRARY_PATH", "/protected-task-unused", 1) == 0,
+				    "Failed to set LD_LIBRARY_PATH: %d", errno);
+			TEST_ASSERT(setenv("PROCESS_SECURITY_MARKER", "present", 1) == 0,
+				    "Failed to set secure-exec marker: %d", errno);
+			execl(path, "protected_task_test",
+			      "--process-security-credential-target",
+			      protected ? "protected" : "native", NULL);
+		} else
+			execl(path, protected ? "p-filecap" : "n-filecap", NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() for %s %s credential target failed: %d",
+		    protected ? "protected" : "native", mode, errno);
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "%s %s credential target failed: %#x",
+		    protected ? "Protected" : "Native", mode, status);
+}
+
+static void test_protected_process_credentials(int kvm_fd)
+{
+	char filecap_path[PATH_MAX], helper[PATH_MAX], self[PATH_MAX];
+	char setid_path[PATH_MAX];
+	int ret;
+	ssize_t length;
+
+	if (geteuid()) {
+		print_skip("Set-ID and file-capability tests require root");
+		return;
+	}
+	get_exec_helper_path(helper);
+	length = readlink("/proc/self/exe", self, sizeof(self) - 1);
+	TEST_ASSERT(length > 0, "readlink(/proc/self/exe) failed: %d", errno);
+	self[length] = '\0';
+	ret = create_process_security_executable(self, setid_path, true);
+	TEST_ASSERT(!ret, "Failed to create set-ID executable: %d", -ret);
+	run_process_security_credential_control(kvm_fd, false, setid_path,
+						"setid");
+	run_process_security_credential_control(kvm_fd, true, setid_path,
+						"setid");
+	TEST_ASSERT(unlink(setid_path) == 0,
+		    "Failed to remove set-ID executable: %d", errno);
+
+	ret = create_process_security_executable(helper, filecap_path, false);
+	if (ret == -EOPNOTSUPP || ret == -ENOTSUP || ret == -EPERM) {
+		print_skip("File capabilities are unavailable");
+		return;
+	}
+	TEST_ASSERT(!ret, "Failed to create file-capability executable: %d",
+		    -ret);
+	run_process_security_credential_control(kvm_fd, false, filecap_path,
+						"filecap");
+	run_process_security_credential_control(kvm_fd, true, filecap_path,
+						"filecap");
+	TEST_ASSERT(unlink(filecap_path) == 0,
+		    "Failed to remove file-capability executable: %d", errno);
+}
+
+static void test_protected_process_security(int kvm_fd)
+{
+	run_process_security_control(kvm_fd, false);
+	run_process_security_control(kvm_fd, true);
+	run_process_security_strict_control(kvm_fd, false);
+	run_process_security_strict_control(kvm_fd, true);
+	test_protected_process_credentials(kvm_fd);
+	test_protected_process_landlock(kvm_fd);
 }
 
 static int run_dso_stress_target(void)
@@ -3877,7 +4345,7 @@ stop:
 		    "Protected memory hotplug stress failed: %#x", status);
 }
 
-static int run_oom_target(int ready_fd)
+static int run_oom_target(bool protected, int ready_fd)
 {
 	const size_t size = 512UL << 20;
 	const size_t page_size = 4096;
@@ -3885,6 +4353,8 @@ static int run_oom_target(int ready_fd)
 	char ready = 'R';
 	size_t offset;
 
+	if (process_lifecycle_mode_mismatch(protected))
+		return 109;
 	if (write(ready_fd, &ready, sizeof(ready)) != sizeof(ready))
 		return 110;
 	close(ready_fd);
@@ -3900,7 +4370,7 @@ static int run_oom_target(int ready_fd)
 	return 112;
 }
 
-static void test_cgroup_oom(int kvm_fd)
+static void test_cgroup_oom_mode(int kvm_fd, bool protected)
 {
 	struct kvm_protected_task_arm arm = {
 		.size = sizeof(arm),
@@ -3915,7 +4385,8 @@ static void test_cgroup_oom(int kvm_fd)
 		print_skip("Cgroup v2 is unavailable for protected OOM stress");
 		return;
 	}
-	snprintf(name, sizeof(name), "protected_task_oom_%d", getpid());
+	snprintf(name, sizeof(name), "%s_task_oom_%d",
+		 protected ? "protected" : "native", getpid());
 	cgroup = cg_name(root, name);
 	TEST_ASSERT(cgroup, "Failed to allocate cgroup path");
 	if (cg_create(cgroup)) {
@@ -3947,28 +4418,34 @@ static void test_cgroup_oom(int kvm_fd)
 	child = fork();
 	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
 	if (!child) {
-		int fd, ret;
+		int fd = -1, ret;
 
 		close(pipefd[0]);
 		if (cg_enter_current(cgroup))
 			_exit(113);
-		fd = create_context_with_features(kvm_fd, KVM_PROTECTED_TASK_FEATURE_EXEC);
-		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
-		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		if (protected) {
+			fd = create_context_with_features(kvm_fd,
+						  KVM_PROTECTED_TASK_FEATURE_EXEC);
+			ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+			TEST_ASSERT(ret == 0,
+				    KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		}
 		snprintf(fd_string, sizeof(fd_string), "%d", pipefd[1]);
 		execl("/proc/self/exe", "protected_task_test", "--oom-target",
-		      fd_string, NULL);
+		      protected ? "protected" : "native", fd_string, NULL);
 		_exit(127);
 	}
 
 	close(pipefd[1]);
 	TEST_ASSERT(read(pipefd[0], &ready, sizeof(ready)) == sizeof(ready) &&
-		    ready == 'R', "Protected OOM target did not start");
+		    ready == 'R', "%s OOM target did not start",
+		    protected ? "Protected" : "Native");
 	close(pipefd[0]);
 	TEST_ASSERT(waitpid(child, &status, 0) == child,
 		    "waitpid() failed: %d", errno);
 	TEST_ASSERT(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL,
-		    "Protected OOM target status was %#x", status);
+		    "%s OOM target status was %#x",
+		    protected ? "Protected" : "Native", status);
 	oom_after = cg_read_key_long(cgroup, "memory.events", "oom ");
 	oom_kill_after = cg_read_key_long(cgroup, "memory.events", "oom_kill ");
 	TEST_ASSERT(oom_after > oom_before && oom_kill_after > oom_kill_before,
@@ -3976,6 +4453,12 @@ static void test_cgroup_oom(int kvm_fd)
 		    oom_before, oom_kill_before, oom_after, oom_kill_after);
 	TEST_ASSERT(cg_destroy(cgroup) == 0, "Failed to destroy OOM cgroup");
 	free(cgroup);
+}
+
+static void test_cgroup_oom(int kvm_fd)
+{
+	test_cgroup_oom_mode(kvm_fd, false);
+	test_cgroup_oom_mode(kvm_fd, true);
 }
 
 enum uffd_invalidation_op {
@@ -4996,7 +5479,7 @@ static void test_protected_exec(int kvm_fd)
 int main(int argc, char *argv[])
 {
 	struct kvm_protected_task_info first_info, second_info;
-	bool process_lifecycle_only;
+	bool process_lifecycle_only, process_security_only;
 	int kvm_fd, first_fd, second_fd;
 
 	if (argc == 2 && !strcmp(argv[1], "--entry-target"))
@@ -5040,8 +5523,46 @@ int main(int argc, char *argv[])
 		return run_process_lifecycle_leaf(!strcmp(argv[2], "protected"),
 						  parent_pid);
 	}
-	if (argc == 3 && !strcmp(argv[1], "--oom-target"))
-		return run_oom_target(atoi(argv[2]));
+	if (argc == 4 && !strcmp(argv[1], "--process-security-target")) {
+		long securebits;
+		char *end;
+
+		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
+			return 127;
+		errno = 0;
+		securebits = strtol(argv[3], &end, 10);
+		if (errno || *end || securebits < 0 || securebits > INT_MAX)
+			return 127;
+		return run_process_security_target(!strcmp(argv[2], "protected"),
+						   securebits);
+	}
+	if (argc == 3 &&
+	    !strcmp(argv[1], "--process-security-strict-target")) {
+		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
+			return 127;
+		return run_process_security_strict_target(
+			!strcmp(argv[2], "protected"));
+	}
+	if (argc == 4 &&
+	    !strcmp(argv[1], "--process-security-landlock-target")) {
+		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
+			return 127;
+		return run_process_security_landlock_target(
+			!strcmp(argv[2], "protected"), argv[3]);
+	}
+	if (argc == 3 &&
+	    !strcmp(argv[1], "--process-security-credential-target")) {
+		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
+			return 127;
+		return run_process_security_credential_target(
+			!strcmp(argv[2], "protected"));
+	}
+	if (argc == 4 && !strcmp(argv[1], "--oom-target")) {
+		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
+			return 127;
+		return run_oom_target(!strcmp(argv[2], "protected"),
+				      atoi(argv[3]));
+	}
 	if (argc == 2 && !strcmp(argv[1], "--io-permission-exec-target"))
 		return 42;
 	if (argc == 2 && !strcmp(argv[1], "--dso-stress-target"))
@@ -5062,12 +5583,20 @@ int main(int argc, char *argv[])
 		return run_uffd_invalidation_target();
 	process_lifecycle_only = argc == 2 &&
 		!strcmp(argv[1], "--process-lifecycle-test");
+	process_security_only = argc == 2 &&
+		!strcmp(argv[1], "--process-security-test");
 
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
 			   KVM_CAP_PROTECTED_TASK) == 1);
 	if (process_lifecycle_only) {
 		test_protected_process_lifecycle(kvm_fd);
+		close(kvm_fd);
+		return 0;
+	}
+	if (process_security_only) {
+		test_protected_process_security(kvm_fd);
+		test_cgroup_oom(kvm_fd);
 		close(kvm_fd);
 		return 0;
 	}
@@ -5094,6 +5623,7 @@ int main(int argc, char *argv[])
 	test_protected_entry_returns(kvm_fd);
 	test_protected_process_state(kvm_fd);
 	test_protected_process_lifecycle(kvm_fd);
+	test_protected_process_security(kvm_fd);
 	test_swap_reclaim(kvm_fd);
 	test_numa_stress(kvm_fd);
 	test_memory_hotplug(kvm_fd);

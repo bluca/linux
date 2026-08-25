@@ -73,6 +73,7 @@
 .set UCONTEXT_TRAPNO, 200
 .set UCONTEXT_CR2, 216
 .set SA_RESTORER_SIGINFO, 0x04000004
+.set AT_SECURE, 23
 .set AT_HWCAP, 16
 .set AT_HWCAP2, 26
 .set ELF_HWCAP, 0x7808101
@@ -746,11 +747,175 @@ reexec_argv:
 	.quad 0
 reexec_marker:
 	.asciz "reexec"
+	.balign 4
+security_ruid:
+	.long 0
+security_euid:
+	.long 0
+security_suid:
+	.long 0
+security_rgid:
+	.long 0
+security_egid:
+	.long 0
+security_sgid:
+	.long 0
+security_cap_header:
+	.long 0x20080522
+	.long 0
+security_cap_data:
+	.zero 24
 
 	.text
 	.globl _start
 	.type _start, @function
 _start:
+	mov 8(%rsp), %rdi
+	cmpb $'n', (%rdi)
+	je .Lsecurity_native
+	cmpb $'p', (%rdi)
+	jne .Lprotected_start
+	cmpb $'-', 1(%rdi)
+	jne .Lsecurity_bad_mode
+	call check_protected_entry
+	jmp .Lsecurity_credentials
+.Lsecurity_native:
+	cmpb $'-', 1(%rdi)
+	jne .Lsecurity_bad_mode
+	push %rax
+	push %rbx
+	push %rcx
+	push %rdx
+	mov $7, %eax
+	xor %ecx, %ecx
+	cpuid
+	test $1, %ebx
+	je .Lsecurity_native_entry_fail
+	pop %rdx
+	pop %rcx
+	pop %rbx
+	pop %rax
+.Lsecurity_credentials:
+	mov 8(%rsp), %rdi
+	movzbl 2(%rdi), %r12d
+	cmp $'s', %r12d
+	je .Lsecurity_mode_ok
+	cmp $'f', %r12d
+	jne .Lsecurity_bad_mode
+.Lsecurity_mode_ok:
+	mov %rsp, %r13
+	mov $118, %eax
+	lea security_ruid(%rip), %rdi
+	lea security_euid(%rip), %rsi
+	lea security_suid(%rip), %rdx
+	syscall
+	test %eax, %eax
+	jne .Lsecurity_uid_fail
+	mov $120, %eax
+	lea security_rgid(%rip), %rdi
+	lea security_egid(%rip), %rsi
+	lea security_sgid(%rip), %rdx
+	syscall
+	test %eax, %eax
+	jne .Lsecurity_gid_fail
+
+	mov (%r13), %rcx
+	lea 16(%r13,%rcx,8), %r8
+.Lsecurity_find_env_end:
+	cmpq $0, (%r8)
+	je .Lsecurity_find_auxv
+	add $8, %r8
+	jmp .Lsecurity_find_env_end
+.Lsecurity_find_auxv:
+	add $8, %r8
+.Lsecurity_find_secure:
+	cmpq $0, (%r8)
+	je .Lsecurity_auxv_fail
+	cmpq $AT_SECURE, (%r8)
+	je .Lsecurity_secure_found
+	add $16, %r8
+	jmp .Lsecurity_find_secure
+.Lsecurity_secure_found:
+	cmpq $1, 8(%r8)
+	jne .Lsecurity_auxv_fail
+
+	cmpl $65534, security_ruid(%rip)
+	jne .Lsecurity_uid_value_fail
+	cmpl $65534, security_rgid(%rip)
+	jne .Lsecurity_gid_value_fail
+	cmp $'s', %r12d
+	jne .Lsecurity_filecap_ids
+	cmpl $0, security_euid(%rip)
+	jne .Lsecurity_uid_value_fail
+	cmpl $0, security_suid(%rip)
+	jne .Lsecurity_uid_value_fail
+	cmpl $0, security_egid(%rip)
+	jne .Lsecurity_gid_value_fail
+	cmpl $0, security_sgid(%rip)
+	jne .Lsecurity_gid_value_fail
+	jmp .Lsecurity_success
+
+.Lsecurity_filecap_ids:
+	cmpl $65534, security_euid(%rip)
+	jne .Lsecurity_uid_value_fail
+	cmpl $65534, security_suid(%rip)
+	jne .Lsecurity_uid_value_fail
+	cmpl $65534, security_egid(%rip)
+	jne .Lsecurity_gid_value_fail
+	cmpl $65534, security_sgid(%rip)
+	jne .Lsecurity_gid_value_fail
+	mov $125, %eax
+	lea security_cap_header(%rip), %rdi
+	lea security_cap_data(%rip), %rsi
+	syscall
+	test %eax, %eax
+	jne .Lsecurity_capget_fail
+	cmpl $(1 << 10), security_cap_data(%rip)
+	jne .Lsecurity_cap_value_fail
+	cmpl $(1 << 10), security_cap_data+4(%rip)
+	jne .Lsecurity_cap_value_fail
+	cmpl $0, security_cap_data+8(%rip)
+	jne .Lsecurity_cap_value_fail
+	cmpq $0, security_cap_data+12(%rip)
+	jne .Lsecurity_cap_value_fail
+	cmpl $0, security_cap_data+20(%rip)
+	jne .Lsecurity_cap_value_fail
+
+.Lsecurity_success:
+	xor %edi, %edi
+	jmp .Lsecurity_exit
+.Lsecurity_bad_mode:
+	mov $240, %edi
+	jmp .Lsecurity_exit
+.Lsecurity_native_entry_fail:
+	mov $241, %edi
+	jmp .Lsecurity_exit
+.Lsecurity_uid_fail:
+	mov $242, %edi
+	jmp .Lsecurity_exit
+.Lsecurity_gid_fail:
+	mov $243, %edi
+	jmp .Lsecurity_exit
+.Lsecurity_auxv_fail:
+	mov $244, %edi
+	jmp .Lsecurity_exit
+.Lsecurity_uid_value_fail:
+	mov $245, %edi
+	jmp .Lsecurity_exit
+.Lsecurity_gid_value_fail:
+	mov $246, %edi
+	jmp .Lsecurity_exit
+.Lsecurity_capget_fail:
+	mov $247, %edi
+	jmp .Lsecurity_exit
+.Lsecurity_cap_value_fail:
+	mov $248, %edi
+.Lsecurity_exit:
+	mov $231, %eax
+	syscall
+	ud2
+
+.Lprotected_start:
 	call check_protected_entry
 	mov $24, %eax
 	syscall
