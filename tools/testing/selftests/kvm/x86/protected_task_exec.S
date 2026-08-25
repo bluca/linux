@@ -751,6 +751,12 @@ reexec_marker:
 	.globl _start
 	.type _start, @function
 _start:
+	call check_protected_entry
+	mov $24, %eax
+	syscall
+	test %rax, %rax
+	jne 1f
+	call check_protected_entry
 	mov %rsp, initial_stack(%rip)
 	movl $80, failure_code(%rip)
 	mov $4, %edi
@@ -2172,6 +2178,7 @@ _start:
 	movl $20, failure_code(%rip)
 	mov $57, %eax
 	syscall
+	call check_protected_entry
 	call check_process_clone
 	test %eax, %eax
 	jne 1f
@@ -2184,6 +2191,7 @@ _start:
 	movl $21, failure_code(%rip)
 	mov $58, %eax
 	syscall
+	call check_protected_entry
 	call check_process_clone
 	test %eax, %eax
 	jne 1f
@@ -2198,6 +2206,7 @@ _start:
 	mov $clone3_args_size, %esi
 	mov $435, %eax
 	syscall
+	call check_protected_entry
 	call check_process_clone
 	test %eax, %eax
 	jne 1f
@@ -2230,6 +2239,7 @@ _start:
 	xor %r8d, %r8d
 	mov $56, %eax
 	syscall
+	call check_protected_entry
 	test %rax, %rax
 	jz 7f
 	js 1f
@@ -2498,6 +2508,29 @@ _start:
 	ud2
 	.size _start, . - _start
 
+	.type check_protected_entry, @function
+check_protected_entry:
+	push %rax
+	push %rbx
+	push %rcx
+	push %rdx
+	mov $7, %eax
+	xor %ecx, %ecx
+	cpuid
+	test $1, %ebx
+	jne .Lprotected_entry_fail
+	pop %rdx
+	pop %rcx
+	pop %rbx
+	pop %rax
+	ret
+.Lprotected_entry_fail:
+	mov $231, %eax
+	mov $254, %edi
+	syscall
+	ud2
+	.size check_protected_entry, . - check_protected_entry
+
 	.type install_exception_handler, @function
 install_exception_handler:
 	mov $13, %eax
@@ -2525,10 +2558,13 @@ prepare_exception:
 
 	.type check_exception, @function
 check_exception:
-	xor %eax, %eax
 	cmpl $1, exception_seen(%rip)
-	sete %al
-	xor $1, %eax
+	jne .Lcheck_exception_fail
+	call check_protected_entry
+	xor %eax, %eax
+	ret
+.Lcheck_exception_fail:
+	mov $1, %eax
 	ret
 	.size check_exception, . - check_exception
 
@@ -7426,6 +7462,7 @@ check_hidden_mapping:
 	syscall
 	cmp $8, %rax
 	jne 13f
+	call check_protected_entry
 	mov (%rsp), %rsi
 	add $8, %rsp
 	mov $1, %eax
@@ -7477,6 +7514,7 @@ check_signal_roundtrip:
 	syscall
 	test %rax, %rax
 	jne .Lsignal_roundtrip_fail
+	call check_protected_entry
 	cmpl $1, signal_seen(%rip)
 	jne .Lsignal_roundtrip_fail
 	movdqu %xmm15, %xmm0
@@ -7571,6 +7609,7 @@ check_replacement_avx512:
 
 	.type signal_handler, @function
 signal_handler:
+	call check_protected_entry
 	mov UCONTEXT_FPSTATE(%rdx), %r8
 	test %r8, %r8
 	jz 3f
@@ -7697,6 +7736,7 @@ signal_handler:
 
 	.type exception_handler, @function
 exception_handler:
+	call check_protected_entry
 	andq $~0x40000, UCONTEXT_EFL(%rdx)
 	cmpq $21, expected_trap(%rip)
 	jne .Lexception_validate

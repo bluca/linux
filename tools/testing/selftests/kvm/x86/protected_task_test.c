@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include <asm/prctl.h>
+#include <linux/io_uring.h>
 #include <linux/kvm.h>
 #include <linux/mempolicy.h>
 #include <linux/ptrace.h>
@@ -36,6 +37,168 @@
 #include "kvm_util.h"
 #include "test_util.h"
 #include "cgroup_util.h"
+
+static int protected_entry_probe(void)
+{
+	unsigned int eax, ebx, ecx, edx;
+
+	__cpuid_count(7, 0, eax, ebx, ecx, edx);
+	return !!(ebx & bit_FSGSBASE);
+}
+
+static void assert_protected_entry(void)
+{
+	if (protected_entry_probe())
+		_exit(203);
+}
+
+static volatile sig_atomic_t protected_entry_signal_seen;
+
+static void protected_entry_signal_handler(int signal)
+{
+	if (signal != SIGUSR1 || protected_entry_probe())
+		_exit(204);
+	protected_entry_signal_seen = 1;
+}
+
+static int run_entry_restart(void)
+{
+	struct sigaction action = {
+		.sa_handler = protected_entry_signal_handler,
+		.sa_flags = SA_RESTART,
+	};
+	const struct timespec delay = { .tv_nsec = 20 * 1000 * 1000 };
+	char value = 0;
+	int pipefd[2], status;
+	pid_t child, parent = getpid();
+
+	sigemptyset(&action.sa_mask);
+	if (sigaction(SIGUSR1, &action, NULL) || pipe(pipefd))
+		return 1;
+
+	protected_entry_signal_seen = 0;
+	child = fork();
+	if (child < 0)
+		return 1;
+	if (!child) {
+		close(pipefd[0]);
+		assert_protected_entry();
+		if (nanosleep(&delay, NULL) || kill(parent, SIGUSR1) ||
+		    nanosleep(&delay, NULL) ||
+		    write(pipefd[1], &value, sizeof(value)) != sizeof(value))
+			_exit(1);
+		_exit(0);
+	}
+
+	close(pipefd[1]);
+	assert_protected_entry();
+	if (read(pipefd[0], &value, sizeof(value)) != sizeof(value))
+		return 1;
+	assert_protected_entry();
+	if (!protected_entry_signal_seen || waitpid(child, &status, 0) != child ||
+	    !WIFEXITED(status) || WEXITSTATUS(status))
+		return 1;
+	close(pipefd[0]);
+	return 0;
+}
+
+static int run_entry_task_work(void)
+{
+	const uint64_t user_data = 0x0123456789abcdef;
+	struct io_uring_params params = {};
+	struct io_uring_sqe *sqes = MAP_FAILED;
+	struct io_uring_cqe *cqe;
+	void *cq_ring = MAP_FAILED, *sq_ring = MAP_FAILED;
+	size_t cq_ring_size, sq_ring_size, sqes_size;
+	unsigned int *cq_head, *cq_tail, *sq_array, *sq_mask, *sq_tail;
+	unsigned int index, tail;
+	int fd = -1, ret = 1;
+
+	fd = syscall(SYS_io_uring_setup, 2, &params);
+	if (fd < 0)
+		goto out;
+
+	sq_ring_size = params.sq_off.array +
+		params.sq_entries * sizeof(*sq_array);
+	cq_ring_size = params.cq_off.cqes +
+		params.cq_entries * sizeof(*cqe);
+	if (params.features & IORING_FEAT_SINGLE_MMAP) {
+		if (cq_ring_size > sq_ring_size)
+			sq_ring_size = cq_ring_size;
+		cq_ring_size = sq_ring_size;
+	}
+	sqes_size = params.sq_entries * sizeof(*sqes);
+
+	sq_ring = mmap(NULL, sq_ring_size, PROT_READ | PROT_WRITE,
+		       MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQ_RING);
+	if (sq_ring == MAP_FAILED)
+		goto out;
+	if (params.features & IORING_FEAT_SINGLE_MMAP)
+		cq_ring = sq_ring;
+	else {
+		cq_ring = mmap(NULL, cq_ring_size, PROT_READ | PROT_WRITE,
+			       MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_CQ_RING);
+		if (cq_ring == MAP_FAILED)
+			goto out;
+	}
+	sqes = mmap(NULL, sqes_size, PROT_READ | PROT_WRITE,
+		    MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);
+	if (sqes == MAP_FAILED)
+		goto out;
+
+	sq_tail = sq_ring + params.sq_off.tail;
+	sq_mask = sq_ring + params.sq_off.ring_mask;
+	sq_array = sq_ring + params.sq_off.array;
+	tail = __atomic_load_n(sq_tail, __ATOMIC_RELAXED);
+	index = tail & *sq_mask;
+	memset(&sqes[index], 0, sizeof(sqes[index]));
+	sqes[index].opcode = IORING_OP_NOP;
+	sqes[index].nop_flags = IORING_NOP_TW;
+	sqes[index].user_data = user_data;
+	sq_array[index] = index;
+	__atomic_store_n(sq_tail, tail + 1, __ATOMIC_RELEASE);
+
+	if (syscall(SYS_io_uring_enter, fd, 1, 0, 0, NULL, 0) != 1)
+		goto out;
+	assert_protected_entry();
+
+	cq_head = cq_ring + params.cq_off.head;
+	cq_tail = cq_ring + params.cq_off.tail;
+	if (__atomic_load_n(cq_head, __ATOMIC_RELAXED) ==
+	    __atomic_load_n(cq_tail, __ATOMIC_ACQUIRE))
+		goto out;
+	cqe = cq_ring + params.cq_off.cqes;
+	cqe += *cq_head & *(unsigned int *)(cq_ring + params.cq_off.ring_mask);
+	if (cqe->user_data != user_data || cqe->res)
+		goto out;
+	__atomic_store_n(cq_head, *cq_head + 1, __ATOMIC_RELEASE);
+	ret = 0;
+
+out:
+	if (sqes != MAP_FAILED)
+		munmap(sqes, sqes_size);
+	if (cq_ring != MAP_FAILED && cq_ring != sq_ring)
+		munmap(cq_ring, cq_ring_size);
+	if (sq_ring != MAP_FAILED)
+		munmap(sq_ring, sq_ring_size);
+	if (fd >= 0)
+		close(fd);
+	return ret;
+}
+
+static int run_entry_target(void)
+{
+	assert_protected_entry();
+	if (raise(SIGSTOP))
+		return 1;
+	assert_protected_entry();
+	if (syscall(SYS_sched_yield))
+		return 1;
+	assert_protected_entry();
+	if (run_entry_restart())
+		return 1;
+	return run_entry_task_work();
+}
 
 static void assert_ioctl_errno(int fd, unsigned long request, void *arg,
 			       int expected_errno)
@@ -894,6 +1057,91 @@ static void test_io_permissions_reject_exec(int kvm_fd)
 		    "waitpid() failed: %d", errno);
 	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
 		    "I/O-permission exec rejection failed: %#x", status);
+}
+
+static void test_protected_entry_returns(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	unsigned int eax, ebx, ecx, edx;
+	int status;
+	pid_t child;
+
+	__cpuid_count(7, 0, eax, ebx, ecx, edx);
+	if (!(ebx & bit_FSGSBASE)) {
+		print_skip("Native FSGSBASE is unavailable");
+		return;
+	}
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "native control fork() failed: %d", errno);
+	if (!child) {
+		execl("/proc/self/exe", "protected_task_test", "--entry-target",
+		      NULL);
+		_exit(127);
+	}
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() for native entry control failed: %d", errno);
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 203,
+		    "Native entry control produced unexpected status: %#x", status);
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "fork() failed: %d", errno);
+	if (!child) {
+		int fd, ret;
+
+		TEST_ASSERT(ptrace(PTRACE_TRACEME, 0, NULL, NULL) == 0,
+			    "PTRACE_TRACEME failed: %d", errno);
+		TEST_ASSERT(raise(SIGSTOP) == 0,
+			    "Initial trace stop failed: %d", errno);
+		fd = create_context_with_features(kvm_fd,
+					  KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		execl("/proc/self/exe", "protected_task_test", "--entry-target",
+		      NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() at initial trace stop failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP,
+		    "Initial trace stop produced unexpected status: %#x", status);
+	TEST_ASSERT(ptrace(PTRACE_SETOPTIONS, child, NULL,
+			   PTRACE_O_TRACEEXEC) == 0,
+		    "PTRACE_SETOPTIONS failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL, NULL) == 0,
+		    "PTRACE_CONT to exec failed: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() at exec event failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP &&
+		    (unsigned int)status >> 16 == PTRACE_EVENT_EXEC,
+		    "Exec event produced unexpected status: %#x", status);
+	TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL, NULL) == 0,
+		    "PTRACE_CONT after exec failed: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() at target trace stop failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP,
+		    "Target trace stop produced unexpected status: %#x", status);
+	TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL, NULL) == 0,
+		    "PTRACE_CONT after target stop failed: %d", errno);
+	for (;;) {
+		TEST_ASSERT(waitpid(child, &status, 0) == child,
+			    "waitpid() after entry target failed: %d", errno);
+		if (WIFEXITED(status))
+			break;
+		TEST_ASSERT(WIFSTOPPED(status) &&
+			    (WSTOPSIG(status) == SIGUSR1 ||
+			     WSTOPSIG(status) == SIGCHLD),
+			    "Entry target produced unexpected status: %#x", status);
+		TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL,
+				   (void *)(uintptr_t)WSTOPSIG(status)) == 0,
+			    "PTRACE_CONT with signal %d failed: %d",
+			    WSTOPSIG(status), errno);
+	}
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "Protected entry target failed: %#x", status);
 }
 
 static int run_dso_stress_target(void)
@@ -3539,6 +3787,8 @@ int main(int argc, char *argv[])
 	struct kvm_protected_task_info first_info, second_info;
 	int kvm_fd, first_fd, second_fd;
 
+	if (argc == 2 && !strcmp(argv[1], "--entry-target"))
+		return run_entry_target();
 	if (argc == 3 && !strcmp(argv[1], "--oom-target"))
 		return run_oom_target(atoi(argv[2]));
 	if (argc == 2 && !strcmp(argv[1], "--io-permission-exec-target"))
@@ -3583,6 +3833,7 @@ int main(int argc, char *argv[])
 	close(first_fd);
 	test_close_while_armed(second_fd);
 	test_io_permissions_reject_exec(kvm_fd);
+	test_protected_entry_returns(kvm_fd);
 	test_swap_reclaim(kvm_fd);
 	test_numa_stress(kvm_fd);
 	test_memory_hotplug(kvm_fd);
