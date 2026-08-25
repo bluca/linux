@@ -1498,14 +1498,37 @@ bool x86_handle_user_exception(struct pt_regs *regs, unsigned int trapnr,
 		do_trap(trapnr, SIGFPE, "divide error", regs, error_code,
 			FPE_INTDIV, addr);
 		break;
-	case X86_TRAP_DB:
-		current->thread.virtual_dr6 = dr6 & (DR_STEP | DR_TRAP_BITS);
+	case X86_TRAP_DB: {
+		bool icebp = !dr6;
+		unsigned long flags;
+		bool handled;
+
+		current->thread.virtual_dr6 = dr6 & DR_STEP;
 		clear_thread_flag(TIF_BLOCKSTEP);
-		send_sigtrap(regs, error_code, get_si_code(dr6));
+		local_irq_save(flags);
+		handled = notify_debug(regs, &dr6);
+		local_irq_restore(flags);
+		if (handled)
+			break;
+		if (dr6 & DR_BUS_LOCK)
+			handle_bus_lock(regs);
+		dr6 |= current->thread.virtual_dr6;
+		if (dr6 & (DR_STEP | DR_TRAP_BITS) || icebp)
+			send_sigtrap(regs, error_code, get_si_code(dr6));
 		break;
-	case X86_TRAP_BP:
-		do_trap(trapnr, SIGTRAP, "int3", regs, error_code, 0, NULL);
+	}
+	case X86_TRAP_BP: {
+		unsigned long flags;
+		bool handled;
+
+		local_irq_save(flags);
+		handled = do_int3(regs);
+		local_irq_restore(flags);
+		if (!handled)
+			do_trap(trapnr, SIGTRAP, "int3", regs, error_code, 0,
+				NULL);
 		break;
+	}
 	case X86_TRAP_OF:
 		do_trap(trapnr, SIGSEGV, "overflow", regs, error_code, 0, NULL);
 		break;
