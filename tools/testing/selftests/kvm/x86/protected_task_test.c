@@ -36,12 +36,14 @@
 #include <unistd.h>
 
 #include <asm/prctl.h>
+#include <linux/bpf.h>
 #include <linux/capability.h>
 #include <linux/futex.h>
 #include <linux/io_uring.h>
 #include <linux/kvm.h>
 #include <linux/landlock.h>
 #include <linux/mempolicy.h>
+#include <linux/perf_event.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
 #include <linux/seccomp.h>
@@ -54,6 +56,47 @@
 #include "cgroup_util.h"
 
 static void get_exec_helper_path(char path[PATH_MAX]);
+
+extern void process_observability_payload(unsigned long iterations);
+extern char process_observability_payload_end[];
+
+asm(
+".pushsection .text\n"
+".balign 64\n"
+".globl process_observability_payload\n"
+".type process_observability_payload,@function\n"
+"process_observability_payload:\n"
+"xor %eax,%eax\n"
+"1:\n"
+"add %rdi,%rax\n"
+"dec %rdi\n"
+"jnz 1b\n"
+"ret\n"
+".size process_observability_payload,.-process_observability_payload\n"
+".globl process_observability_payload_end\n"
+"process_observability_payload_end:\n"
+".popsection\n"
+);
+
+enum {
+	PROCESS_OBSERVABILITY_READY_FD = 100,
+	PROCESS_OBSERVABILITY_CONTROL_FD,
+	PROCESS_OBSERVABILITY_RESULT_FD,
+	PROCESS_OBSERVABILITY_CALLS = 16,
+	PROCESS_OBSERVABILITY_ITERATIONS = 2000000,
+};
+
+struct process_observability_target {
+	unsigned long payload_start;
+	unsigned long payload_end;
+	pid_t pid;
+	pid_t tid;
+	char comm[16];
+};
+
+struct process_observability_result {
+	uint64_t elapsed_ns;
+};
 
 static int protected_entry_probe(void)
 {
@@ -1424,6 +1467,53 @@ static int run_process_security_credential_target(bool protected)
 		return 6;
 	if (prctl(PR_GET_PDEATHSIG, &signal) || signal)
 		return 7;
+	return 0;
+}
+
+static int run_process_observability_target(bool protected)
+{
+	struct process_observability_target target = {
+		.payload_start = (unsigned long)process_observability_payload,
+		.payload_end = (unsigned long)process_observability_payload_end,
+		.pid = getpid(),
+		.tid = syscall(SYS_gettid),
+	};
+	struct process_observability_result result;
+	struct timespec before, after;
+	char command;
+	int i;
+
+	if (process_lifecycle_mode_mismatch(protected))
+		return 1;
+	strcpy(target.comm, protected ? "pt-obs-prot" : "pt-obs-native");
+	if (prctl(PR_SET_NAME, target.comm, 0, 0, 0))
+		return 2;
+	if (process_lifecycle_write(PROCESS_OBSERVABILITY_READY_FD, &target,
+				    sizeof(target)))
+		return 3;
+
+	for (;;) {
+		if (process_lifecycle_read(PROCESS_OBSERVABILITY_CONTROL_FD,
+					   &command, sizeof(command)))
+			return 4;
+		if (command != 'B' && command != 'I')
+			return 5;
+		if (clock_gettime(CLOCK_MONOTONIC, &before))
+			return 6;
+		for (i = 0; i < PROCESS_OBSERVABILITY_CALLS; i++)
+			process_observability_payload(
+				PROCESS_OBSERVABILITY_ITERATIONS);
+		if (clock_gettime(CLOCK_MONOTONIC, &after))
+			return 7;
+		result.elapsed_ns = (after.tv_sec - before.tv_sec) * 1000000000ULL +
+			(after.tv_nsec - before.tv_nsec);
+		if (process_lifecycle_write(PROCESS_OBSERVABILITY_RESULT_FD,
+					    &result, sizeof(result)))
+			return 8;
+		if (command == 'I')
+			break;
+	}
+
 	return 0;
 }
 
@@ -2821,6 +2911,574 @@ static void test_protected_process_security(int kvm_fd)
 	run_process_security_strict_control(kvm_fd, true);
 	test_protected_process_credentials(kvm_fd);
 	test_protected_process_landlock(kvm_fd);
+}
+
+struct process_observability_samples {
+	uint64_t samples;
+	uint64_t payload_samples;
+	uint64_t payload_callchains;
+	uint64_t payload_without_callchain;
+	uint64_t callchain_ips;
+	uint64_t zero_guest_kernel_samples;
+};
+
+struct process_observability_bpf_record {
+	uint64_t pid_tgid;
+	char comm[16];
+	uint64_t hits;
+};
+
+#define PROCESS_OBSERVABILITY_BPF_INSN(CODE, DST, SRC, OFFSET, IMMEDIATE) \
+	((struct bpf_insn) { \
+		.code = CODE, \
+		.dst_reg = DST, \
+		.src_reg = SRC, \
+		.off = OFFSET, \
+		.imm = IMMEDIATE, \
+	})
+
+static struct perf_event_attr process_observability_perf_attr(void)
+{
+	struct perf_event_attr attr = {
+		.type = PERF_TYPE_HARDWARE,
+		.size = sizeof(attr),
+		.config = PERF_COUNT_HW_INSTRUCTIONS,
+		.sample_period = 250000,
+		.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID |
+			PERF_SAMPLE_CALLCHAIN,
+		.disabled = 1,
+		.exclude_kernel = 1,
+		.exclude_hv = 1,
+		.wakeup_events = 1,
+	};
+
+	return attr;
+}
+
+static int process_observability_perf_event_open(
+		struct perf_event_attr *attr, pid_t pid)
+{
+	return syscall(SYS_perf_event_open, attr, pid, -1, -1, 0);
+}
+
+static int process_observability_uprobe_type(void)
+{
+	FILE *file;
+	int saved_errno, type;
+
+	file = fopen("/sys/bus/event_source/devices/uprobe/type", "re");
+	if (!file)
+		return -errno;
+	if (fscanf(file, "%d", &type) != 1) {
+		fclose(file);
+		return -EINVAL;
+	}
+	saved_errno = errno;
+	if (fclose(file))
+		return -errno;
+	errno = saved_errno;
+	return type;
+}
+
+static unsigned long process_observability_file_offset(
+		pid_t pid, unsigned long address)
+{
+	char maps_path[64], *line = NULL;
+	size_t line_size = 0;
+	unsigned long result = ULONG_MAX;
+	FILE *maps;
+
+	snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+	maps = fopen(maps_path, "re");
+	TEST_ASSERT(maps, "Failed to open %s: %d", maps_path, errno);
+	while (getline(&line, &line_size, maps) >= 0) {
+		unsigned long start, end, offset;
+		char permissions[5];
+
+		if (sscanf(line, "%lx-%lx %4s %lx", &start, &end,
+			   permissions, &offset) != 4)
+			continue;
+		if (address >= start && address < end) {
+			TEST_ASSERT(strchr(permissions, 'x'),
+				    "Payload mapping is not executable: %s", line);
+			result = offset + address - start;
+			break;
+		}
+	}
+	free(line);
+	TEST_ASSERT(fclose(maps) == 0, "Failed to close %s: %d", maps_path,
+		    errno);
+	TEST_ASSERT(result != ULONG_MAX,
+		    "Failed to find payload address %#lx in %s", address,
+		    maps_path);
+	return result;
+}
+
+static int process_observability_bpf_map_create(void)
+{
+	union bpf_attr attr = {
+		.map_type = BPF_MAP_TYPE_ARRAY,
+		.key_size = sizeof(uint32_t),
+		.value_size = sizeof(struct process_observability_bpf_record),
+		.max_entries = 1,
+	};
+
+	return syscall(SYS_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
+}
+
+static int process_observability_bpf_program_load(int map_fd, char *log,
+						   size_t log_size)
+{
+	static const char license[] = "GPL";
+	struct bpf_insn instructions[] = {
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_ST | BPF_MEM | BPF_W,
+			BPF_REG_10, 0, -4, 0),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_LD | BPF_DW | BPF_IMM,
+			BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, map_fd),
+		PROCESS_OBSERVABILITY_BPF_INSN(0, 0, 0, 0, 0),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_ALU64 | BPF_MOV | BPF_X,
+			BPF_REG_2, BPF_REG_10, 0, 0),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_ALU64 | BPF_ADD | BPF_K,
+			BPF_REG_2, 0, 0, -4),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+			BPF_FUNC_map_lookup_elem),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_JMP | BPF_JEQ | BPF_K,
+			BPF_REG_0, 0, 10, 0),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_ALU64 | BPF_MOV | BPF_X,
+			BPF_REG_6, BPF_REG_0, 0, 0),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+			BPF_FUNC_get_current_pid_tgid),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_STX | BPF_MEM | BPF_DW,
+			BPF_REG_6, BPF_REG_0,
+			offsetof(struct process_observability_bpf_record, pid_tgid),
+			0),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_ALU64 | BPF_MOV | BPF_X,
+			BPF_REG_1, BPF_REG_6, 0, 0),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_ALU64 | BPF_ADD | BPF_K,
+			BPF_REG_1, 0, 0,
+			offsetof(struct process_observability_bpf_record, comm)),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_ALU64 | BPF_MOV | BPF_K,
+			BPF_REG_2, 0, 0,
+			sizeof(((struct process_observability_bpf_record *)0)->comm)),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+			BPF_FUNC_get_current_comm),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_LDX | BPF_MEM | BPF_DW,
+			BPF_REG_7, BPF_REG_6,
+			offsetof(struct process_observability_bpf_record, hits), 0),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_ALU64 | BPF_ADD | BPF_K,
+			BPF_REG_7, 0, 0, 1),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_STX | BPF_MEM | BPF_DW,
+			BPF_REG_6, BPF_REG_7,
+			offsetof(struct process_observability_bpf_record, hits), 0),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_ALU64 | BPF_MOV | BPF_K,
+			BPF_REG_0, 0, 0, 1),
+		PROCESS_OBSERVABILITY_BPF_INSN(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+	};
+	union bpf_attr attr = {
+		.prog_type = BPF_PROG_TYPE_KPROBE,
+		.insn_cnt = ARRAY_SIZE(instructions),
+		.insns = (uintptr_t)instructions,
+		.license = (uintptr_t)license,
+		.log_level = 1,
+		.log_size = log_size,
+		.log_buf = (uintptr_t)log,
+	};
+
+	return syscall(SYS_bpf, BPF_PROG_LOAD, &attr, sizeof(attr));
+}
+
+static void process_observability_bpf_update(
+		int map_fd, const struct process_observability_bpf_record *record)
+{
+	uint32_t key = 0;
+	union bpf_attr attr;
+
+	memset(&attr, 0, sizeof(attr));
+	attr.map_fd = map_fd;
+	attr.key = (uintptr_t)&key;
+	attr.value = (uintptr_t)record;
+	attr.flags = BPF_ANY;
+
+	TEST_ASSERT(syscall(SYS_bpf, BPF_MAP_UPDATE_ELEM, &attr,
+			    sizeof(attr)) == 0,
+		    "BPF_MAP_UPDATE_ELEM failed: %d", errno);
+}
+
+static struct process_observability_bpf_record
+process_observability_bpf_lookup(int map_fd)
+{
+	struct process_observability_bpf_record record;
+	uint32_t key = 0;
+	union bpf_attr attr;
+
+	memset(&attr, 0, sizeof(attr));
+	attr.map_fd = map_fd;
+	attr.key = (uintptr_t)&key;
+	attr.value = (uintptr_t)&record;
+
+	TEST_ASSERT(syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr,
+			    sizeof(attr)) == 0,
+		    "BPF_MAP_LOOKUP_ELEM failed: %d", errno);
+	return record;
+}
+
+static void process_observability_ring_copy(void *destination,
+		const char *data, size_t data_size, uint64_t offset, size_t size)
+{
+	size_t position = offset & (data_size - 1);
+	size_t first = size < data_size - position ? size : data_size - position;
+
+	memcpy(destination, data + position, first);
+	memcpy(destination + first, data, size - first);
+}
+
+static struct process_observability_samples
+process_observability_read_samples(struct perf_event_mmap_page *metadata,
+				     size_t page_size, bool protected,
+				     const struct process_observability_target *target)
+{
+	struct process_observability_samples samples = {};
+	uint64_t head = __atomic_load_n(&metadata->data_head, __ATOMIC_ACQUIRE);
+	uint64_t tail = metadata->data_tail;
+	size_t data_size = metadata->data_size ?: page_size * 32;
+	const char *data = (char *)metadata +
+		(metadata->data_offset ?: page_size);
+	uint16_t expected_misc = protected ? PERF_RECORD_MISC_GUEST_USER :
+		PERF_RECORD_MISC_USER;
+
+	TEST_ASSERT(!(data_size & (data_size - 1)),
+		    "Perf ring size %zu is not a power of two", data_size);
+	while (tail < head) {
+		struct perf_event_header header;
+		unsigned char *record, *cursor, *end;
+		uint64_t ip, nr;
+		uint32_t pid, tid;
+		bool payload_callchain = false;
+
+		process_observability_ring_copy(&header, data, data_size, tail,
+						sizeof(header));
+		TEST_ASSERT(header.size >= sizeof(header) &&
+			    header.size <= data_size,
+			    "Invalid perf record size %u", header.size);
+		record = malloc(header.size);
+		TEST_ASSERT(record, "Failed to allocate perf record");
+		process_observability_ring_copy(record, data, data_size, tail,
+						header.size);
+		tail += header.size;
+		if (header.type != PERF_RECORD_SAMPLE) {
+			free(record);
+			continue;
+		}
+
+		cursor = record + sizeof(header);
+		end = record + header.size;
+		TEST_ASSERT(end - cursor >= sizeof(ip) + sizeof(pid) +
+			    sizeof(tid) + sizeof(nr),
+			    "Truncated perf sample");
+		memcpy(&ip, cursor, sizeof(ip));
+		cursor += sizeof(ip);
+		memcpy(&pid, cursor, sizeof(pid));
+		cursor += sizeof(pid);
+		memcpy(&tid, cursor, sizeof(tid));
+		cursor += sizeof(tid);
+		memcpy(&nr, cursor, sizeof(nr));
+		cursor += sizeof(nr);
+		TEST_ASSERT(nr <= (uint64_t)(end - cursor) / sizeof(uint64_t),
+			    "Truncated perf callchain with %llu entries",
+			    (unsigned long long)nr);
+
+		if (protected &&
+		    (header.misc & PERF_RECORD_MISC_CPUMODE_MASK) ==
+			PERF_RECORD_MISC_GUEST_KERNEL && !ip)
+			samples.zero_guest_kernel_samples++;
+		if (pid != (uint32_t)target->pid ||
+		    tid != (uint32_t)target->tid ||
+		    (header.misc & PERF_RECORD_MISC_CPUMODE_MASK) != expected_misc) {
+			free(record);
+			continue;
+		}
+
+		samples.samples++;
+		for (uint64_t i = 0; i < nr; i++) {
+			uint64_t callchain_ip;
+
+			memcpy(&callchain_ip, cursor + i * sizeof(callchain_ip),
+			       sizeof(callchain_ip));
+			if (callchain_ip >= target->payload_start &&
+			    callchain_ip < target->payload_end)
+				payload_callchain = true;
+			if (callchain_ip < PERF_CONTEXT_MAX)
+				samples.callchain_ips++;
+		}
+		if (ip >= target->payload_start && ip < target->payload_end) {
+			samples.payload_samples++;
+			if (payload_callchain)
+				samples.payload_callchains++;
+			else
+				samples.payload_without_callchain++;
+		}
+		free(record);
+	}
+	__atomic_store_n(&metadata->data_tail, head, __ATOMIC_RELEASE);
+	return samples;
+}
+
+static void run_process_observability_control(int kvm_fd, bool protected,
+					      int uprobe_type, int bpf_map_fd,
+					      int bpf_program_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	struct process_observability_result baseline, instrumented;
+	struct process_observability_target target;
+	struct process_observability_samples samples;
+	struct process_observability_bpf_record bpf_record = {};
+	struct perf_event_mmap_page *metadata;
+	struct perf_event_attr attr, uprobe_attr;
+	uint64_t count, uprobe_count = 0;
+	char executable[64];
+	char command;
+	unsigned long uprobe_offset;
+	size_t page_size = sysconf(_SC_PAGESIZE);
+	int control[2], ready[2], result[2], event_fd, status;
+	int uprobe_fd = -1;
+	pid_t child;
+
+	TEST_ASSERT(pipe(control) == 0 && pipe(ready) == 0 && pipe(result) == 0,
+		    "process-observability pipe() failed: %d", errno);
+	child = fork();
+	TEST_ASSERT(child >= 0, "process-observability fork() failed: %d",
+		    errno);
+	if (!child) {
+		int fd = -1, ret;
+
+		close(control[1]);
+		close(ready[0]);
+		close(result[0]);
+		if (protected)
+			fd = create_context_with_features(kvm_fd,
+					  KVM_PROTECTED_TASK_FEATURE_EXEC);
+		TEST_ASSERT(dup2(ready[1], PROCESS_OBSERVABILITY_READY_FD) ==
+			    PROCESS_OBSERVABILITY_READY_FD,
+			    "dup2() for observability ready fd failed: %d", errno);
+		TEST_ASSERT(dup2(control[0], PROCESS_OBSERVABILITY_CONTROL_FD) ==
+			    PROCESS_OBSERVABILITY_CONTROL_FD,
+			    "dup2() for observability control fd failed: %d", errno);
+		TEST_ASSERT(dup2(result[1], PROCESS_OBSERVABILITY_RESULT_FD) ==
+			    PROCESS_OBSERVABILITY_RESULT_FD,
+			    "dup2() for observability result fd failed: %d", errno);
+		close(control[0]);
+		close(ready[1]);
+		close(result[1]);
+		if (protected) {
+			ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+			TEST_ASSERT(ret == 0,
+				    KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		}
+		execl("/proc/self/exe", "protected_task_test",
+		      "--process-observability-target",
+		      protected ? "protected" : "native", NULL);
+		_exit(127);
+	}
+
+	close(control[0]);
+	close(ready[1]);
+	close(result[1]);
+	TEST_ASSERT(!process_lifecycle_read(ready[0], &target, sizeof(target)),
+		    "Failed to read %s observability target",
+		    protected ? "protected" : "native");
+	TEST_ASSERT(target.pid == child && target.tid == child &&
+		    target.payload_start < target.payload_end,
+		    "Invalid %s observability target identity",
+		    protected ? "protected" : "native");
+
+	command = 'B';
+	TEST_ASSERT(!process_lifecycle_write(control[1], &command,
+				     sizeof(command)) &&
+		    !process_lifecycle_read(result[0], &baseline,
+					    sizeof(baseline)),
+		    "Failed to run %s observability baseline",
+		    protected ? "protected" : "native");
+
+	attr = process_observability_perf_attr();
+	event_fd = process_observability_perf_event_open(&attr, child);
+	TEST_ASSERT(event_fd >= 0,
+		    "perf_event_open() for %s target failed: %d",
+		    protected ? "protected" : "native", errno);
+	metadata = mmap(NULL, page_size * 33, PROT_READ | PROT_WRITE,
+			MAP_SHARED, event_fd, 0);
+	TEST_ASSERT(metadata != MAP_FAILED,
+		    "perf event mmap() for %s target failed: %d",
+		    protected ? "protected" : "native", errno);
+	if (uprobe_type >= 0) {
+		uprobe_offset = process_observability_file_offset(
+			child, target.payload_start);
+		snprintf(executable, sizeof(executable), "/proc/%d/exe", child);
+		uprobe_attr = (struct perf_event_attr) {
+			.type = uprobe_type,
+			.size = sizeof(uprobe_attr),
+			.sample_period = 1,
+			.disabled = 1,
+			.uprobe_path = (uintptr_t)executable,
+			.probe_offset = uprobe_offset,
+		};
+		uprobe_fd = process_observability_perf_event_open(&uprobe_attr,
+								 child);
+		TEST_ASSERT(uprobe_fd >= 0,
+			    "perf_event_open() for %s uprobe failed: %d",
+			    protected ? "protected" : "native", errno);
+		if (bpf_program_fd >= 0) {
+			process_observability_bpf_update(bpf_map_fd, &bpf_record);
+			TEST_ASSERT(ioctl(uprobe_fd, PERF_EVENT_IOC_SET_BPF,
+					  bpf_program_fd) == 0,
+				    "Failed to attach BPF to %s uprobe: %d",
+				    protected ? "protected" : "native", errno);
+		}
+		TEST_ASSERT(ioctl(uprobe_fd, PERF_EVENT_IOC_RESET, 0) == 0 &&
+			    ioctl(uprobe_fd, PERF_EVENT_IOC_ENABLE, 0) == 0,
+			    "Failed to enable %s uprobe: %d",
+			    protected ? "protected" : "native", errno);
+	}
+	TEST_ASSERT(ioctl(event_fd, PERF_EVENT_IOC_RESET, 0) == 0 &&
+		    ioctl(event_fd, PERF_EVENT_IOC_ENABLE, 0) == 0,
+		    "Failed to enable %s perf event: %d",
+		    protected ? "protected" : "native", errno);
+	command = 'I';
+	TEST_ASSERT(!process_lifecycle_write(control[1], &command,
+				     sizeof(command)) &&
+		    !process_lifecycle_read(result[0], &instrumented,
+					    sizeof(instrumented)),
+		    "Failed to run %s instrumented payload",
+		    protected ? "protected" : "native");
+	TEST_ASSERT(ioctl(event_fd, PERF_EVENT_IOC_DISABLE, 0) == 0,
+		    "Failed to disable %s perf event: %d",
+		    protected ? "protected" : "native", errno);
+	if (uprobe_fd >= 0)
+		TEST_ASSERT(ioctl(uprobe_fd, PERF_EVENT_IOC_DISABLE, 0) == 0,
+			    "Failed to disable %s uprobe: %d",
+			    protected ? "protected" : "native", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() for %s observability target failed: %d",
+		    protected ? "protected" : "native", errno);
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "%s observability target failed: %#x",
+		    protected ? "Protected" : "Native", status);
+	TEST_ASSERT(read(event_fd, &count, sizeof(count)) == sizeof(count) &&
+		    count,
+		    "%s retired-instruction event did not count payload work",
+		    protected ? "Protected" : "Native");
+	if (uprobe_fd >= 0) {
+		TEST_ASSERT(read(uprobe_fd, &uprobe_count,
+				 sizeof(uprobe_count)) == sizeof(uprobe_count),
+			    "Failed to read %s uprobe count: %d",
+			    protected ? "protected" : "native", errno);
+		TEST_ASSERT(uprobe_count == PROCESS_OBSERVABILITY_CALLS,
+			    "%s uprobe count is %llu, expected %d",
+			    protected ? "Protected" : "Native",
+			    (unsigned long long)uprobe_count,
+			    PROCESS_OBSERVABILITY_CALLS);
+		if (bpf_program_fd >= 0) {
+			bpf_record = process_observability_bpf_lookup(bpf_map_fd);
+			TEST_ASSERT(bpf_record.pid_tgid ==
+				    ((uint64_t)child << 32 | (uint32_t)child),
+				    "%s BPF task identity is %#llx, expected PID/TID %d",
+				    protected ? "Protected" : "Native",
+				    (unsigned long long)bpf_record.pid_tgid, child);
+			TEST_ASSERT(!strcmp(bpf_record.comm, target.comm),
+				    "%s BPF comm is '%s', expected '%s'",
+				    protected ? "Protected" : "Native",
+				    bpf_record.comm, target.comm);
+			TEST_ASSERT(bpf_record.hits == uprobe_count,
+				    "%s BPF hit count is %llu, expected %llu",
+				    protected ? "Protected" : "Native",
+				    (unsigned long long)bpf_record.hits,
+				    (unsigned long long)uprobe_count);
+		}
+	}
+	samples = process_observability_read_samples(metadata, page_size,
+						 protected, &target);
+	TEST_ASSERT(samples.samples && samples.payload_samples,
+		    "%s perf samples did not identify payload [%#lx, %#lx): total=%llu payload=%llu",
+		    protected ? "Protected" : "Native", target.payload_start,
+		    target.payload_end, (unsigned long long)samples.samples,
+		    (unsigned long long)samples.payload_samples);
+	TEST_ASSERT(!samples.zero_guest_kernel_samples,
+		    "Protected perf emitted %llu guest-kernel samples at IP zero",
+		    (unsigned long long)samples.zero_guest_kernel_samples);
+	if (protected)
+		TEST_ASSERT(!samples.payload_callchains &&
+			    !samples.callchain_ips &&
+			    samples.payload_without_callchain ==
+				samples.payload_samples,
+			    "Protected samples exposed %llu unexpected callchain IPs",
+			    (unsigned long long)samples.callchain_ips);
+	else
+		TEST_ASSERT(samples.payload_callchains,
+			    "Native samples did not include the payload in callchains");
+
+	printf("%s observability: baseline=%llu ns instrumented=%llu ns instructions=%llu samples=%llu payload=%llu callchains=%llu uprobes=%llu bpf=%llu\n",
+	       protected ? "protected" : "native",
+	       (unsigned long long)baseline.elapsed_ns,
+	       (unsigned long long)instrumented.elapsed_ns,
+	       (unsigned long long)count,
+	       (unsigned long long)samples.samples,
+	       (unsigned long long)samples.payload_samples,
+	       (unsigned long long)samples.payload_callchains,
+	       (unsigned long long)uprobe_count,
+	       (unsigned long long)bpf_record.hits);
+	TEST_ASSERT(munmap(metadata, page_size * 33) == 0,
+		    "Failed to unmap perf ring: %d", errno);
+	close(event_fd);
+	if (uprobe_fd >= 0)
+		close(uprobe_fd);
+	close(control[1]);
+	close(ready[0]);
+	close(result[0]);
+}
+
+static void test_protected_process_observability(int kvm_fd)
+{
+	struct perf_event_attr attr = process_observability_perf_attr();
+	char bpf_log[65536] = {};
+	int bpf_map_fd = -1, bpf_program_fd = -1;
+	int fd, uprobe_type;
+
+	fd = process_observability_perf_event_open(&attr, 0);
+	if (fd < 0 && (errno == EACCES || errno == EPERM || errno == ENOENT ||
+		       errno == ENODEV || errno == EOPNOTSUPP || errno == ENOSYS)) {
+		print_skip("Retired-instruction sampling is unavailable");
+		return;
+	}
+	TEST_ASSERT(fd >= 0, "perf_event_open() probe failed: %d", errno);
+	close(fd);
+
+	uprobe_type = process_observability_uprobe_type();
+	if (uprobe_type < 0)
+		print_skip("Uprobe perf events and BPF attachment are unavailable");
+	else {
+		bpf_map_fd = process_observability_bpf_map_create();
+		if (bpf_map_fd < 0 &&
+		    (errno == EACCES || errno == EPERM || errno == ENOSYS ||
+		     errno == EOPNOTSUPP))
+			print_skip("BPF task-identity helpers are unavailable");
+		else {
+			TEST_ASSERT(bpf_map_fd >= 0,
+				    "BPF_MAP_CREATE failed: %d", errno);
+			bpf_program_fd = process_observability_bpf_program_load(
+				bpf_map_fd, bpf_log, sizeof(bpf_log));
+			TEST_ASSERT(bpf_program_fd >= 0,
+				    "BPF_PROG_LOAD failed: %d\n%s", errno, bpf_log);
+		}
+	}
+	run_process_observability_control(kvm_fd, false, uprobe_type,
+					    bpf_map_fd, bpf_program_fd);
+	run_process_observability_control(kvm_fd, true, uprobe_type,
+					    bpf_map_fd, bpf_program_fd);
+	if (bpf_program_fd >= 0)
+		close(bpf_program_fd);
+	if (bpf_map_fd >= 0)
+		close(bpf_map_fd);
 }
 
 static int run_dso_stress_target(void)
@@ -5479,7 +6137,8 @@ static void test_protected_exec(int kvm_fd)
 int main(int argc, char *argv[])
 {
 	struct kvm_protected_task_info first_info, second_info;
-	bool process_lifecycle_only, process_security_only;
+	bool process_lifecycle_only, process_observability_only;
+	bool process_security_only;
 	int kvm_fd, first_fd, second_fd;
 
 	if (argc == 2 && !strcmp(argv[1], "--entry-target"))
@@ -5557,6 +6216,13 @@ int main(int argc, char *argv[])
 		return run_process_security_credential_target(
 			!strcmp(argv[2], "protected"));
 	}
+	if (argc == 3 &&
+	    !strcmp(argv[1], "--process-observability-target")) {
+		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
+			return 127;
+		return run_process_observability_target(
+			!strcmp(argv[2], "protected"));
+	}
 	if (argc == 4 && !strcmp(argv[1], "--oom-target")) {
 		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
 			return 127;
@@ -5585,6 +6251,8 @@ int main(int argc, char *argv[])
 		!strcmp(argv[1], "--process-lifecycle-test");
 	process_security_only = argc == 2 &&
 		!strcmp(argv[1], "--process-security-test");
+	process_observability_only = argc == 2 &&
+		!strcmp(argv[1], "--process-observability-test");
 
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
@@ -5597,6 +6265,11 @@ int main(int argc, char *argv[])
 	if (process_security_only) {
 		test_protected_process_security(kvm_fd);
 		test_cgroup_oom(kvm_fd);
+		close(kvm_fd);
+		return 0;
+	}
+	if (process_observability_only) {
+		test_protected_process_observability(kvm_fd);
 		close(kvm_fd);
 		return 0;
 	}
@@ -5624,6 +6297,7 @@ int main(int argc, char *argv[])
 	test_protected_process_state(kvm_fd);
 	test_protected_process_lifecycle(kvm_fd);
 	test_protected_process_security(kvm_fd);
+	test_protected_process_observability(kvm_fd);
 	test_swap_reclaim(kvm_fd);
 	test_numa_stress(kvm_fd);
 	test_memory_hotplug(kvm_fd);
