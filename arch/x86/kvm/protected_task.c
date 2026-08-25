@@ -1253,6 +1253,16 @@ static void kvm_protected_task_sync_pkru(struct kvm_vcpu *vcpu,
 	write_pkru(vcpu->arch.pkru);
 }
 
+static bool kvm_protected_task_vma_allows_fault(struct vm_area_struct *vma,
+						 u32 error_code)
+{
+	if (error_code & X86_PF_INSTR)
+		return vma->vm_flags & VM_EXEC;
+	if (error_code & X86_PF_WRITE)
+		return vma->vm_flags & VM_WRITE;
+	return vma->vm_flags & (VM_READ | VM_WRITE);
+}
+
 static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 						  struct pt_regs *regs,
 						  u32 *next_slot)
@@ -1260,7 +1270,7 @@ static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 	unsigned long address = vcpu->run->memory_fault.gpa & PAGE_MASK;
 	struct vm_area_struct *vma;
 	unsigned long end = 0;
-	bool mapped = false, visible;
+	bool access_allowed = false, mapped = false, visible;
 	int idx, ret;
 
 	ret = kvm_protected_task_sync_regs(vcpu, regs, false);
@@ -1281,8 +1291,14 @@ static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 	if (vma) {
 		mapped = true;
 		end = vma->vm_end;
+		access_allowed = kvm_protected_task_vma_allows_fault(vma,
+				vcpu->arch.protected_task_pf_error_code);
 		mmap_read_unlock(current->mm);
 	}
+
+	if (visible && !vcpu->arch.protected_task_growdown_fault &&
+	    access_allowed)
+		return 0;
 
 	if (!mapped || (visible &&
 			!vcpu->arch.protected_task_growdown_fault)) {
