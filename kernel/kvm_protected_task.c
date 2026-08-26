@@ -321,6 +321,11 @@ void kvm_protected_task_prepare_user_work(void)
 bool kvm_protected_task_run(struct pt_regs *regs)
 {
 #if IS_ENABLED(CONFIG_KVM)
+	struct kvm_protected_task_failure failure = {
+		.category = "engine",
+		.phase = "clone",
+		.reason = "initialization",
+	};
 	struct kvm_protected_task_context *context;
 	int ret;
 
@@ -335,12 +340,21 @@ bool kvm_protected_task_run(struct pt_regs *regs)
 					       &current->protected_task_state);
 	else
 		ret = 0;
-	if (!ret)
-		ret = context->ops->run(current->protected_task_state, regs);
+	if (!ret) {
+		failure.phase = "run";
+		failure.reason = "provider";
+		ret = context->ops->run(current->protected_task_state, regs,
+					&failure);
+	}
 	current->protected_task_running = false;
 	kvm_protected_task_cleanup_retired(current);
-	if (ret)
+	if (ret) {
+		pr_err_ratelimited("KVM: protected task failure: task=%s[%d] category=%s phase=%s reason=%s error=%d exit=%u rip=%#lx\n",
+				   current->comm, task_pid_nr(current),
+				   failure.category, failure.phase, failure.reason,
+				   ret, failure.exit_reason, failure.rip);
 		force_sig(SIGKILL);
+	}
 	local_irq_disable();
 	return true;
 #else
