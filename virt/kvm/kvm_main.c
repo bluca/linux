@@ -1145,9 +1145,8 @@ int __weak kvm_arch_protected_task_prepare_user_work(struct kvm_vcpu *vcpu,
 	return 0;
 }
 
-int __weak kvm_arch_protected_task_run(
-		struct kvm_vcpu *vcpu, void *state, struct pt_regs *regs,
-		u32 *next_slot, struct kvm_protected_task_failure *failure)
+int __weak kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,
+				       struct pt_regs *regs, u32 *next_slot)
 {
 	return -EOPNOTSUPP;
 }

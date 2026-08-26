@@ -2,7 +2,6 @@
 
 #include <linux/err.h>
 #include <linux/kvm_host.h>
-#include <linux/kvm_protected_task.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/overflow.h>
@@ -1752,31 +1751,24 @@ int kvm_arch_protected_task_prepare_user_work(struct kvm_vcpu *vcpu,
 	return kvm_protected_task_activate_fpu(vcpu, state);
 }
 
-int kvm_arch_protected_task_run(
-		struct kvm_vcpu *vcpu, void *arch_state, struct pt_regs *regs,
-		u32 *next_slot, struct kvm_protected_task_failure *failure)
+int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
+				struct pt_regs *regs, u32 *next_slot)
 {
 	struct kvm_protected_task_x86 *state = arch_state;
 	bool run_complete = false;
 	int ret;
 
-	failure->rip = regs->ip;
-	failure->phase = "vcpu-prepare";
-	failure->reason = "fpu-deactivate";
 	ret = kvm_protected_task_deactivate_fpu(vcpu, state);
 	if (ret)
 		goto release;
 	kvm_protected_task_sync_dynamic_xstate(vcpu, state, false);
 
-	failure->reason = "special-registers";
 	ret = kvm_protected_task_setup_sregs(vcpu, state);
 	if (ret)
 		goto out;
-	failure->reason = "task-msrs";
 	ret = kvm_protected_task_setup_task_msrs(vcpu, state);
 	if (ret)
 		goto out;
-	failure->reason = "debug-registers";
 	ret = kvm_protected_task_setup_debugregs(vcpu, state);
 	if (ret)
 		goto out;
@@ -1788,7 +1780,6 @@ int kvm_arch_protected_task_run(
 		vcpu->arch.protected_task_return_rflags = regs->flags;
 		vcpu->arch.protected_task_fast_return = true;
 	} else {
-		failure->reason = "general-registers";
 		ret = kvm_protected_task_setup_regs(vcpu, regs);
 		if (ret)
 			goto out;
@@ -1797,13 +1788,9 @@ int kvm_arch_protected_task_run(
 
 	vcpu->arch.protected_task_backing_fault = false;
 	vcpu->arch.protected_task_growdown_fault = false;
-	failure->phase = "vcpu-run";
-	failure->reason = "run-error";
 	ret = kvm_protected_task_vcpu_run(vcpu);
 	kvm_protected_task_vcpu_run_complete(vcpu);
 	run_complete = true;
-	failure->exit_reason = vcpu->run->exit_reason;
-	failure->rip = vcpu->run->s.regs.regs.rip;
 	kvm_protected_task_sync_pkru(vcpu, state);
 	if (ret == -EINTR &&
 	    vcpu->run->s.regs.regs.rip == state->image->syscall_stub) {
@@ -1818,8 +1805,6 @@ int kvm_arch_protected_task_run(
 		}
 	}
 	if (ret == -EINTR) {
-		failure->phase = "vcpu-exit";
-		failure->reason = "register-sync";
 		ret = kvm_protected_task_sync_regs(vcpu, regs, false);
 		goto out;
 	}
@@ -1832,14 +1817,10 @@ int kvm_arch_protected_task_run(
 	{
 		unsigned long modifying_work, nr, work;
 
-		failure->phase = "syscall-exit";
-		failure->reason = "register-sync";
 		ret = kvm_protected_task_sync_regs(vcpu, regs, false);
 		if (ret)
 			break;
 		if (regs->ip != state->image->syscall_stub) {
-			failure->reason = "unexpected-rip";
-			failure->rip = regs->ip;
 			ret = -EIO;
 			break;
 		}
@@ -1873,20 +1854,14 @@ int kvm_arch_protected_task_run(
 		break;
 	}
 	case KVM_EXIT_MEMORY_FAULT:
-		failure->phase = "memory-fault";
-		failure->reason = "handling-error";
 		ret = kvm_protected_task_handle_memory_fault(vcpu, regs,
 						     next_slot);
 		break;
 	case KVM_EXIT_EXCEPTION:
 	case KVM_EXIT_DEBUG:
-		failure->phase = "exception";
-		failure->reason = "handling-error";
 		ret = kvm_protected_task_handle_exception(vcpu, state, regs);
 		break;
 	default:
-		failure->phase = "exit-dispatch";
-		failure->reason = "unexpected-vm-exit";
 		ret = -EIO;
 		break;
 	}
@@ -1976,9 +1951,8 @@ int kvm_arch_protected_task_prepare_user_work(struct kvm_vcpu *vcpu,
 	return 0;
 }
 
-int kvm_arch_protected_task_run(
-		struct kvm_vcpu *vcpu, void *state, struct pt_regs *regs,
-		u32 *next_slot, struct kvm_protected_task_failure *failure)
+int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,
+				struct pt_regs *regs, u32 *next_slot)
 {
 	return -EOPNOTSUPP;
 }

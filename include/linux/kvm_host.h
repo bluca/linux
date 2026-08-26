@@ -45,8 +45,6 @@
 #include <asm/kvm_host.h>
 #include <linux/kvm_dirty_ring.h>
 
-struct kvm_protected_task_failure;
-
 #ifndef KVM_MAX_VCPU_IDS
 #define KVM_MAX_VCPU_IDS KVM_MAX_VCPUS
 #endif
@@ -1837,8 +1835,7 @@ int kvm_arch_protected_task_finalize(struct kvm_vcpu *vcpu,
 int kvm_arch_protected_task_prepare_user_work(struct kvm_vcpu *vcpu,
 					      void *state);
 int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *state,
-				struct pt_regs *regs, u32 *next_slot,
-				struct kvm_protected_task_failure *failure);
+				struct pt_regs *regs, u32 *next_slot);
 int kvm_arch_protected_task_deactivate(struct kvm_vcpu *vcpu, void *state);
 void kvm_arch_protected_task_cleanup(struct kvm_vcpu *vcpu, void *state);
 

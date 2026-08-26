@@ -590,9 +590,7 @@ static int kvm_protected_task_refresh(struct kvm_protected_task_exec *exec,
 	return 0;
 }
 
-static int kvm_protected_task_run_vcpu(
-		void *state, struct pt_regs *regs,
-		struct kvm_protected_task_failure *failure)
+static int kvm_protected_task_run_vcpu(void *state, struct pt_regs *regs)
 {
 	struct kvm_protected_task_exec *exec = state;
 	u64 pgtable_gen;
@@ -603,8 +601,6 @@ static int kvm_protected_task_run_vcpu(
 
 	if (unlikely(exec->pgtable_gen != pgtable_gen ||
 		     READ_ONCE(current->mm->protected_task_vm) != exec->vm)) {
-		failure->phase = "refresh";
-		failure->reason = "replacement";
 		ret = kvm_protected_task_refresh(exec, regs);
 		if (ret)
 			goto complete;
@@ -614,11 +610,9 @@ static int kvm_protected_task_run_vcpu(
 		goto complete;
 	}
 
-	ret = kvm_arch_protected_task_run(exec->vcpu, exec->arch_state, regs,
-					  &exec->next_slot, failure);
+	ret = kvm_arch_protected_task_run(exec->vcpu, exec->arch_state,
+					  regs, &exec->next_slot);
 	if (ret == -ENOSPC) {
-		failure->phase = "refresh";
-		failure->reason = "memslot-exhaustion";
 		kvm_protected_task_vcpu_run_begin(exec);
 		ret = kvm_protected_task_refresh(exec, regs);
 		kvm_protected_task_vcpu_run_complete(exec->vcpu);

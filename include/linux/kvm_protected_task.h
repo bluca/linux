@@ -11,14 +11,6 @@ struct task_struct;
 
 struct kvm_protected_task_context;
 
-struct kvm_protected_task_failure {
-	const char *category;
-	const char *phase;
-	const char *reason;
-	unsigned long rip;
-	u32 exit_reason;
-};
-
 /*
  * The retained context file pins the provider while these callbacks run.
  * stage_exec may set @state on error; cleanup_exec runs before bprm->mm is put.
@@ -39,8 +31,7 @@ struct kvm_protected_task_ops {
 	void (*deactivate_exec)(void *state);
 	int (*finalize_exec)(void *state, struct pt_regs *regs);
 	void (*prepare_user_work)(void *state);
-	int (*run)(void *state, struct pt_regs *regs,
-		   struct kvm_protected_task_failure *failure);
+	int (*run)(void *state, struct pt_regs *regs);
 	void (*cleanup_exec)(void *state);
 };
 
