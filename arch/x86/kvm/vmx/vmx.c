@@ -5437,14 +5437,10 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
 	if (intr_info & INTR_INFO_DELIVER_CODE_MASK)
 		error_code = vmcs_read32(VM_EXIT_INTR_ERROR_CODE);
 	if (vcpu->kvm->protected_task &&
-	    ex_no != DB_VECTOR && ex_no != BP_VECTOR) {
-		if (ex_no == PF_VECTOR)
-			vcpu->arch.cr2 = vmx_get_exit_qual(vcpu);
-		kvm_run->exit_reason = KVM_EXIT_EXCEPTION;
-		kvm_run->ex.exception = ex_no;
-		kvm_run->ex.error_code = error_code;
-		return 0;
-	}
+	    ex_no != DB_VECTOR && ex_no != BP_VECTOR)
+		return kvm_prepare_protected_task_exception_exit(
+			vcpu, ex_no, error_code,
+			ex_no == PF_VECTOR ? vmx_get_exit_qual(vcpu) : 0);
 
 	/*
 	 * Queue the exception here instead of in handle_nm_fault_irqoff().

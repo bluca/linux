@@ -253,6 +253,19 @@ static inline bool x86_exception_has_error_code(unsigned int vector)
 	return (1U << vector) & exception_has_error_code;
 }
 
+static inline int kvm_prepare_protected_task_exception_exit(
+		struct kvm_vcpu *vcpu, unsigned int vector, u32 error_code,
+		unsigned long cr2)
+{
+	if (vector == PF_VECTOR)
+		vcpu->arch.cr2 = cr2;
+	vcpu->run->exit_reason = KVM_EXIT_EXCEPTION;
+	vcpu->run->ex.exception = vector;
+	vcpu->run->ex.error_code = x86_exception_has_error_code(vector) ?
+					 error_code : 0;
+	return 0;
+}
+
 static inline bool mmu_is_nested(struct kvm_vcpu *vcpu)
 {
 	return vcpu->arch.mmu == &vcpu->arch.guest_mmu;

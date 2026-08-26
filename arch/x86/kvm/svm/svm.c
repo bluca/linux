@@ -3358,20 +3358,6 @@ static int vmmcall_interception(struct kvm_vcpu *vcpu)
 	return kvm_emulate_hypercall(vcpu);
 }
 
-static int protected_task_exception_interception(struct kvm_vcpu *vcpu,
-						 unsigned int vector)
-{
-	struct vcpu_svm *svm = to_svm(vcpu);
-
-	if (vector == PF_VECTOR)
-		vcpu->arch.cr2 = svm->vmcb->control.exit_info_2;
-	vcpu->run->exit_reason = KVM_EXIT_EXCEPTION;
-	vcpu->run->ex.exception = vector;
-	vcpu->run->ex.error_code = x86_exception_has_error_code(vector) ?
-					 svm->vmcb->control.exit_info_1 : 0;
-	return 0;
-}
-
 static int (*const svm_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[SVM_EXIT_READ_CR0]			= cr_interception,
 	[SVM_EXIT_READ_CR3]			= cr_interception,
@@ -3681,9 +3667,13 @@ int svm_invoke_exit_handler(struct kvm_vcpu *vcpu, u64 __exit_code)
 	if (vcpu->kvm->protected_task &&
 	    exit_code >= SVM_EXIT_EXCP_BASE &&
 	    exit_code < SVM_EXIT_EXCP_BASE + 32) {
+		struct vmcb_control_area *control = &to_svm(vcpu)->vmcb->control;
+
 		vector = exit_code - SVM_EXIT_EXCP_BASE;
 		if (vector != DB_VECTOR && vector != BP_VECTOR)
-			return protected_task_exception_interception(vcpu, vector);
+			return kvm_prepare_protected_task_exception_exit(
+				vcpu, vector, control->exit_info_1,
+				control->exit_info_2);
 	}
 
 #ifdef CONFIG_MITIGATION_RETPOLINE
