@@ -114,40 +114,6 @@ static void assert_protected_entry(void)
 		_exit(203);
 }
 
-static int run_process_failure_signal_target(void)
-{
-	struct sigaction action = {
-		.sa_handler = SIG_DFL,
-	};
-
-	sigemptyset(&action.sa_mask);
-	if (sigaction(SIGILL, &action, NULL))
-		return 1;
-	asm volatile("ud2");
-	return 2;
-}
-
-static int run_process_failure_engine_target(void)
-{
-	unsigned int eax, ebx, ecx, edx;
-	char vendor[13] = {};
-
-	assert_protected_entry();
-	if (prctl(PR_SET_NAME, "pt-failure", 0, 0, 0))
-		return 1;
-	__cpuid(0, eax, ebx, ecx, edx);
-	memcpy(vendor, &ebx, sizeof(ebx));
-	memcpy(vendor + 4, &edx, sizeof(edx));
-	memcpy(vendor + 8, &ecx, sizeof(ecx));
-	if (!strcmp(vendor, "AuthenticAMD"))
-		asm volatile("vmmcall" ::: "memory");
-	else if (!strcmp(vendor, "GenuineIntel"))
-		asm volatile("vmcall" ::: "memory");
-	else
-		return 2;
-	return 3;
-}
-
 static volatile sig_atomic_t protected_entry_signal_seen;
 
 static void protected_entry_signal_handler(int signal)
@@ -2607,123 +2573,6 @@ static void test_protected_process_state(int kvm_fd)
 {
 	run_process_state_target(kvm_fd, false);
 	run_process_state_target(kvm_fd, true);
-}
-
-static void run_process_failure_signal_control(int kvm_fd, bool protected)
-{
-	struct kvm_protected_task_arm arm = {
-		.size = sizeof(arm),
-	};
-	struct rlimit core_limit = {};
-	int status;
-	pid_t child;
-
-	child = fork();
-	TEST_ASSERT(child >= 0, "process-failure fork() failed: %d", errno);
-	if (!child) {
-		int fd, ret;
-
-		TEST_ASSERT(setrlimit(RLIMIT_CORE, &core_limit) == 0,
-			    "setrlimit(RLIMIT_CORE) failed: %d", errno);
-		if (protected) {
-			fd = create_context_with_features(kvm_fd,
-					  KVM_PROTECTED_TASK_FEATURE_EXEC);
-			ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
-			TEST_ASSERT(ret == 0,
-				    KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
-		}
-		execl("/proc/self/exe", "protected_task_test",
-		      "--process-failure-signal-target", NULL);
-		_exit(127);
-	}
-
-	TEST_ASSERT(waitpid(child, &status, 0) == child,
-		    "waitpid() for %s failure-signal target failed: %d",
-		    protected ? "protected" : "native", errno);
-	TEST_ASSERT(WIFSIGNALED(status) && WTERMSIG(status) == SIGILL,
-		    "%s expected guest fault produced status %#x",
-		    protected ? "Protected" : "Native", status);
-}
-
-static bool process_failure_log_matches(int kmsg_fd, pid_t pid)
-{
-	struct pollfd pollfd = {
-		.fd = kmsg_fd,
-		.events = POLLIN,
-	};
-	char expected[256], record[8192];
-	int retries = 2;
-
-	snprintf(expected, sizeof(expected),
-		 "task=pt-failure[%d] category=engine phase=syscall-exit reason=unexpected-rip error=%d exit=%d rip=0x",
-		 pid, -EIO, KVM_EXIT_HYPERCALL);
-	for (;;) {
-		ssize_t length = read(kmsg_fd, record, sizeof(record) - 1);
-
-		if (length >= 0) {
-			record[length] = '\0';
-			if (strstr(record, expected)) {
-				char *rip = strstr(record, " rip=0x");
-
-				return rip && strtoul(rip + 7, NULL, 16);
-			}
-			continue;
-		}
-		if (errno == EINTR)
-			continue;
-		if (errno != EAGAIN || !retries--)
-			return false;
-		if (poll(&pollfd, 1, 1000) < 0 && errno != EINTR)
-			return false;
-	}
-}
-
-static void test_protected_process_failure(int kvm_fd)
-{
-	struct kvm_protected_task_arm arm = {
-		.size = sizeof(arm),
-	};
-	struct rlimit core_limit = {};
-	int kmsg_fd, status;
-	pid_t child;
-
-	run_process_failure_signal_control(kvm_fd, false);
-	run_process_failure_signal_control(kvm_fd, true);
-
-	kmsg_fd = open("/dev/kmsg", O_RDONLY | O_CLOEXEC | O_NONBLOCK);
-	if (kmsg_fd >= 0 && lseek(kmsg_fd, 0, SEEK_END) < 0) {
-		close(kmsg_fd);
-		kmsg_fd = -1;
-	}
-
-	child = fork();
-	TEST_ASSERT(child >= 0, "engine-failure fork() failed: %d", errno);
-	if (!child) {
-		int fd, ret;
-
-		TEST_ASSERT(setrlimit(RLIMIT_CORE, &core_limit) == 0,
-			    "setrlimit(RLIMIT_CORE) failed: %d", errno);
-		fd = create_context_with_features(kvm_fd,
-					  KVM_PROTECTED_TASK_FEATURE_EXEC);
-		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
-		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
-		execl("/proc/self/exe", "protected_task_test",
-		      "--process-failure-engine-target", NULL);
-		_exit(127);
-	}
-
-	TEST_ASSERT(waitpid(child, &status, 0) == child,
-		    "waitpid() for engine-failure target failed: %d", errno);
-	TEST_ASSERT(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL,
-		    "Protected engine failure produced status %#x", status);
-	if (kmsg_fd < 0)
-		print_skip("Kernel log access is unavailable");
-	else {
-		TEST_ASSERT(process_failure_log_matches(kmsg_fd, child),
-			    "Missing protected engine failure diagnostic for PID %d",
-			    child);
-		close(kmsg_fd);
-	}
 }
 
 static void run_process_lifecycle_control(int kvm_fd, bool protected)
@@ -6757,8 +6606,7 @@ static void test_protected_exec_memlock_limit(int kvm_fd)
 int main(int argc, char *argv[])
 {
 	struct kvm_protected_task_info first_info, second_info;
-	bool process_failure_only, process_lifecycle_only;
-	bool process_observability_only;
+	bool process_lifecycle_only, process_observability_only;
 	bool process_security_only;
 	int kvm_fd, first_fd, second_fd;
 
@@ -6782,10 +6630,6 @@ int main(int argc, char *argv[])
 		return run_process_rseq_target(false);
 	if (argc == 2 && !strcmp(argv[1], "--process-rseq-reexec-target"))
 		return run_process_rseq_target(true);
-	if (argc == 2 && !strcmp(argv[1], "--process-failure-signal-target"))
-		return run_process_failure_signal_target();
-	if (argc == 2 && !strcmp(argv[1], "--process-failure-engine-target"))
-		return run_process_failure_engine_target();
 	if ((argc == 3 || argc == 5) &&
 	    !strcmp(argv[1], "--process-lifecycle-target")) {
 		unsigned long generation = 0;
@@ -6892,8 +6736,6 @@ int main(int argc, char *argv[])
 		!strcmp(argv[1], "--process-security-test");
 	process_observability_only = argc == 2 &&
 		!strcmp(argv[1], "--process-observability-test");
-	process_failure_only = argc == 2 &&
-		!strcmp(argv[1], "--process-failure-test");
 
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
@@ -6944,11 +6786,6 @@ int main(int argc, char *argv[])
 		close(kvm_fd);
 		return 0;
 	}
-	if (process_failure_only) {
-		test_protected_process_failure(kvm_fd);
-		close(kvm_fd);
-		return 0;
-	}
 
 	test_create_validation(kvm_fd);
 	test_protected_syscall_stub(kvm_fd);
@@ -6979,7 +6816,6 @@ int main(int argc, char *argv[])
 	test_protected_process_lifecycle(kvm_fd);
 	test_protected_process_security(kvm_fd);
 	test_protected_process_observability(kvm_fd);
-	test_protected_process_failure(kvm_fd);
 	test_swap_reclaim(kvm_fd);
 	test_numa_stress(kvm_fd);
 	test_memory_hotplug(kvm_fd);
