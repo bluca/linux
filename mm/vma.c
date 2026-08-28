@@ -3301,9 +3301,12 @@ int __vm_munmap(unsigned long start, size_t len, bool unlock)
 	LIST_HEAD(uf);
 	VMA_ITERATOR(vmi, mm, start);
 
-	if (kvm_protected_task_needs_pgtable_update())
-		protected_task_quiesced =
-			kvm_protected_task_begin_mm_update();
+	if (kvm_protected_task_needs_pgtable_update()) {
+		ret = kvm_protected_task_begin_mm_update();
+		if (ret < 0)
+			return ret;
+		protected_task_quiesced = ret;
+	}
 	if (mmap_write_lock_killable(mm)) {
 		if (protected_task_quiesced)
 			kvm_protected_task_end_mm_update(false);

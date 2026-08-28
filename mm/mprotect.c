@@ -868,9 +868,12 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 	reqprot = prot;
 
 	if (user_call && kvm_protected_task_is_active() &&
-	    (pkey != -1 || kvm_protected_task_needs_pgtable_update()))
-		protected_task_quiesced =
-			kvm_protected_task_begin_mm_update();
+	    (pkey != -1 || kvm_protected_task_needs_pgtable_update())) {
+		error = kvm_protected_task_begin_mm_update();
+		if (error < 0)
+			return error;
+		protected_task_quiesced = error;
+	}
 	if (mmap_write_lock_killable(current->mm)) {
 		if (protected_task_quiesced)
 			kvm_protected_task_end_mm_update(false);

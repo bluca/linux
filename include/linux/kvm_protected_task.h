@@ -26,7 +26,7 @@ struct kvm_protected_task_ops {
 	u64 (*xfeatures)(void *state);
 	unsigned int (*max_tag_bits)(void *state);
 	bool (*needs_pgtable_update)(void *state);
-	void (*begin_mm_update)(void *state);
+	int (*begin_mm_update)(void *state);
 	void (*end_mm_update)(void *state);
 	void (*deactivate_exec)(void *state);
 	int (*finalize_exec)(void *state, struct pt_regs *regs);
@@ -45,7 +45,7 @@ bool kvm_protected_task_can_block_step(struct task_struct *task);
 u64 kvm_protected_task_xfeatures(void);
 unsigned int kvm_protected_task_max_tag_bits(void);
 bool kvm_protected_task_needs_pgtable_update(void);
-bool kvm_protected_task_begin_mm_update(void);
+int kvm_protected_task_begin_mm_update(void);
 void kvm_protected_task_end_mm_update(bool changed);
 void kvm_protected_task_init(struct task_struct *task);
 void kvm_protected_task_fork(struct task_struct *task, bool inherit);

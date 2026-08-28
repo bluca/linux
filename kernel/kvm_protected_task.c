@@ -81,20 +81,21 @@ bool kvm_protected_task_needs_pgtable_update(void)
 #endif
 }
 
-bool kvm_protected_task_begin_mm_update(void)
+int kvm_protected_task_begin_mm_update(void)
 {
 #if IS_ENABLED(CONFIG_KVM)
 	struct kvm_protected_task_context *context;
+	int ret;
 
 	if (!current->protected_task_active || !current->protected_task_state)
 		return false;
 	context = current->protected_task_active->private_data;
 	if (!context->ops->begin_mm_update)
 		return false;
-	context->ops->begin_mm_update(current->protected_task_state);
-	return true;
+	ret = context->ops->begin_mm_update(current->protected_task_state);
+	return ret ?: 1;
 #else
-	return false;
+	return 0;
 #endif
 }
 

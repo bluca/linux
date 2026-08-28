@@ -1974,6 +1974,7 @@ static unsigned long do_mremap(struct vma_remap_struct *vrm)
 	bool protected_pgtable_changed = false;
 	unsigned long res;
 	bool failed;
+	int ret;
 
 	vrm->old_len = PAGE_ALIGN(vrm->old_len);
 	vrm->new_len = PAGE_ALIGN(vrm->new_len);
@@ -1982,9 +1983,12 @@ static unsigned long do_mremap(struct vma_remap_struct *vrm)
 	if (res)
 		return res;
 
-	if (kvm_protected_task_needs_pgtable_update())
-		protected_task_quiesced =
-			kvm_protected_task_begin_mm_update();
+	if (kvm_protected_task_needs_pgtable_update()) {
+		ret = kvm_protected_task_begin_mm_update();
+		if (ret < 0)
+			return ret;
+		protected_task_quiesced = ret;
+	}
 	if (mmap_write_lock_killable(mm)) {
 		if (protected_task_quiesced)
 			kvm_protected_task_end_mm_update(false);

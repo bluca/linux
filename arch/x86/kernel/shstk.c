@@ -108,10 +108,14 @@ static unsigned long alloc_shstk(unsigned long addr, unsigned long size,
 {
 	bool protected_task_quiesced = false;
 	unsigned long mapped_addr;
+	int ret;
 
-	if (kvm_protected_task_needs_pgtable_update())
-		protected_task_quiesced =
-			kvm_protected_task_begin_mm_update();
+	if (kvm_protected_task_needs_pgtable_update()) {
+		ret = kvm_protected_task_begin_mm_update();
+		if (ret < 0)
+			return ret;
+		protected_task_quiesced = ret;
+	}
 	mapped_addr = vm_mmap_shadow_stack(addr, size, MAP_ABOVE4G);
 
 	if (!set_res_tok || IS_ERR_VALUE(mapped_addr))

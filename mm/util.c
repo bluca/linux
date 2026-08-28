@@ -573,6 +573,7 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	unsigned long populate;
 	bool protected_task_quiesced = false;
+	int quiesce_ret;
 	LIST_HEAD(uf);
 
 	ret = security_mmap_file(file, prot, flag);
@@ -581,9 +582,12 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 	if (!ret) {
 		if (((flag & MAP_FIXED) &&
 		     kvm_protected_task_needs_pgtable_update()) ||
-		    (prot == PROT_EXEC && kvm_protected_task_is_active()))
-			protected_task_quiesced =
-				kvm_protected_task_begin_mm_update();
+		    (prot == PROT_EXEC && kvm_protected_task_is_active())) {
+			quiesce_ret = kvm_protected_task_begin_mm_update();
+			if (quiesce_ret < 0)
+				return quiesce_ret;
+			protected_task_quiesced = quiesce_ret;
+		}
 		if (mmap_write_lock_killable(mm)) {
 			if (protected_task_quiesced)
 				kvm_protected_task_end_mm_update(false);
