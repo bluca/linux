@@ -5167,8 +5167,7 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 	if (vcpu->kvm->protected_task &&
 	    (kvm_cpu_cap_has(X86_FEATURE_RDPID) ||
 	     kvm_cpu_cap_has(X86_FEATURE_RDTSCP)))
-		WARN_ON_ONCE(kvm_msr_write(vcpu, MSR_TSC_AUX,
-				vdso_encode_cpunode(cpu, cpu_to_node(cpu))));
+		kvm_make_request(KVM_REQ_PROTECTED_TASK_TSC_AUX, vcpu);
 
 	if (vcpu != per_cpu(last_vcpu, cpu)) {
 		/*
@@ -11165,6 +11164,16 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 			r = kvm_guest_time_update(vcpu);
 			if (unlikely(r))
 				goto out;
+		}
+		if (kvm_check_request(KVM_REQ_PROTECTED_TASK_TSC_AUX, vcpu)) {
+			int cpu = READ_ONCE(vcpu->cpu);
+
+			r = kvm_msr_write(vcpu, MSR_TSC_AUX,
+					  vdso_encode_cpunode(cpu, cpu_to_node(cpu)));
+			if (WARN_ON_ONCE(r)) {
+				r = -EIO;
+				goto out;
+			}
 		}
 		if (kvm_check_request(KVM_REQ_MMU_SYNC, vcpu))
 			kvm_mmu_sync_roots(vcpu);
