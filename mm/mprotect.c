@@ -835,7 +835,7 @@ fail:
  * pkey==-1 when doing a legacy mprotect()
  */
 static int do_mprotect_pkey(unsigned long start, size_t len,
-		unsigned long prot, int pkey)
+		unsigned long prot, int pkey, bool user_call)
 {
 	unsigned long nstart, end, tmp, reqprot;
 	struct vm_area_struct *vma, *prev;
@@ -867,7 +867,8 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 
 	reqprot = prot;
 
-	if (pkey != -1 && kvm_protected_task_is_active())
+	if (user_call && kvm_protected_task_is_active() &&
+	    (pkey != -1 || kvm_protected_task_needs_pgtable_update()))
 		protected_task_quiesced =
 			kvm_protected_task_begin_mm_update();
 	if (mmap_write_lock_killable(current->mm)) {
@@ -1003,14 +1004,14 @@ out:
 
 int vm_mprotect(unsigned long start, size_t len, unsigned long prot)
 {
-	return do_mprotect_pkey(start, len, prot, -1);
+	return do_mprotect_pkey(start, len, prot, -1, false);
 }
 EXPORT_SYMBOL_GPL(vm_mprotect);
 
 SYSCALL_DEFINE3(mprotect, unsigned long, start, size_t, len,
 		unsigned long, prot)
 {
-	return do_mprotect_pkey(start, len, prot, -1);
+	return do_mprotect_pkey(start, len, prot, -1, true);
 }
 
 #ifdef CONFIG_ARCH_HAS_PKEYS
@@ -1018,7 +1019,7 @@ SYSCALL_DEFINE3(mprotect, unsigned long, start, size_t, len,
 SYSCALL_DEFINE4(pkey_mprotect, unsigned long, start, size_t, len,
 		unsigned long, prot, int, pkey)
 {
-	return do_mprotect_pkey(start, len, prot, pkey);
+	return do_mprotect_pkey(start, len, prot, pkey, true);
 }
 
 SYSCALL_DEFINE2(pkey_alloc, unsigned long, flags, unsigned long, init_val)

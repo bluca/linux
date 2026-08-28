@@ -4206,8 +4206,10 @@ check_execute_only_mapping:
 	push %r12
 	push %r13
 	push %r14
+	push %r15
 	mov $-1, %r12
 	xor %r13d, %r13d
+	xor %r15d, %r15d
 	mov $319, %eax
 	lea security_memfd_name(%rip), %rdi
 	mov $0x11, %esi
@@ -4264,11 +4266,42 @@ check_execute_only_mapping:
 	cmpb $0xb8, (%r13)
 	jne .Lexecute_only_fail
 .Lexecute_only_success:
+	mov $9, %eax
+	xor %edi, %edi
+	mov $4096, %esi
+	mov $1, %edx
+	mov $2, %r10d
+	mov %r12d, %r8d
+	xor %r9d, %r9d
+	syscall
+	cmp $-4095, %rax
+	jae .Lexecute_only_fail
+	mov %rax, %r15
+	mov $10, %eax
+	mov %r15, %rdi
+	mov $4096, %esi
+	mov $4, %edx
+	syscall
+	test %rax, %rax
+	jne .Lexecute_only_fail
+	call *%r15
+	cmp $0x12345678, %eax
+	jne .Lexecute_only_fail
 	xor %r14d, %r14d
 	jmp .Lexecute_only_cleanup
 .Lexecute_only_fail:
 	mov $1, %r14d
 .Lexecute_only_cleanup:
+	test %r15, %r15
+	jz .Lexecute_only_unmap_direct
+	mov $11, %eax
+	mov %r15, %rdi
+	mov $4096, %esi
+	syscall
+	test %rax, %rax
+	je .Lexecute_only_unmap_direct
+	mov $1, %r14d
+.Lexecute_only_unmap_direct:
 	test %r13, %r13
 	jz .Lexecute_only_close
 	mov $11, %eax
@@ -4289,6 +4322,7 @@ check_execute_only_mapping:
 	mov $1, %r14d
 .Lexecute_only_done:
 	mov %r14d, %eax
+	pop %r15
 	pop %r14
 	pop %r13
 	pop %r12
