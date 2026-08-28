@@ -636,16 +636,15 @@ static const struct kvm_protected_task_ops kvm_protected_task_ops = {
 };
 
 static int kvm_protected_task_copy_arg(void *dst, size_t size,
-				       size_t min_size, void __user *argp)
+				       size_t min_size, void __user *argp,
+				       u32 *user_size)
 {
-	u32 user_size;
-
-	if (get_user(user_size, (u32 __user *)argp))
+	if (get_user(*user_size, (u32 __user *)argp))
 		return -EFAULT;
-	if (user_size < min_size)
+	if (*user_size < min_size)
 		return -EINVAL;
 
-	return copy_struct_from_user(dst, size, argp, user_size);
+	return copy_struct_from_user(dst, size, argp, *user_size);
 }
 
 static int kvm_protected_task_arm(struct file *file, void __user *argp)
@@ -653,9 +652,11 @@ static int kvm_protected_task_arm(struct file *file, void __user *argp)
 	struct kvm_protected_task_arm arm = {};
 	struct file *old;
 	size_t min_size = offsetofend(struct kvm_protected_task_arm, flags);
+	u32 user_size;
 	int ret;
 
-	ret = kvm_protected_task_copy_arg(&arm, sizeof(arm), min_size, argp);
+	ret = kvm_protected_task_copy_arg(&arm, sizeof(arm), min_size, argp,
+					  &user_size);
 	if (ret)
 		return ret;
 	if (arm.flags || memchr_inv(arm.reserved, 0, sizeof(arm.reserved)))
@@ -690,9 +691,8 @@ static int kvm_protected_task_get_info(struct file *file, void __user *argp)
 	u32 user_size;
 	int ret;
 
-	if (get_user(user_size, (u32 __user *)argp))
-		return -EFAULT;
-	ret = kvm_protected_task_copy_arg(&info, sizeof(info), min_size, argp);
+	ret = kvm_protected_task_copy_arg(&info, sizeof(info), min_size, argp,
+					  &user_size);
 	if (ret)
 		return ret;
 	if (info.flags || info.features || info.context_id ||
@@ -753,9 +753,8 @@ int kvm_protected_task_create_fd(void __user *argp)
 	u32 user_size;
 	int fd, ret;
 
-	if (get_user(user_size, (u32 __user *)argp))
-		return -EFAULT;
-	ret = kvm_protected_task_copy_arg(&create, sizeof(create), min_size, argp);
+	ret = kvm_protected_task_copy_arg(&create, sizeof(create), min_size, argp,
+					  &user_size);
 	if (ret)
 		return ret;
 	if (create.flags || create.supported_features ||
