@@ -5668,6 +5668,10 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	TEST_ASSERT(ptrace(PTRACE_POKEUSER, child,
 			   (void *)offsetof(struct user, u_debugreg[0]), 0) == 0,
 		    "Clearing DR0 failed: %d", errno);
+	errno = 0;
+	TEST_ASSERT(ptrace(PTRACE_SINGLEBLOCK, child, NULL, NULL) == -1 &&
+		    errno == EIO,
+		    "PTRACE_SINGLEBLOCK returned unexpected result: %d", errno);
 	TEST_ASSERT(ptrace(PTRACE_SINGLESTEP, child, NULL, NULL) == 0,
 		    "PTRACE_SINGLESTEP failed: %d", errno);
 	TEST_ASSERT(waitpid(child, &status, 0) == child,
@@ -6301,6 +6305,11 @@ int main(int argc, char *argv[])
 			   KVM_CAP_PROTECTED_TASK) == 1);
 	if (argc == 2 && !strcmp(argv[1], "--memlock-limit-test")) {
 		test_protected_exec_memlock_limit(kvm_fd);
+		close(kvm_fd);
+		return 0;
+	}
+	if (argc == 2 && !strcmp(argv[1], "--ptrace-test")) {
+		test_protected_exec(kvm_fd);
 		close(kvm_fd);
 		return 0;
 	}

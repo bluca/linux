@@ -18,6 +18,7 @@
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
+#include <linux/kvm_protected_task.h>
 #include <linux/pagemap.h>
 #include <linux/ptrace.h>
 #include <linux/security.h>
@@ -865,7 +866,8 @@ static int ptrace_resume(struct task_struct *child, long request,
 #endif
 
 	if (is_singleblock(request)) {
-		if (unlikely(!arch_has_block_step()))
+		if (unlikely(!arch_has_block_step() ||
+			     !kvm_protected_task_can_block_step(child)))
 			return -EIO;
 		user_enable_block_step(child);
 	} else if (is_singlestep(request) || is_sysemu_singlestep(request)) {

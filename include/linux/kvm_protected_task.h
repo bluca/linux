@@ -41,6 +41,7 @@ struct kvm_protected_task_context {
 
 bool kvm_protected_task_can_arm(void);
 bool kvm_protected_task_is_active(void);
+bool kvm_protected_task_can_block_step(struct task_struct *task);
 u64 kvm_protected_task_xfeatures(void);
 unsigned int kvm_protected_task_max_tag_bits(void);
 bool kvm_protected_task_needs_pgtable_update(void);

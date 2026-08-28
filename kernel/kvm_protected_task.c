@@ -27,6 +27,15 @@ bool kvm_protected_task_is_active(void)
 #endif
 }
 
+bool kvm_protected_task_can_block_step(struct task_struct *task)
+{
+#if IS_ENABLED(CONFIG_KVM)
+	return !READ_ONCE(task->protected_task_active);
+#else
+	return true;
+#endif
+}
+
 u64 kvm_protected_task_xfeatures(void)
 {
 #if IS_ENABLED(CONFIG_KVM)
