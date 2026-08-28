@@ -25,6 +25,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/auxv.h>
@@ -6134,6 +6135,47 @@ static void test_protected_exec(int kvm_fd)
 		    "Unexpected protected exec output");
 }
 
+static void test_protected_exec_memlock_limit(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "memlock-limit fork() failed: %d", errno);
+	if (!child) {
+		struct __user_cap_header_struct header = {
+			.version = _LINUX_CAPABILITY_VERSION_3,
+		};
+		struct __user_cap_data_struct data[_LINUX_CAPABILITY_U32S_3] = {};
+		struct rlimit limit = {};
+		int fd, ret;
+
+		fd = create_context_with_features(kvm_fd,
+				KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		TEST_ASSERT(setrlimit(RLIMIT_MEMLOCK, &limit) == 0,
+			    "setrlimit(RLIMIT_MEMLOCK) failed: %d", errno);
+		TEST_ASSERT(prctl(PR_SET_SECUREBITS,
+				  SECBIT_NOROOT | SECBIT_NOROOT_LOCKED, 0, 0, 0) == 0,
+			    "PR_SET_SECUREBITS failed: %d", errno);
+		TEST_ASSERT(syscall(SYS_capset, &header, data) == 0,
+			    "capset() failed: %d", errno);
+		execl("/proc/self/exe", "protected_task_test",
+		      "--io-permission-exec-target", NULL);
+		_exit(127);
+	}
+
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() for memlock-limit child failed: %d", errno);
+	TEST_ASSERT(WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV,
+		    "Protected memlock-limit exec produced unexpected status: %#x",
+		    status);
+}
+
 int main(int argc, char *argv[])
 {
 	struct kvm_protected_task_info first_info, second_info;
@@ -6257,6 +6299,11 @@ int main(int argc, char *argv[])
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
 			   KVM_CAP_PROTECTED_TASK) == 1);
+	if (argc == 2 && !strcmp(argv[1], "--memlock-limit-test")) {
+		test_protected_exec_memlock_limit(kvm_fd);
+		close(kvm_fd);
+		return 0;
+	}
 	if (process_lifecycle_only) {
 		test_protected_process_lifecycle(kvm_fd);
 		close(kvm_fd);
@@ -6275,6 +6322,7 @@ int main(int argc, char *argv[])
 	}
 
 	test_create_validation(kvm_fd);
+	test_protected_exec_memlock_limit(kvm_fd);
 	first_fd = create_context(kvm_fd);
 	second_fd = create_context(kvm_fd);
 
