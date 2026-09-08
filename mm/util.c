@@ -735,8 +735,7 @@ int vm_munmap_protected_task(unsigned long start, size_t len)
 	LIST_HEAD(uf);
 	VMA_ITERATOR(vmi, mm, start);
 
-	if (mmap_write_lock_killable(mm))
-		return -EINTR;
+	mmap_write_lock(mm);
 	for_each_vma_range(vmi, vma, end) {
 		if (vma->vm_start != next ||
 		    !(vma->vm_flags & VM_KVM_PROTECTED))

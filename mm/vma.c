@@ -1402,7 +1402,11 @@ static int vms_gather_munmap_vmas(struct vma_munmap_struct *vms,
 		struct ma_state *mas_detach)
 {
 	struct vm_area_struct *next = NULL;
+	gfp_t gfp = GFP_KERNEL;
 	int error;
+
+	if (vms->vma->vm_flags & VM_KVM_PROTECTED)
+		gfp |= __GFP_NOFAIL;
 
 	/*
 	 * If we need to split any vma, do it now to save pain later.
@@ -1454,7 +1458,7 @@ static int vms_gather_munmap_vmas(struct vma_munmap_struct *vms,
 		}
 		vma_start_write(next);
 		mas_set(mas_detach, vms->vma_count++);
-		error = mas_store_gfp(mas_detach, next, GFP_KERNEL);
+		error = mas_store_gfp(mas_detach, next, gfp);
 		if (error)
 			goto munmap_gather_failed;
 
@@ -1592,14 +1596,18 @@ int do_vmi_align_munmap(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	mt_init_flags(&mt_detach, vmi->mas.tree->ma_flags & MT_FLAGS_LOCK_MASK);
 	mt_on_stack(mt_detach);
 	struct vma_munmap_struct vms;
+	gfp_t gfp = GFP_KERNEL;
 	int error;
+
+	if (vma->vm_flags & VM_KVM_PROTECTED)
+		gfp |= __GFP_NOFAIL;
 
 	init_vma_munmap(&vms, vmi, vma, start, end, uf, unlock);
 	error = vms_gather_munmap_vmas(&vms, &mas_detach);
 	if (error)
 		goto gather_failed;
 
-	error = vma_iter_clear_gfp(vmi, start, end, GFP_KERNEL);
+	error = vma_iter_clear_gfp(vmi, start, end, gfp);
 	if (error)
 		goto clear_tree_failed;
 

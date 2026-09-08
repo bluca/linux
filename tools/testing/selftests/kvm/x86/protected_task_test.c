@@ -6162,6 +6162,95 @@ static void test_protected_exec(int kvm_fd)
 		    "Unexpected protected exec output");
 }
 
+static int image_teardown_child(void *opaque)
+{
+	assert_protected_entry();
+	syscall(SYS_kill, syscall(SYS_getpid), SIGSTOP);
+	return 1;
+}
+
+static int run_image_teardown_target(void)
+{
+	const size_t stack_size = 1 << 20;
+	size_t page_size = getpagesize();
+	unsigned long addresses[2], old_address;
+	void *stack, *mapping;
+	int key, status;
+	pid_t child;
+
+	assert_protected_entry();
+	key = pkey_alloc(0, 0);
+	if (key < 0) {
+		TEST_ASSERT(errno == EINVAL || errno == ENOSYS || errno == ENOSPC,
+			    "pkey_alloc() failed: %d", errno);
+		return KSFT_SKIP;
+	}
+	stack = mmap(NULL, stack_size, PROT_READ | PROT_WRITE,
+		     MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
+	TEST_ASSERT(stack != MAP_FAILED, "Clone stack mmap() failed: %d", errno);
+	mapping = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	TEST_ASSERT(mapping != MAP_FAILED, "Pkey mmap() failed: %d", errno);
+	for (int iteration = 0; iteration < 16; iteration++) {
+		TEST_ASSERT(get_hidden_mappings(getpid(), addresses, ARRAY_SIZE(addresses)) == 1,
+			    "Expected one image before cloning");
+		old_address = addresses[0];
+		child = clone(image_teardown_child, stack + stack_size,
+			      CLONE_VM | SIGCHLD, NULL);
+		TEST_ASSERT(child >= 0, "Image teardown clone() failed: %d", errno);
+		TEST_ASSERT(waitpid(child, &status, WUNTRACED) == child,
+			    "Waiting for stopped image holder failed: %d", errno);
+		TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP,
+			    "Image holder did not stop: %#x", status);
+		TEST_ASSERT(pkey_mprotect(mapping, page_size, PROT_READ | PROT_WRITE,
+					 iteration % 2 ? 0 : key) == 0,
+			    "Retiring old image failed: %d", errno);
+		TEST_ASSERT(get_hidden_mappings(getpid(), addresses, ARRAY_SIZE(addresses)) == 2,
+			    "Stopped child did not retain the old image");
+		TEST_ASSERT(kill(child, SIGKILL) == 0, "Killing image holder failed: %d", errno);
+		TEST_ASSERT(waitpid(child, &status, 0) == child,
+			    "Waiting for killed image holder failed: %d", errno);
+		TEST_ASSERT(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL,
+			    "Image holder exited unexpectedly: %#x", status);
+		TEST_ASSERT(get_hidden_mappings(getpid(), addresses, ARRAY_SIZE(addresses)) == 1 &&
+			    addresses[0] != old_address,
+			    "Killed image holder left its retired mapping behind");
+	}
+	TEST_ASSERT(munmap(mapping, page_size) == 0, "Pkey munmap() failed: %d", errno);
+	TEST_ASSERT(munmap(stack, stack_size) == 0, "Stack munmap() failed: %d", errno);
+	TEST_ASSERT(pkey_free(key) == 0, "pkey_free() failed: %d", errno);
+	return 0;
+}
+
+static void test_protected_image_teardown(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	child = fork();
+	TEST_ASSERT(child >= 0, "Image teardown fork() failed: %d", errno);
+	if (!child) {
+		int fd, ret;
+
+		fd = create_context_with_features(kvm_fd, KVM_PROTECTED_TASK_FEATURE_EXEC);
+		ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+		execl("/proc/self/exe", "protected_task_test", "--image-teardown-target", NULL);
+		_exit(127);
+	}
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "Waiting for image teardown target failed: %d", errno);
+	if (WIFEXITED(status) && WEXITSTATUS(status) == KSFT_SKIP) {
+		pr_info("Pkeys are unavailable, skipping image retirement test\n");
+		return;
+	}
+	TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    "Image teardown target failed: %#x", status);
+}
+
 static unsigned long memory_fault_address, memory_fault_error_code;
 static int memory_fault_signal_code;
 
@@ -6526,6 +6615,8 @@ int main(int argc, char *argv[])
 		return run_entry_target();
 	if (argc == 3 && !strcmp(argv[1], "--syscall-stub-target"))
 		return run_syscall_stub_target(argv[2]);
+	if (argc == 2 && !strcmp(argv[1], "--image-teardown-target"))
+		return run_image_teardown_target();
 	if (argc == 4 && !strcmp(argv[1], "--memory-fault-target")) {
 		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
 			return 127;
@@ -6650,6 +6741,11 @@ int main(int argc, char *argv[])
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
 			   KVM_CAP_PROTECTED_TASK) == 1);
+	if (argc == 2 && !strcmp(argv[1], "--image-teardown-test")) {
+		test_protected_image_teardown(kvm_fd);
+		close(kvm_fd);
+		return 0;
+	}
 	if (argc == 2 && !strcmp(argv[1], "--memory-fault-test")) {
 		test_protected_memory_fault_metadata(kvm_fd);
 		close(kvm_fd);
@@ -6694,6 +6790,7 @@ int main(int argc, char *argv[])
 
 	test_create_validation(kvm_fd);
 	test_protected_syscall_stub(kvm_fd);
+	test_protected_image_teardown(kvm_fd);
 	test_protected_memory_fault_metadata(kvm_fd);
 	test_protected_mremap_failure(kvm_fd);
 	test_protected_exec_memlock_limit(kvm_fd);
