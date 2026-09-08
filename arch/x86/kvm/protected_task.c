@@ -35,6 +35,11 @@
 #include "lapic.h"
 #include "x86.h"
 
+void kvm_arch_protected_task_kick(struct kvm_vcpu *vcpu)
+{
+	kvm_make_request_and_kick(KVM_REQ_PROTECTED_TASK_EXIT, vcpu);
+}
+
 #ifdef CONFIG_X86_64
 
 #define KVM_PT_VA_LIMIT_L4	BIT_ULL(47)

@@ -85,8 +85,7 @@ static void kvm_protected_task_kick_vcpus(struct mm_struct *mm)
 
 	spin_lock(&mm->protected_task_lock);
 	list_for_each_entry(registered_vcpu, &mm->protected_task_vcpus, node)
-		kvm_make_request_and_kick(KVM_REQ_PROTECTED_TASK_EXIT,
-					  registered_vcpu->vcpu);
+		kvm_arch_protected_task_kick(registered_vcpu->vcpu);
 	spin_unlock(&mm->protected_task_lock);
 }
 
@@ -122,9 +121,7 @@ static int kvm_protected_task_quiesce_mm(void *state)
 					    &mm->protected_task_vcpus, node) {
 				if (registered_vcpu->vcpu == exec->vcpu)
 					continue;
-				kvm_make_request_and_kick(
-					KVM_REQ_PROTECTED_TASK_EXIT,
-					registered_vcpu->vcpu);
+				kvm_arch_protected_task_kick(registered_vcpu->vcpu);
 			}
 			spin_unlock(&mm->protected_task_lock);
 			break;

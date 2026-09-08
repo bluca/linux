@@ -1101,6 +1101,22 @@ u64 __weak kvm_arch_protected_task_features(void)
 	return 0;
 }
 
+u64 __weak kvm_arch_protected_task_xfeatures(struct kvm_vcpu *vcpu, void *state)
+{
+	return 0;
+}
+
+unsigned long __weak kvm_arch_protected_task_elf_hwcap(struct kvm_vcpu *vcpu,
+						     unsigned int type,
+						     unsigned long value)
+{
+	return value;
+}
+
+void __weak kvm_arch_protected_task_kick(struct kvm_vcpu *vcpu)
+{
+}
+
 unsigned int __weak kvm_arch_protected_task_max_tag_bits(struct kvm_vcpu *vcpu,
 							 void *state)
 {
