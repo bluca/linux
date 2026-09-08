@@ -736,11 +736,13 @@ static u64 *kvm_protected_task_next_table(struct kvm_protected_task_builder *bui
 static int kvm_protected_task_map_page(struct kvm_protected_task_builder *builder,
 				       unsigned long address, unsigned long gpa,
 				       unsigned int shift,
-				       vm_flags_t vm_flags, int pkey)
+				       vm_flags_t vm_flags, int pkey, bool user)
 {
-	u64 flags = _PAGE_PRESENT | _PAGE_USER | _PAGE_ACCESSED | _PAGE_DIRTY;
+	u64 flags = _PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_DIRTY;
 	u64 *root, *p4d, *pud, *pmd, *pte, *entry;
 
+	if (user)
+		flags |= _PAGE_USER;
 	if (vm_flags & VM_WRITE)
 		flags |= _PAGE_RW;
 	if (!(vm_flags & VM_EXEC))
@@ -807,7 +809,7 @@ static int kvm_protected_task_map_range(struct kvm_protected_task_builder *build
 			shift = PAGE_SHIFT;
 
 		ret = kvm_protected_task_map_page(builder, address, address, shift,
-						  vm_flags, pkey);
+						  vm_flags, pkey, true);
 		if (ret)
 			return ret;
 		address += 1UL << shift;
@@ -1456,7 +1458,7 @@ static int kvm_protected_task_build_image(
 	}
 	kvm_x86_call(patch_hypercall)(vcpu, (u8 *)stub_page);
 	ret = kvm_protected_task_map_page(&builder, stub_gpa, stub_gpa,
-					  PAGE_SHIFT, VM_READ | VM_EXEC, 0);
+					  PAGE_SHIFT, VM_READ | VM_EXEC, 0, false);
 	if (ret)
 		goto free_builder;
 	if (copy_to_user((void __user *)image->address, builder.image,
@@ -1778,6 +1780,18 @@ int kvm_arch_protected_task_run(struct kvm_vcpu *vcpu, void *arch_state,
 	kvm_protected_task_vcpu_run_complete(vcpu);
 	run_complete = true;
 	kvm_protected_task_sync_pkru(vcpu, state);
+	if (ret == -EINTR &&
+	    vcpu->run->s.regs.regs.rip == state->image->syscall_stub) {
+		int cpl;
+
+		vcpu_load(vcpu);
+		cpl = kvm_x86_call(get_cpl)(vcpu);
+		vcpu_put(vcpu);
+		if (!cpl) {
+			vcpu->run->exit_reason = KVM_EXIT_HYPERCALL;
+			ret = 0;
+		}
+	}
 	if (ret == -EINTR) {
 		ret = kvm_protected_task_sync_regs(vcpu, regs, false);
 		goto out;

@@ -6139,6 +6139,98 @@ static void test_protected_exec(int kvm_fd)
 		    "Unexpected protected exec output");
 }
 
+static int run_syscall_stub_target(const char *operation)
+{
+	struct sigaction action = {
+		.sa_handler = SIG_DFL,
+	};
+	unsigned long addresses[2], start, end, stub = 0;
+	char line[256];
+	FILE *maps;
+
+	sigemptyset(&action.sa_mask);
+	if (sigaction(SIGSEGV, &action, NULL))
+		return 8;
+	assert_protected_entry();
+	if (!strcmp(operation, "hypercall")) {
+		unsigned int eax, ebx, ecx, edx;
+		char vendor[13] = {};
+
+		__cpuid(0, eax, ebx, ecx, edx);
+		memcpy(vendor, &ebx, sizeof(ebx));
+		memcpy(vendor + 4, &edx, sizeof(edx));
+		memcpy(vendor + 8, &ecx, sizeof(ecx));
+		if (!strcmp(vendor, "AuthenticAMD"))
+			asm volatile("vmmcall" ::: "memory");
+		else if (!strcmp(vendor, "GenuineIntel"))
+			asm volatile("vmcall" ::: "memory");
+		return 1;
+	}
+
+	if (get_hidden_mappings(getpid(), addresses, ARRAY_SIZE(addresses)) != 1)
+		return 2;
+	maps = fopen("/proc/self/maps", "re");
+	if (!maps)
+		return 3;
+	while (fgets(line, sizeof(line), maps))
+		if (sscanf(line, "%lx-%lx", &start, &end) == 2 &&
+		    start == addresses[0]) {
+			stub = end - 4096;
+			break;
+		}
+	if (fclose(maps) || !stub)
+		return 4;
+
+	if (!strcmp(operation, "read"))
+		return *(volatile unsigned char *)stub ? 5 : 6;
+	if (!strcmp(operation, "execute"))
+		asm volatile("jmp *%0" : : "r"(stub) : "memory");
+	return 7;
+}
+
+static void test_protected_syscall_stub(int kvm_fd)
+{
+	static const struct {
+		const char *operation;
+		int signal;
+	} tests[] = {
+		{ "read", SIGSEGV },
+		{ "execute", SIGSEGV },
+		{ "hypercall", SIGKILL },
+	};
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	struct rlimit core_limit = {};
+	int status;
+	pid_t child;
+
+	for (size_t index = 0; index < ARRAY_SIZE(tests); index++) {
+		child = fork();
+		TEST_ASSERT(child >= 0, "syscall-stub fork() failed: %d", errno);
+		if (!child) {
+			int fd, ret;
+
+			TEST_ASSERT(setrlimit(RLIMIT_CORE, &core_limit) == 0,
+				    "setrlimit(RLIMIT_CORE) failed: %d", errno);
+			fd = create_context_with_features(kvm_fd,
+					KVM_PROTECTED_TASK_FEATURE_EXEC);
+			ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+			TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+			execl("/proc/self/exe", "protected_task_test",
+			      "--syscall-stub-target", tests[index].operation, NULL);
+			_exit(127);
+		}
+
+		TEST_ASSERT(waitpid(child, &status, 0) == child,
+			    "waitpid() for syscall-stub target failed: %d", errno);
+		TEST_ASSERT(WIFSIGNALED(status) &&
+			    WTERMSIG(status) == tests[index].signal,
+			    "Protected syscall-stub %s produced status %#x, expected signal %d",
+			    tests[index].operation, status, tests[index].signal);
+	}
+}
+
 static void test_protected_exec_memlock_limit(int kvm_fd)
 {
 	struct kvm_protected_task_arm arm = {
@@ -6189,6 +6281,8 @@ int main(int argc, char *argv[])
 
 	if (argc == 2 && !strcmp(argv[1], "--entry-target"))
 		return run_entry_target();
+	if (argc == 3 && !strcmp(argv[1], "--syscall-stub-target"))
+		return run_syscall_stub_target(argv[2]);
 	if (argc == 2 && !strcmp(argv[1], "--process-state-target"))
 		return run_process_rseq_target(false);
 	if (argc == 2 && !strcmp(argv[1], "--process-rseq-reexec-target"))
@@ -6303,6 +6397,11 @@ int main(int argc, char *argv[])
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
 			   KVM_CAP_PROTECTED_TASK) == 1);
+	if (argc == 2 && !strcmp(argv[1], "--syscall-stub-test")) {
+		test_protected_syscall_stub(kvm_fd);
+		close(kvm_fd);
+		return 0;
+	}
 	if (argc == 2 && !strcmp(argv[1], "--memlock-limit-test")) {
 		test_protected_exec_memlock_limit(kvm_fd);
 		close(kvm_fd);
@@ -6331,6 +6430,7 @@ int main(int argc, char *argv[])
 	}
 
 	test_create_validation(kvm_fd);
+	test_protected_syscall_stub(kvm_fd);
 	test_protected_exec_memlock_limit(kvm_fd);
 	first_fd = create_context(kvm_fd);
 	second_fd = create_context(kvm_fd);

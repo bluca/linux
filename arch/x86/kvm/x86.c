@@ -10514,6 +10514,8 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(____kvm_emulate_hypercall);
 int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 {
 	if (vcpu->kvm->protected_task) {
+		if (kvm_x86_call(get_cpl)(vcpu))
+			return -EIO;
 		vcpu->run->exit_reason = KVM_EXIT_HYPERCALL;
 		return 0;
 	}
