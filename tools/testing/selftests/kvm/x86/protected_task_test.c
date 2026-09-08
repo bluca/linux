@@ -6161,6 +6161,113 @@ static void test_protected_exec(int kvm_fd)
 		    "Unexpected protected exec output");
 }
 
+static int run_mremap_failure_target(bool protected)
+{
+	const size_t length = 256UL * 1024 * 1024;
+	const size_t headroom = 64UL * 1024 * 1024;
+	struct rlimit original_limit, limit;
+	size_t page_size = getpagesize();
+	unsigned long mapped_pages;
+	unsigned char resident;
+	void *source, *destination, *result;
+	FILE *statm;
+	int key, error;
+
+	if (protected)
+		assert_protected_entry();
+	key = pkey_alloc(0, 0);
+	if (key < 0) {
+		TEST_ASSERT(errno == EINVAL || errno == ENOSYS || errno == ENOSPC,
+			    "pkey_alloc() failed: %d", errno);
+		return KSFT_SKIP;
+	}
+	source = mmap(NULL, length, PROT_READ | PROT_WRITE,
+		      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	TEST_ASSERT(source != MAP_FAILED, "Source mmap() failed: %d", errno);
+	destination = mmap(NULL, length, PROT_READ,
+			   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	TEST_ASSERT(destination != MAP_FAILED,
+		    "Destination mmap() failed: %d", errno);
+	TEST_ASSERT(pkey_mprotect(destination, page_size, PROT_READ, key) == 0,
+		    "pkey_mprotect() failed: %d", errno);
+	TEST_ASSERT(*(volatile unsigned char *)destination == 0,
+		    "Unexpected destination contents");
+	statm = fopen("/proc/self/statm", "re");
+	TEST_ASSERT(statm, "Opening statm failed: %d", errno);
+	TEST_ASSERT(fscanf(statm, "%lu", &mapped_pages) == 1,
+		    "Reading statm failed");
+	TEST_ASSERT(fclose(statm) == 0, "Closing statm failed: %d", errno);
+	TEST_ASSERT(getrlimit(RLIMIT_AS, &original_limit) == 0,
+		    "getrlimit(RLIMIT_AS) failed: %d", errno);
+	limit = original_limit;
+	limit.rlim_cur = mapped_pages * page_size - length + headroom;
+	TEST_ASSERT(setrlimit(RLIMIT_AS, &limit) == 0,
+		    "Lowering RLIMIT_AS failed: %d", errno);
+	result = mremap(source, length, length,
+			MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP,
+			destination);
+	error = errno;
+	TEST_ASSERT(setrlimit(RLIMIT_AS, &original_limit) == 0,
+		    "Restoring RLIMIT_AS failed: %d", errno);
+	TEST_ASSERT(result == MAP_FAILED && error == ENOMEM,
+		    "mremap() returned %p/%d, expected ENOMEM", result, error);
+	errno = 0;
+	TEST_ASSERT(mincore(destination, page_size, &resident) == -1 &&
+		    errno == ENOMEM, "Failed mremap() retained its destination");
+	result = mmap(destination, page_size, PROT_READ | PROT_WRITE,
+		      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+	TEST_ASSERT(result == destination,
+		    "Replacing the unmapped destination failed: %d", errno);
+	TEST_ASSERT(pkey_set(key, PKEY_DISABLE_ACCESS) == 0,
+		    "Disabling old pkey failed: %d", errno);
+	*(volatile unsigned char *)destination = 0x55;
+	TEST_ASSERT(*(volatile unsigned char *)destination == 0x55,
+		    "Replacement mapping retained the old pkey");
+	TEST_ASSERT(pkey_set(key, 0) == 0, "Restoring pkey failed: %d", errno);
+	TEST_ASSERT(munmap(source, length) == 0, "Source munmap() failed: %d", errno);
+	TEST_ASSERT(munmap(destination, page_size) == 0,
+		    "Destination munmap() failed: %d", errno);
+	TEST_ASSERT(pkey_free(key) == 0, "pkey_free() failed: %d", errno);
+	return 0;
+}
+
+static void test_protected_mremap_failure(int kvm_fd)
+{
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	for (int mode = 0; mode < 2; mode++) {
+		child = fork();
+		TEST_ASSERT(child >= 0, "mremap-failure fork() failed: %d", errno);
+		if (!child) {
+			if (mode) {
+				int fd, ret;
+
+				fd = create_context_with_features(kvm_fd,
+						KVM_PROTECTED_TASK_FEATURE_EXEC);
+				ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+				TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+			}
+			execl("/proc/self/exe", "protected_task_test",
+			      "--mremap-failure-target", mode ? "protected" : "native", NULL);
+			_exit(127);
+		}
+		TEST_ASSERT(waitpid(child, &status, 0) == child,
+			    "waitpid() for mremap-failure target failed: %d", errno);
+		if (WIFEXITED(status) && WEXITSTATUS(status) == KSFT_SKIP) {
+			pr_info("%s pkeys are unavailable, skipping failed-remap test\n",
+				mode ? "Protected" : "Native");
+			continue;
+		}
+		TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+			    "%s mremap-failure target failed: %#x",
+			    mode ? "Protected" : "Native", status);
+	}
+}
+
 static int run_syscall_stub_target(const char *operation)
 {
 	struct sigaction action = {
@@ -6305,6 +6412,11 @@ int main(int argc, char *argv[])
 		return run_entry_target();
 	if (argc == 3 && !strcmp(argv[1], "--syscall-stub-target"))
 		return run_syscall_stub_target(argv[2]);
+	if (argc == 3 && !strcmp(argv[1], "--mremap-failure-target")) {
+		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
+			return 127;
+		return run_mremap_failure_target(!strcmp(argv[2], "protected"));
+	}
 	if (argc == 2 && !strcmp(argv[1], "--process-state-target"))
 		return run_process_rseq_target(false);
 	if (argc == 2 && !strcmp(argv[1], "--process-rseq-reexec-target"))
@@ -6419,6 +6531,11 @@ int main(int argc, char *argv[])
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
 			   KVM_CAP_PROTECTED_TASK) == 1);
+	if (argc == 2 && !strcmp(argv[1], "--mremap-failure-test")) {
+		test_protected_mremap_failure(kvm_fd);
+		close(kvm_fd);
+		return 0;
+	}
 	if (argc == 2 && !strcmp(argv[1], "--syscall-stub-test")) {
 		test_protected_syscall_stub(kvm_fd);
 		close(kvm_fd);
@@ -6453,6 +6570,7 @@ int main(int argc, char *argv[])
 
 	test_create_validation(kvm_fd);
 	test_protected_syscall_stub(kvm_fd);
+	test_protected_mremap_failure(kvm_fd);
 	test_protected_exec_memlock_limit(kvm_fd);
 	first_fd = create_context(kvm_fd);
 	second_fd = create_context(kvm_fd);

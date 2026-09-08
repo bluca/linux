@@ -2034,8 +2034,7 @@ out:
 	if (vrm->mmap_locked)
 		mmap_write_unlock(mm);
 	if (protected_task_quiesced)
-		kvm_protected_task_end_mm_update(!failed &&
-						 protected_pgtable_changed);
+		kvm_protected_task_end_mm_update(protected_pgtable_changed);
 
 	/* VMA mlock'd + was expanded, so populated expanded region. */
 	if (!failed && vrm->populate_expand)
