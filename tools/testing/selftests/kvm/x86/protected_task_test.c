@@ -34,6 +34,7 @@
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #include <asm/prctl.h>
@@ -6161,6 +6162,119 @@ static void test_protected_exec(int kvm_fd)
 		    "Unexpected protected exec output");
 }
 
+static unsigned long memory_fault_address, memory_fault_error_code;
+static int memory_fault_signal_code;
+
+static void memory_fault_handler(int signal, siginfo_t *info, void *context)
+{
+	ucontext_t *ucontext = context;
+	greg_t *gregs = ucontext->uc_mcontext.gregs;
+
+	TEST_ASSERT(signal == SIGSEGV && info->si_code == memory_fault_signal_code,
+		    "Unexpected memory-fault signal: %d/%d", signal, info->si_code);
+	TEST_ASSERT((unsigned long)info->si_addr == memory_fault_address,
+		    "Fault address %p, expected %#lx", info->si_addr, memory_fault_address);
+	TEST_ASSERT(gregs[REG_CR2] == memory_fault_address,
+		    "Fault CR2 %#llx, expected %#lx", gregs[REG_CR2], memory_fault_address);
+	TEST_ASSERT(gregs[REG_ERR] == memory_fault_error_code,
+		    "Fault error code %#llx, expected %#lx",
+		    gregs[REG_ERR], memory_fault_error_code);
+	TEST_ASSERT(gregs[REG_TRAPNO] == 14,
+		    "Fault trap number %lld, expected 14", gregs[REG_TRAPNO]);
+	_exit(0);
+}
+
+static int run_memory_fault_target(bool protected, const char *operation)
+{
+	struct sigaction action = {
+		.sa_sigaction = memory_fault_handler,
+		.sa_flags = SA_SIGINFO,
+	};
+	size_t page_size = getpagesize();
+	size_t length = !strcmp(operation, "execute-cross-page") ?
+		2 * page_size : page_size;
+	unsigned char *mapping;
+
+	if (protected)
+		assert_protected_entry();
+	sigemptyset(&action.sa_mask);
+	TEST_ASSERT(sigaction(SIGSEGV, &action, NULL) == 0,
+		    "sigaction(SIGSEGV) failed: %d", errno);
+	mapping = mmap(NULL, length, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	TEST_ASSERT(mapping != MAP_FAILED, "Fault mmap() failed: %d", errno);
+	mapping[127] = 0xc3;
+	memory_fault_address = (unsigned long)mapping + 127;
+	memory_fault_signal_code = SEGV_ACCERR;
+	if (!strcmp(operation, "read") || !strcmp(operation, "write-unmapped")) {
+		memory_fault_signal_code = SEGV_MAPERR;
+		memory_fault_error_code = !strcmp(operation, "read") ? 4 : 6;
+		TEST_ASSERT(munmap(mapping, page_size) == 0,
+			    "Fault munmap() failed: %d", errno);
+		if (!strcmp(operation, "read"))
+			(void)*(volatile unsigned char *)memory_fault_address;
+		else
+			*(volatile unsigned char *)memory_fault_address = 0x55;
+		return 1;
+	}
+	if (!strcmp(operation, "write")) {
+		memory_fault_error_code = 7;
+		TEST_ASSERT(mprotect(mapping, page_size, PROT_READ) == 0,
+			    "Fault mprotect() failed: %d", errno);
+		*(volatile unsigned char *)memory_fault_address = 0x55;
+	} else if (!strcmp(operation, "execute")) {
+		memory_fault_error_code = 0x15;
+		((void (*)(void))memory_fault_address)();
+	} else if (!strcmp(operation, "execute-cross-page")) {
+		mapping[page_size - 1] = 0xb8;
+		mapping[page_size] = 0;
+		memory_fault_address = (unsigned long)mapping + page_size;
+		memory_fault_error_code = 0x15;
+		TEST_ASSERT(mprotect(mapping, page_size, PROT_READ | PROT_EXEC) == 0,
+			    "Cross-page mprotect() failed: %d", errno);
+		((void (*)(void))(mapping + page_size - 1))();
+	}
+	return 1;
+}
+
+static void test_protected_memory_fault_metadata(int kvm_fd)
+{
+	static const char * const operations[] = {
+		"read", "write", "write-unmapped", "execute", "execute-cross-page",
+	};
+	struct kvm_protected_task_arm arm = {
+		.size = sizeof(arm),
+	};
+	int status;
+	pid_t child;
+
+	for (int mode = 0; mode < 2; mode++) {
+		for (size_t index = 0; index < ARRAY_SIZE(operations); index++) {
+			child = fork();
+			TEST_ASSERT(child >= 0, "Memory-fault fork() failed: %d", errno);
+			if (!child) {
+				if (mode) {
+					int fd, ret;
+
+					fd = create_context_with_features(kvm_fd,
+							KVM_PROTECTED_TASK_FEATURE_EXEC);
+					ret = ioctl(fd, KVM_PT_ARM_EXEC, &arm);
+					TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
+				}
+				execl("/proc/self/exe", "protected_task_test",
+				      "--memory-fault-target", mode ? "protected" : "native",
+				      operations[index], NULL);
+				_exit(127);
+			}
+			TEST_ASSERT(waitpid(child, &status, 0) == child,
+				    "waitpid() for memory-fault target failed: %d", errno);
+			TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+				    "%s %s fault target failed: %#x",
+				    mode ? "Protected" : "Native", operations[index], status);
+		}
+	}
+}
+
 static int run_mremap_failure_target(bool protected)
 {
 	const size_t length = 256UL * 1024 * 1024;
@@ -6412,6 +6526,11 @@ int main(int argc, char *argv[])
 		return run_entry_target();
 	if (argc == 3 && !strcmp(argv[1], "--syscall-stub-target"))
 		return run_syscall_stub_target(argv[2]);
+	if (argc == 4 && !strcmp(argv[1], "--memory-fault-target")) {
+		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
+			return 127;
+		return run_memory_fault_target(!strcmp(argv[2], "protected"), argv[3]);
+	}
 	if (argc == 3 && !strcmp(argv[1], "--mremap-failure-target")) {
 		if (strcmp(argv[2], "native") && strcmp(argv[2], "protected"))
 			return 127;
@@ -6531,6 +6650,11 @@ int main(int argc, char *argv[])
 	kvm_fd = open_kvm_dev_path_or_exit();
 	TEST_REQUIRE(ioctl(kvm_fd, KVM_CHECK_EXTENSION,
 			   KVM_CAP_PROTECTED_TASK) == 1);
+	if (argc == 2 && !strcmp(argv[1], "--memory-fault-test")) {
+		test_protected_memory_fault_metadata(kvm_fd);
+		close(kvm_fd);
+		return 0;
+	}
 	if (argc == 2 && !strcmp(argv[1], "--mremap-failure-test")) {
 		test_protected_mremap_failure(kvm_fd);
 		close(kvm_fd);
@@ -6570,6 +6694,7 @@ int main(int argc, char *argv[])
 
 	test_create_validation(kvm_fd);
 	test_protected_syscall_stub(kvm_fd);
+	test_protected_memory_fault_metadata(kvm_fd);
 	test_protected_mremap_failure(kvm_fd);
 	test_protected_exec_memlock_limit(kvm_fd);
 	first_fd = create_context(kvm_fd);

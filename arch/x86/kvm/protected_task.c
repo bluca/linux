@@ -1274,7 +1274,7 @@ static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 						  struct pt_regs *regs,
 						  u32 *next_slot)
 {
-	unsigned long address = vcpu->run->memory_fault.gpa & PAGE_MASK;
+	unsigned long address = vcpu->arch.protected_task_pf_address;
 	struct vm_area_struct *vma;
 	unsigned long end = 0;
 	bool access_allowed = false, mapped = false, visible;
@@ -1283,6 +1283,10 @@ static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 	ret = kvm_protected_task_sync_regs(vcpu, regs, false);
 	if (ret)
 		return ret;
+
+	if ((vcpu->arch.protected_task_pf_error_code & X86_PF_INSTR) &&
+	    (address & PAGE_MASK) == (regs->ip & PAGE_MASK))
+		address = regs->ip;
 
 	idx = srcu_read_lock(&vcpu->kvm->srcu);
 	visible = kvm_vcpu_is_visible_gfn(vcpu, address >> PAGE_SHIFT);
@@ -1309,7 +1313,10 @@ static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 
 	if (!mapped || (visible &&
 			!vcpu->arch.protected_task_growdown_fault)) {
-		u32 error_code = X86_PF_USER | (mapped ? X86_PF_PROT : 0);
+		u32 error_code = vcpu->arch.protected_task_pf_error_code &
+			(X86_PF_WRITE | X86_PF_INSTR);
+
+		error_code |= X86_PF_USER | (mapped ? X86_PF_PROT : 0);
 
 		x86_force_sig_user_page_fault(regs, error_code, address,
 					      mapped ? SEGV_ACCERR : SEGV_MAPERR);
@@ -1319,7 +1326,7 @@ static int kvm_protected_task_handle_memory_fault(struct kvm_vcpu *vcpu,
 		return 0;
 
 	ret = kvm_map_user_memory_region(vcpu->kvm, next_slot,
-					 address, end);
+					 address & PAGE_MASK, end);
 	return ret == -EEXIST ? 0 : ret;
 }
 

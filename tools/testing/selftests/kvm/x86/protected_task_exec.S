@@ -2840,7 +2840,7 @@ check_growdown_guard:
 	mov %r14, %r9
 	call prepare_exception
 	movq $7, expected_error_mask(%rip)
-	movq $4, expected_error(%rip)
+	movq $6, expected_error(%rip)
 	movb $1, (%r14)
 .Lgrowdown_guard_resume:
 	call check_exception

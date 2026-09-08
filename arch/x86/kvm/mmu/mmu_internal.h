@@ -337,6 +337,7 @@ static inline void kvm_mmu_prepare_memory_fault_exit(struct kvm_vcpu *vcpu,
 						     struct kvm_page_fault *fault)
 {
 	if (vcpu->kvm->protected_task) {
+		vcpu->arch.protected_task_pf_address = fault->addr;
 		vcpu->arch.protected_task_pf_error_code = fault->error_code;
 		vcpu->arch.protected_task_backing_fault = false;
 	}
