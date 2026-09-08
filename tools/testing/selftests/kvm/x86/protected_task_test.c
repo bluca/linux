@@ -5633,6 +5633,23 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 		    "Software breakpoint produced RIP %#llx, expected %#lx",
 		    regs.rip, breakpoint_rip + 1);
 	TEST_ASSERT(ptrace(PTRACE_POKETEXT, child, (void *)breakpoint_rip,
+			   (void *)((instruction & ~0xffUL) | 0xf1)) == 0,
+		    "PTRACE_POKETEXT ICEBP failed: %d", errno);
+	regs.rip = breakpoint_rip;
+	TEST_ASSERT(ptrace(PTRACE_SETREGS, child, NULL, &regs) == 0,
+		    "PTRACE_SETREGS before ICEBP failed: %d", errno);
+	TEST_ASSERT(ptrace(PTRACE_CONT, child, NULL, NULL) == 0,
+		    "PTRACE_CONT to ICEBP failed: %d", errno);
+	TEST_ASSERT(waitpid(child, &status, 0) == child,
+		    "waitpid() after ICEBP failed: %d", errno);
+	TEST_ASSERT(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP,
+		    "ICEBP produced unexpected status: %#x", status);
+	TEST_ASSERT(ptrace(PTRACE_GETREGS, child, NULL, &regs) == 0,
+		    "PTRACE_GETREGS after ICEBP failed: %d", errno);
+	TEST_ASSERT(regs.rip == breakpoint_rip + 1,
+		    "ICEBP produced RIP %#llx, expected %#lx",
+		    regs.rip, breakpoint_rip + 1);
+	TEST_ASSERT(ptrace(PTRACE_POKETEXT, child, (void *)breakpoint_rip,
 			   (void *)instruction) == 0,
 		    "PTRACE_POKETEXT restore failed: %d", errno);
 	regs = original_regs;
@@ -5657,6 +5674,11 @@ static void test_hardware_breakpoint_ptrace(pid_t child, unsigned long address,
 	TEST_ASSERT(siginfo.si_signo == SIGTRAP && siginfo.si_code == TRAP_HWBKPT,
 		    "Hardware breakpoint produced signal %d/%d",
 		    siginfo.si_signo, siginfo.si_code);
+	TEST_ASSERT(ptrace(PTRACE_GETREGS, child, NULL, &regs) == 0,
+		    "PTRACE_GETREGS after hardware breakpoint failed: %d", errno);
+	TEST_ASSERT(regs.rip == breakpoint_rip,
+		    "Hardware breakpoint advanced RIP to %#llx from %#lx",
+		    regs.rip, breakpoint_rip);
 	errno = 0;
 	dr6 = ptrace(PTRACE_PEEKUSER, child,
 		     (void *)offsetof(struct user, u_debugreg[6]), NULL);

@@ -5533,7 +5533,7 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
 		kvm_run->debug.arch.dr7 = vmcs_readl(GUEST_DR7);
 		fallthrough;
 	case BP_VECTOR:
-		if (vcpu->kvm->protected_task &&
+		if (vcpu->kvm->protected_task && ex_no == BP_VECTOR &&
 		    !skip_emulated_instruction(vcpu))
 			return 1;
 
