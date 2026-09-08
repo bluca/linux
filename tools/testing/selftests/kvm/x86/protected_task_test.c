@@ -6587,9 +6587,8 @@ static void test_protected_exec_memlock_limit(int kvm_fd)
 		TEST_ASSERT(ret == 0, KVM_IOCTL_ERROR(KVM_PT_ARM_EXEC, ret));
 		TEST_ASSERT(setrlimit(RLIMIT_MEMLOCK, &limit) == 0,
 			    "setrlimit(RLIMIT_MEMLOCK) failed: %d", errno);
-		TEST_ASSERT(prctl(PR_SET_SECUREBITS,
-				  SECBIT_NOROOT | SECBIT_NOROOT_LOCKED, 0, 0, 0) == 0,
-			    "PR_SET_SECUREBITS failed: %d", errno);
+		TEST_ASSERT(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0,
+			    "PR_SET_NO_NEW_PRIVS failed: %d", errno);
 		TEST_ASSERT(syscall(SYS_capset, &header, data) == 0,
 			    "capset() failed: %d", errno);
 		execl("/proc/self/exe", "protected_task_test",
